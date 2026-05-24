@@ -1,0 +1,25 @@
+# Build directory
+build/
+
+# CMake generated files (if accidentally created in source dir)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Build artifacts
+*.a
+*.so
+*.dylib
+
+# IDE files
+.vscode/
+.idea/
+.clang-format
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

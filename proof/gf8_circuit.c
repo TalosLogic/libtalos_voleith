@@ -1,0 +1,656 @@
+/*
+ * Copyright (c) 2026 Jason Crawford
+ * SPDX-License-Identifier: AGPL-3.0-only
+ *
+ * gf8_circuit.c - GF(2⁸) element-level circuit definition, builder, and evaluation
+ */
+
+#include "gf8_circuit.h"
+#include "../core/field.h"
+#include <stdlib.h>
+#include <string.h>
+
+/* Initial capacity for dynamic arrays */
+#define INITIAL_WIRE_CAP 64
+#define INITIAL_CONSTRAINT_CAP 16
+
+struct voleith_gf8_circuit {
+    gf8_wire_entry_t *wires;
+    size_t n_wires;
+    size_t cap_wires;
+
+    gf8_constraint_entry_t *constraints;
+    size_t n_constraints;
+    size_t cap_constraints;
+
+    size_t n_witness;
+    size_t n_instance;
+    size_t n_mul;            /* add_mul gate count */
+    size_t n_assert_product; /* assert_product constraint count */
+    int alloc_ok;            /* 0 if any append failed */
+};
+
+/* ================================================================
+ * Helpers
+ * ================================================================ */
+
+/* Append a wire entry; returns the new gf8_wire_id or GF8_WIRE_ID_INVALID */
+static gf8_wire_id
+append_wire(voleith_gf8_circuit_t *c, gf8_wire_entry_t entry)
+{
+    if (c->n_wires == c->cap_wires) {
+        size_t new_cap = c->cap_wires * 2;
+        gf8_wire_entry_t *p =
+            realloc(c->wires, new_cap * sizeof(gf8_wire_entry_t));
+        if (!p) {
+            c->alloc_ok = 0;
+            return GF8_WIRE_ID_INVALID;
+        }
+        c->wires = p;
+        c->cap_wires = new_cap;
+    }
+    gf8_wire_id id = (gf8_wire_id)c->n_wires;
+    c->wires[c->n_wires++] = entry;
+    return id;
+}
+
+/* Append a constraint; marks alloc_ok=0 on failure */
+static void
+append_constraint(voleith_gf8_circuit_t *c, gf8_constraint_entry_t entry)
+{
+    if (c->n_constraints == c->cap_constraints) {
+        size_t new_cap = c->cap_constraints * 2;
+        gf8_constraint_entry_t *p =
+            realloc(c->constraints, new_cap * sizeof(gf8_constraint_entry_t));
+        if (!p) {
+            c->alloc_ok = 0;
+            return;
+        }
+        c->constraints = p;
+        c->cap_constraints = new_cap;
+    }
+    c->constraints[c->n_constraints++] = entry;
+}
+
+/*
+ * Apply an 8×8 GF(2) matrix to a GF(2⁸) element.
+ * matrix[i] is row i; output bit i = popcount(matrix[i] & a) mod 2.
+ */
+static uint8_t
+apply_linear_map(const uint8_t M[8], uint8_t a)
+{
+    uint8_t result = 0;
+    for (int i = 0; i < 8; i++) {
+        uint8_t masked = M[i] & a;
+        /* Compute parity of masked byte */
+        masked ^= masked >> 4;
+        masked ^= masked >> 2;
+        masked ^= masked >> 1;
+        result |= (uint8_t)((masked & 1u) << i);
+    }
+    return result;
+}
+
+/*
+ * Frobenius squaring matrix for GF(2⁸) with polynomial x^8+x^4+x^3+x+1.
+ *
+ * a² is GF(2)-linear: if a = Σ aᵢ·αⁱ, then a² = Σ aᵢ·α^(2i).
+ * We precompute the 8 columns of the squaring matrix (α^0, α^2, α^4, ...,
+ * α^14 each reduced mod P_8), then transpose to get rows.
+ *
+ * α² = 0x04
+ * α⁴ = 0x10
+ * α⁶ = 0x40
+ * α⁸  = α⁴+α³+α+1 = 0x1B  (from P_8: α⁸ = α⁴+α³+α+1)
+ * α^10 = α²·α⁸ = 0x04·0x1B = gf8_mul(4,0x1B) = 0x6C (need to compute)
+ * α^12 = α²·α^10 = ...
+ * α^14 = α²·α^12 = ...
+ *
+ * Hardcoded values: row i of M_sq satisfies (M_sq · a)[i] = bit i of a².
+ * Computed from: the column j of M_sq is the bit representation of α^(2j).
+ */
+static const uint8_t GF8_SQUARE_MATRIX[8] = {
+    /* Row 0: which input bits contribute to output bit 0 of a²? */
+    /* a² = a0·1 + a1·α² + a2·α⁴ + a3·α⁶ + a4·α⁸ + a5·α^10 + a6·α^12 + a7·α^14 */
+    /* α^0  = 0x01, bit 0 of: 0x01=1, 0x04=0, 0x10=0, 0x40=0,
+                              0x1B=1, ?, ?, ?                               */
+    /* Pre-computed values (verified by direct computation below):
+     * alpha^0  = 0x01
+     * alpha^2  = 0x04
+     * alpha^4  = 0x10
+     * alpha^6  = 0x40
+     * alpha^8  = 0x1B  (= alpha^4 + alpha^3 + alpha + 1)
+     * alpha^10 = 0x6C  (= alpha^2 * 0x1B; carry-less: 0x04*0x1B = 0x4+0x8+0x10+0x40 = 0x6C? let me verify)
+     *   0x04 * 0x1B: shift 0x1B left by 2 bits = 0x6C. No reduction needed since degree <= 7.
+     * alpha^12 = alpha^2 * alpha^10 = 0x04 * 0x6C
+     *   shift 0x6C left by 2 = 0x1B0 -> reduce: 0x1B0 XOR (0x11B << 0) = 0x1B0 XOR 0x11B = 0x0AB? No.
+     *   Actually alpha^12 = alpha^4 * alpha^8 = 0x10 * 0x1B = shift 0x1B by 4 = 0x1B0
+     *   0x1B0 = 0b110110000. Bits 8 set. Reduce: XOR 0x11B (= x^8+x^4+x^3+x+1) -> 0x1B0 XOR 0x11B = 0x0AB?
+     *   0x1B0 = 0001 1011 0000
+     *   0x11B = 0001 0001 1011
+     *   XOR  = 0000 1010 1011 = 0xAB. Wait that's 9 bits? Let me redo:
+     *   0x1B0 = 256+128+32+16 = 432. In binary: 1 1011 0000 (9 bits).
+     *   0x11B = 283 = 1 0001 1011 (9 bits).
+     *   XOR = 0 1010 1011 = 0xAB. Yes, alpha^12 = 0xAB.
+     * alpha^14 = alpha^2 * alpha^12 = 0x04 * 0xAB:
+     *   shift 0xAB left by 2: 0x2AC = 10 1010 1100.
+     *   Bit 9 set: XOR 0x11B: 0x2AC XOR 0x11B = 0x197? Wait:
+     *   0x2AC = 0010 1010 1100
+     *   0x11B = 0001 0001 1011
+     *   XOR   = 0011 1011 0111 = 0x3B7? That can't be right (>8 bits).
+     *   Let me redo. 0xAB * 0x04 = shift left 2:
+     *   0xAB = 1010 1011
+     *   << 2  = 10 1010 1100 = 0x2AC (10 bits)
+     *   Reduce bit 9: XOR (0x11B << 1) = 0x236
+     *     0x2AC XOR 0x236 = 0x09A
+     *   Reduce bit 8: 0x09A has bit 8? 0x09A = 154. Bit 8 = 0. Done.
+     *   alpha^14 = 0x9A? Let me double-check with alpha^14 = alpha^8 * alpha^6:
+     *   0x1B * 0x40: shift 0x1B left by 6 = 0x6C0.
+     *   0x6C0 = 0110 1100 0000 (11 bits).
+     *   Reduce bit 10: XOR (0x11B << 2) = 0x46C
+     *     0x6C0 XOR 0x46C = 0x2AC
+     *   Reduce bit 9: XOR (0x11B << 1) = 0x236
+     *     0x2AC XOR 0x236 = 0x09A
+     *   Reduce bit 8: bit 8 of 0x09A = 0. Done.
+     *   alpha^14 = 0x9A. Confirmed.
+     *
+     * Summary:
+     *   a0 -> col 0: alpha^0  = 0x01
+     *   a1 -> col 1: alpha^2  = 0x04
+     *   a2 -> col 2: alpha^4  = 0x10
+     *   a3 -> col 3: alpha^6  = 0x40
+     *   a4 -> col 4: alpha^8  = 0x1B
+     *   a5 -> col 5: alpha^10 = 0x6C
+     *   a6 -> col 6: alpha^12 = 0xAB
+     *   a7 -> col 7: alpha^14 = 0x9A
+     *
+     * The matrix M_sq has column j = alpha^(2j) as a bit vector.
+     * Row i of M_sq = the set of j such that bit i of alpha^(2j) is 1.
+     *
+     * Columns (bit vectors, LSB = row 0):
+     *   col 0 (0x01): row 0
+     *   col 1 (0x04): row 2
+     *   col 2 (0x10): row 4
+     *   col 3 (0x40): row 6
+     *   col 4 (0x1B = 0001 1011): rows 0,1,3,4
+     *   col 5 (0x6C = 0110 1100): rows 2,3,5,6
+     *   col 6 (0xAB = 1010 1011): rows 0,1,3,5,7
+     *   col 7 (0x9A = 1001 1010): rows 1,3,4,7
+     *
+     * Row i = sum (as byte) of 2^j for each j where bit i of col_j is 1:
+     *   row 0: cols {0,4,6}     = 0x01+0x10+0x40     = bit0,bit4,bit6 -> 0b01010001 = 0x51
+     *   row 1: cols {4,6,7}                           = bit4,bit6,bit7 -> 0b11010000 = 0xD0
+     *   row 2: cols {1,5}                             = bit1,bit5      -> 0b00100010 = 0x22
+     *   row 3: cols {4,5,6,7}                         = bit4,bit5,bit6,bit7 -> 0b11110000 = 0xF0?
+     *          Wait. Col 4 has row 3: yes (0x1B bit3=1). Col 5 has row 3: 0x6C=0110 1100 bit3=1.
+     *          Col 6 has row 3: 0xAB=1010 1011 bit3=1. Col 7 has row 3: 0x9A=1001 1010 bit3=1.
+     *          row 3: bits {4,5,6,7} -> 0b11110000 = 0xF0
+     *   row 4: cols {2,4,7}     col2: bit4=1(0x10=0001 0000 bit4=1), col4: 0x1B bit4=1, col7: 0x9A=1001 1010 bit4=1
+     *          row 4: bits {2,4,7} -> 0b10010100 = 0x94
+     *   row 5: cols {5,6}       col5: 0x6C=0110 1100 bit5=1, col6: 0xAB=1010 1011 bit5=1
+     *          row 5: bits {5,6} -> 0b01100000 = 0x60
+     *   row 6: cols {3,5}       col3: 0x40 bit6=1, col5: 0x6C bit6=1
+     *          row 6: bits {3,6} -> 0b01001000 = 0x48? Wait bit 3 of col3: j=3, so bit position in row byte is 2^3=8?
+     *          No, I'm confusing myself. Let me redo clearly.
+     *
+     *          Row i of M_sq is a byte where bit j is 1 iff bit i of alpha^(2j) is 1.
+     *          row 6: bit j = 1 iff bit 6 of alpha^(2j) is 1.
+     *            j=0: bit6 of 0x01 = 0
+     *            j=1: bit6 of 0x04 = 0
+     *            j=2: bit6 of 0x10 = 0
+     *            j=3: bit6 of 0x40 = 1  -> j=3
+     *            j=4: bit6 of 0x1B = 0
+     *            j=5: bit6 of 0x6C = 1  -> j=5 (0x6C = 0110 1100, bit6=1)
+     *            j=6: bit6 of 0xAB = 0  (0xAB = 1010 1011, bit6=0)
+     *            j=7: bit6 of 0x9A = 0  (0x9A = 1001 1010, bit6=0)
+     *          row 6 = (1<<3)|(1<<5) = 0x08|0x20 = 0x28
+     *   row 7: bit j = 1 iff bit 7 of alpha^(2j) is 1.
+     *            j=0: 0
+     *            j=1: 0
+     *            j=2: 0
+     *            j=3: 0
+     *            j=4: 0
+     *            j=5: 0x6C=0110 1100, bit7=0
+     *            j=6: 0xAB=1010 1011, bit7=1  -> j=6
+     *            j=7: 0x9A=1001 1010, bit7=1  -> j=7
+     *          row 7 = (1<<6)|(1<<7) = 0x40|0x80 = 0xC0
+     *
+     * Let me redo rows 0-5 more carefully:
+     * row 0: bit j = 1 iff bit 0 of alpha^(2j) is 1.
+     *   j=0: 0x01 bit0=1 -> j=0
+     *   j=1: 0x04 bit0=0
+     *   j=2: 0x10 bit0=0
+     *   j=3: 0x40 bit0=0
+     *   j=4: 0x1B=0001 1011 bit0=1 -> j=4
+     *   j=5: 0x6C=0110 1100 bit0=0
+     *   j=6: 0xAB=1010 1011 bit0=1 -> j=6
+     *   j=7: 0x9A=1001 1010 bit0=0
+     *   row 0 = (1<<0)|(1<<4)|(1<<6) = 0x01|0x10|0x40 = 0x51 ✓
+     *
+     * row 1: bit j = 1 iff bit 1 of alpha^(2j) is 1.
+     *   j=0: 0x01 bit1=0
+     *   j=1: 0x04 bit1=0
+     *   j=2: 0x10 bit1=0
+     *   j=3: 0x40 bit1=0
+     *   j=4: 0x1B=0001 1011 bit1=1 -> j=4
+     *   j=5: 0x6C=0110 1100 bit1=0
+     *   j=6: 0xAB=1010 1011 bit1=1 -> j=6
+     *   j=7: 0x9A=1001 1010 bit1=1 -> j=7
+     *   row 1 = (1<<4)|(1<<6)|(1<<7) = 0x10|0x40|0x80 = 0xD0 ✓
+     *
+     * row 2: bit j = 1 iff bit 2 of alpha^(2j) is 1.
+     *   j=0: 0
+     *   j=1: 0x04 bit2=1 -> j=1
+     *   j=2: 0
+     *   j=3: 0
+     *   j=4: 0x1B=0001 1011 bit2=0
+     *   j=5: 0x6C=0110 1100 bit2=1 -> j=5
+     *   j=6: 0xAB=1010 1011 bit2=0
+     *   j=7: 0x9A=1001 1010 bit2=0
+     *   row 2 = (1<<1)|(1<<5) = 0x02|0x20 = 0x22 ✓
+     *
+     * row 3: bit j = 1 iff bit 3 of alpha^(2j) is 1.
+     *   j=0: 0
+     *   j=1: 0
+     *   j=2: 0
+     *   j=3: 0
+     *   j=4: 0x1B=0001 1011 bit3=1 -> j=4
+     *   j=5: 0x6C=0110 1100 bit3=1 -> j=5
+     *   j=6: 0xAB=1010 1011 bit3=1 -> j=6
+     *   j=7: 0x9A=1001 1010 bit3=1 -> j=7
+     *   row 3 = (1<<4)|(1<<5)|(1<<6)|(1<<7) = 0x10|0x20|0x40|0x80 = 0xF0 ✓
+     *
+     * row 4: bit j = 1 iff bit 4 of alpha^(2j) is 1.
+     *   j=0: 0
+     *   j=1: 0
+     *   j=2: 0x10 bit4=1 -> j=2
+     *   j=3: 0
+     *   j=4: 0x1B=0001 1011 bit4=1 -> j=4
+     *   j=5: 0x6C=0110 1100 bit4=0
+     *   j=6: 0xAB=1010 1011 bit4=0
+     *   j=7: 0x9A=1001 1010 bit4=1 -> j=7
+     *   row 4 = (1<<2)|(1<<4)|(1<<7) = 0x04|0x10|0x80 = 0x94 ✓
+     *
+     * row 5: bit j = 1 iff bit 5 of alpha^(2j) is 1.
+     *   j=0: 0
+     *   j=1: 0
+     *   j=2: 0
+     *   j=3: 0
+     *   j=4: 0x1B=0001 1011 bit5=0
+     *   j=5: 0x6C=0110 1100 bit5=1 -> j=5
+     *   j=6: 0xAB=1010 1011 bit5=1 -> j=6
+     *   j=7: 0x9A=1001 1010 bit5=0
+     *   row 5 = (1<<5)|(1<<6) = 0x20|0x40 = 0x60 ✓
+     *
+     * Final matrix rows: {0x51, 0xD0, 0x22, 0xF0, 0x94, 0x60, 0x28, 0xC0}
+     */
+    0x51, 0xD0, 0x22, 0xF0, 0x94, 0x60, 0x28, 0xC0};
+
+/* ================================================================
+ * Lifecycle
+ * ================================================================ */
+
+voleith_gf8_circuit_t *
+voleith_gf8_circuit_new(void)
+{
+    voleith_gf8_circuit_t *c = calloc(1, sizeof(voleith_gf8_circuit_t));
+    if (!c)
+        return NULL;
+
+    c->wires = calloc(INITIAL_WIRE_CAP, sizeof(gf8_wire_entry_t));
+    if (!c->wires) {
+        free(c);
+        return NULL;
+    }
+    c->cap_wires = INITIAL_WIRE_CAP;
+
+    c->constraints =
+        calloc(INITIAL_CONSTRAINT_CAP, sizeof(gf8_constraint_entry_t));
+    if (!c->constraints) {
+        free(c->wires);
+        free(c);
+        return NULL;
+    }
+    c->cap_constraints = INITIAL_CONSTRAINT_CAP;
+    c->alloc_ok = 1;
+
+    return c;
+}
+
+void
+voleith_gf8_circuit_free(voleith_gf8_circuit_t *c)
+{
+    if (!c)
+        return;
+    free(c->wires);
+    free(c->constraints);
+    free(c);
+}
+
+/* ================================================================
+ * Builder API
+ * ================================================================ */
+
+gf8_wire_id
+voleith_gf8_add_witness(voleith_gf8_circuit_t *c)
+{
+    gf8_wire_entry_t e = {
+        .kind = GF8_WIRE_WITNESS,
+        .a = GF8_WIRE_ID_INVALID,
+        .b = GF8_WIRE_ID_INVALID,
+        .const_val = 0,
+        .matrix = {0},
+    };
+    gf8_wire_id id = append_wire(c, e);
+    if (id != GF8_WIRE_ID_INVALID)
+        c->n_witness++;
+    return id;
+}
+
+gf8_wire_id
+voleith_gf8_add_instance(voleith_gf8_circuit_t *c)
+{
+    gf8_wire_entry_t e = {
+        .kind = GF8_WIRE_INSTANCE,
+        .a = GF8_WIRE_ID_INVALID,
+        .b = GF8_WIRE_ID_INVALID,
+        .const_val = 0,
+        .matrix = {0},
+    };
+    gf8_wire_id id = append_wire(c, e);
+    if (id != GF8_WIRE_ID_INVALID)
+        c->n_instance++;
+    return id;
+}
+
+gf8_wire_id
+voleith_gf8_add_const(voleith_gf8_circuit_t *c, uint8_t val)
+{
+    gf8_wire_entry_t e = {
+        .kind = GF8_WIRE_CONST,
+        .a = GF8_WIRE_ID_INVALID,
+        .b = GF8_WIRE_ID_INVALID,
+        .const_val = val,
+        .matrix = {0},
+    };
+    return append_wire(c, e);
+}
+
+gf8_wire_id
+voleith_gf8_add_xor(voleith_gf8_circuit_t *c, gf8_wire_id a, gf8_wire_id b)
+{
+    gf8_wire_entry_t e = {
+        .kind = GF8_WIRE_XOR,
+        .a = a,
+        .b = b,
+        .const_val = 0,
+        .matrix = {0},
+    };
+    return append_wire(c, e);
+}
+
+gf8_wire_id
+voleith_gf8_add_xor_const(voleith_gf8_circuit_t *c, gf8_wire_id a, uint8_t k)
+{
+    gf8_wire_entry_t e = {
+        .kind = GF8_WIRE_XOR_CONST,
+        .a = a,
+        .b = GF8_WIRE_ID_INVALID,
+        .const_val = k,
+        .matrix = {0},
+    };
+    return append_wire(c, e);
+}
+
+gf8_wire_id
+voleith_gf8_add_linear_map(voleith_gf8_circuit_t *c, gf8_wire_id a,
+                           const uint8_t M[8])
+{
+    gf8_wire_entry_t e = {
+        .kind = GF8_WIRE_LINEAR_MAP,
+        .a = a,
+        .b = GF8_WIRE_ID_INVALID,
+        .const_val = 0,
+    };
+    memcpy(e.matrix, M, 8);
+    return append_wire(c, e);
+}
+
+gf8_wire_id
+voleith_gf8_add_square(voleith_gf8_circuit_t *c, gf8_wire_id a)
+{
+    gf8_wire_entry_t e = {
+        .kind = GF8_WIRE_SQUARE,
+        .a = a,
+        .b = GF8_WIRE_ID_INVALID,
+        .const_val = 0,
+        .matrix = {0},
+    };
+    return append_wire(c, e);
+}
+
+gf8_wire_id
+voleith_gf8_add_mul(voleith_gf8_circuit_t *c, gf8_wire_id a, gf8_wire_id b)
+{
+    gf8_wire_entry_t e = {
+        .kind = GF8_WIRE_MUL,
+        .a = a,
+        .b = b,
+        .const_val = 0,
+        .matrix = {0},
+    };
+    gf8_wire_id id = append_wire(c, e);
+    if (id != GF8_WIRE_ID_INVALID)
+        c->n_mul++;
+    return id;
+}
+
+gf8_wire_id
+voleith_gf8_add_mux(voleith_gf8_circuit_t *c, gf8_wire_id a, gf8_wire_id b,
+                    gf8_wire_id sel)
+{
+    /*
+     * MUX(a, b, sel) = a XOR (sel · (b XOR a))
+     *
+     * Expansion:
+     *   diff = b XOR a        (free XOR gate)
+     *   prod = sel · diff     (one MUL gate - costs one VOLE slot)
+     *   out  = a XOR prod     (free XOR gate)
+     */
+    gf8_wire_id diff = voleith_gf8_add_xor(c, b, a);
+    if (diff == GF8_WIRE_ID_INVALID)
+        return GF8_WIRE_ID_INVALID;
+
+    gf8_wire_id prod = voleith_gf8_add_mul(c, sel, diff);
+    if (prod == GF8_WIRE_ID_INVALID)
+        return GF8_WIRE_ID_INVALID;
+
+    return voleith_gf8_add_xor(c, a, prod);
+}
+
+void
+voleith_gf8_assert_zero(voleith_gf8_circuit_t *c, gf8_wire_id w)
+{
+    gf8_constraint_entry_t e = {
+        .kind = GF8_CONSTRAINT_ZERO,
+        .a = w,
+        .b = GF8_WIRE_ID_INVALID,
+        .c = GF8_WIRE_ID_INVALID,
+    };
+    append_constraint(c, e);
+}
+
+void
+voleith_gf8_assert_equal(voleith_gf8_circuit_t *c, gf8_wire_id a, gf8_wire_id b)
+{
+    gf8_constraint_entry_t e = {
+        .kind = GF8_CONSTRAINT_EQUAL,
+        .a = a,
+        .b = b,
+        .c = GF8_WIRE_ID_INVALID,
+    };
+    append_constraint(c, e);
+}
+
+void
+voleith_gf8_assert_product(voleith_gf8_circuit_t *c, gf8_wire_id a,
+                           gf8_wire_id b, gf8_wire_id c_expected)
+{
+    gf8_constraint_entry_t e = {
+        .kind = GF8_CONSTRAINT_PRODUCT,
+        .a = a,
+        .b = b,
+        .c = c_expected,
+    };
+    append_constraint(c, e);
+    if (c->alloc_ok)
+        c->n_assert_product++;
+}
+
+/* ================================================================
+ * Introspection
+ * ================================================================ */
+
+size_t
+voleith_gf8_circuit_wire_count(const voleith_gf8_circuit_t *c)
+{
+    return c->n_wires;
+}
+
+size_t
+voleith_gf8_circuit_witness_count(const voleith_gf8_circuit_t *c)
+{
+    return c->n_witness;
+}
+
+size_t
+voleith_gf8_circuit_instance_count(const voleith_gf8_circuit_t *c)
+{
+    return c->n_instance;
+}
+
+size_t
+voleith_gf8_circuit_mul_count(const voleith_gf8_circuit_t *c)
+{
+    return c->n_mul;
+}
+
+size_t
+voleith_gf8_circuit_assert_product_count(const voleith_gf8_circuit_t *c)
+{
+    return c->n_assert_product;
+}
+
+size_t
+voleith_gf8_circuit_constraint_count(const voleith_gf8_circuit_t *c)
+{
+    return c->n_constraints;
+}
+
+size_t
+voleith_gf8_qs_ell(const voleith_gf8_circuit_t *c)
+{
+    return c->n_witness + c->n_mul;
+}
+
+int
+voleith_gf8_circuit_ok(const voleith_gf8_circuit_t *c)
+{
+    return c->alloc_ok;
+}
+
+const gf8_wire_entry_t *
+voleith_gf8_circuit_wires(const voleith_gf8_circuit_t *c)
+{
+    return c->wires;
+}
+
+const gf8_constraint_entry_t *
+voleith_gf8_circuit_constraints(const voleith_gf8_circuit_t *c)
+{
+    return c->constraints;
+}
+
+/* ================================================================
+ * Evaluation
+ * ================================================================ */
+
+int
+voleith_gf8_circuit_eval(const voleith_gf8_circuit_t *c, const uint8_t *witness,
+                         const uint8_t *instance, uint8_t *wire_vals)
+{
+    if (!c || !wire_vals)
+        return -1;
+
+    size_t witness_idx = 0;
+    size_t instance_idx = 0;
+
+    for (size_t i = 0; i < c->n_wires; i++) {
+        const gf8_wire_entry_t *w = &c->wires[i];
+        uint8_t val = 0;
+
+        switch (w->kind) {
+        case GF8_WIRE_WITNESS:
+            val = witness ? witness[witness_idx++] : 0;
+            break;
+        case GF8_WIRE_INSTANCE:
+            val = instance ? instance[instance_idx++] : 0;
+            break;
+        case GF8_WIRE_CONST:
+            val = w->const_val;
+            break;
+        case GF8_WIRE_XOR:
+            val = wire_vals[w->a] ^ wire_vals[w->b];
+            break;
+        case GF8_WIRE_XOR_CONST:
+            val = wire_vals[w->a] ^ w->const_val;
+            break;
+        case GF8_WIRE_LINEAR_MAP:
+            val = apply_linear_map(w->matrix, wire_vals[w->a]);
+            break;
+        case GF8_WIRE_SQUARE:
+            val = apply_linear_map(GF8_SQUARE_MATRIX, wire_vals[w->a]);
+            break;
+        case GF8_WIRE_MUL:
+            val = voleith_gf8_mul(wire_vals[w->a], wire_vals[w->b]);
+            break;
+        }
+
+        wire_vals[i] = val;
+    }
+
+    /* Returns 1 if all constraints satisfied, 0 if any violated, -1 on error. */
+    return voleith_gf8_circuit_check_constraints(c, wire_vals);
+}
+
+/*
+ * Returns 1 if every constraint holds for wire_vals, 0 if any is violated.
+ * Never returns -1: a NULL check must be done by the caller before calling
+ * this function (voleith_gf8_circuit_eval handles that guard).
+ */
+int
+voleith_gf8_circuit_check_constraints(const voleith_gf8_circuit_t *c,
+                                      const uint8_t *wire_vals)
+{
+    for (size_t i = 0; i < c->n_constraints; i++) {
+        const gf8_constraint_entry_t *con = &c->constraints[i];
+        switch (con->kind) {
+        case GF8_CONSTRAINT_ZERO:
+            if (wire_vals[con->a] != 0x00)
+                return 0;
+            break;
+        case GF8_CONSTRAINT_EQUAL:
+            if (wire_vals[con->a] != wire_vals[con->b])
+                return 0;
+            break;
+        case GF8_CONSTRAINT_PRODUCT: {
+            uint8_t prod =
+                voleith_gf8_mul(wire_vals[con->a], wire_vals[con->b]);
+            if (prod != wire_vals[con->c])
+                return 0;
+            break;
+        }
+        }
+    }
+    return 1;
+}
