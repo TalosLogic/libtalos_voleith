@@ -577,7 +577,7 @@ test_end_to_end(void)
         uint8_t path_dirs[3] = {1, 0, 1};
 
         uint8_t circuit_root[16];
-        eval_full_proof(leaf5, 16, 3, (const uint8_t (*)[16])path_nodes,
+        eval_full_proof(leaf5, 16, 3, (const uint8_t(*)[16])path_nodes,
                         path_dirs, hash, circuit_root);
 
         if (!use_cmac)
@@ -706,7 +706,7 @@ test_wrong_path_rejected(void)
     bad_nodes[0][0] ^= 0xff;
 
     uint8_t bad_root[16];
-    eval_full_proof(leaf5, 16, 3, (const uint8_t (*)[16])bad_nodes, path_dirs,
+    eval_full_proof(leaf5, 16, 3, (const uint8_t(*)[16])bad_nodes, path_dirs,
                     VOLEITH_MERKLE_HASH_AES_DM, bad_root);
 
     check("Wrong sibling produces different root (soundness)",
@@ -797,7 +797,7 @@ test_cmac256_end_to_end(void)
     uint8_t path_dirs[3] = {1, 0, 1};
 
     uint8_t circuit_root[16];
-    eval_full_proof(leaf5, 16, 3, (const uint8_t (*)[16])path_nodes, path_dirs,
+    eval_full_proof(leaf5, 16, 3, (const uint8_t(*)[16])path_nodes, path_dirs,
                     VOLEITH_MERKLE_HASH_AES256_CMAC, circuit_root);
 
     check("CMAC256 end-to-end depth-3 tree (leaf[5] → root)",

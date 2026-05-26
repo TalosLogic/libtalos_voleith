@@ -1,0 +1,156 @@
+================================================================
+voleith dudect timing-validation evidence trail
+Architecture: aarch64
+Host:         macOS 15.7.7 / Apple M1
+Date:         2026-05-26
+================================================================
+
+Environment
+-----------
+  CPU:        Apple M1 (Firestorm P-cluster + Icestorm E-cluster)
+  RAM:        8 GB
+  OS:         macOS 15.7.7
+  Compiler:   Apple clang / Xcode toolchain
+  Target:     voleith_core_dudect (no hardware acceleration flags;
+              ARMv8 AES / PMULL / x86 CLMUL / AES-NI all disabled so
+              the binary exercises core/aes_ct64.c and the
+              constant-time software field paths in core/field.c).
+
+Build
+-----
+  cmake -S . -B build -DVOLEITH_BUILD_DUDECT=ON
+  cmake --build build --target dudect
+
+Runtime (varies by run; see each Run block below)
+-------
+  Crop:       [1.00%, 99.00%]
+  Threshold:  |t| > 4.5  ->  FAIL
+
+
+================================================================
+Run 1 -- 2026-05-26  --all --samples 100000  (pre-Phase C baseline)
+================================================================
+
+  Timer:    clock_gettime(CLOCK_MONOTONIC) [ns]   (Phase A stub)
+  Affinity: not implemented on this platform
+
+  sentinel_leak             |t| = 1621.52  FAIL  (expected sanity check)
+  sentinel_clean            |t| =    0.32  PASS
+  aes_ct64_encrypt_key      |t| =    0.30  PASS
+  aes_ct64_encrypt_x4_key   |t| =    0.34  PASS
+  aes_ct64_encrypt_pt       |t| =    0.70  PASS
+  aes_ct64_encrypt_x4_pt    |t| =    0.17  PASS
+  voleith_gf128_mul         |t| =    0.78  PASS
+  voleith_gf192_mul         |t| =    1.23  PASS
+  voleith_gf256_mul         |t| =    0.49  PASS
+  voleith_byte_combine_128  |t| =    0.07  PASS
+  voleith_byte_combine_192  |t| =    1.75  PASS
+  voleith_byte_combine_256  |t| =    2.58  PASS
+
+  Notes:
+    Phase A stub timer (clock_gettime, ~25-50 ns call overhead) and
+    no CPU affinity.  All 9 real targets PASS; informational rather
+    than release-gate quality.  Cross-uarch confirmation that the
+    constant-time discipline holds on Apple Silicon Firestorm even
+    before the harness gains its native cycle counter.
+
+
+================================================================
+Run 2 -- 2026-05-26  --all --samples 100000  (Phase C wired up)
+================================================================
+
+  Timer:    CNTVCT_EL0 (aarch64 macOS, 24 MHz, ~41.7 ns/tick)
+  Affinity: pinned to CPU 0 (thread_policy_set + qos hint)
+  Note:     macOS exposes no user-space CPU governor; P/E-core
+            migration remains a residual noise source.
+
+  sentinel_leak             |t| = 4607.15  FAIL  (expected sanity check)
+  sentinel_clean            |t| =    0.18  PASS
+  aes_ct64_encrypt_key      |t| =    0.53  PASS
+  aes_ct64_encrypt_x4_key   |t| =    1.46  PASS
+  aes_ct64_encrypt_pt       |t| =    0.51  PASS
+  aes_ct64_encrypt_x4_pt    |t| =    0.71  PASS
+  voleith_gf128_mul         |t| =    2.11  PASS  (see Run 4)
+  voleith_gf192_mul         |t| =    0.30  PASS
+  voleith_gf256_mul         |t| =    0.03  PASS
+  voleith_byte_combine_128  |t| =    1.99  PASS  (see Run 3)
+  voleith_byte_combine_192  |t| =    0.33  PASS
+  voleith_byte_combine_256  |t| =    0.84  PASS
+
+  Notes:
+    Phase C plumbing landed cleanly.  CNTVCT_EL0 timer dropped
+    per-trial measurement noise by ~4x relative to the Run 1 stub
+    (sentinel_clean sigma/mu went from 10.0% to 2.6%), and the
+    sharper resolution drove |t| values for `gf128_mul` (2.11) and
+    `byte_combine_128` (1.99) higher than their Run 1 readings.
+    Both lie inside [3.0, 4.5) once doubled, so per the
+    borderline-result protocol in docs/DUDECT_TIMING_VALIDATION.md
+    they got 5x-sample re-runs (Runs 3 and 4) before the verdict
+    was recorded.
+
+    Cross-uarch comparison: cycle counts here are in CNTVCT_EL0
+    ticks (~41.7 ns each), not nanoseconds or x86 cycles, so the
+    absolute mu values are not directly comparable to the x86_64
+    runs in this directory.  The t-statistic is dimensionless and
+    is the cross-platform measure.
+
+
+================================================================
+Run 3 -- 2026-05-26  --target voleith_byte_combine_128 --samples 1000000
+================================================================
+
+  Timer:    CNTVCT_EL0; affinity pinned to CPU 0
+  Running |t| trace: 0.51, 0.28, 0.05, 0.02, 0.17, 0.40, 0.19, 0.24, 0.46, 0.39
+  class A:  mu = 287.86  sigma = 4.81  n = 980000 (cropped 20000)
+  class B:  mu = 287.86  sigma = 4.81  n = 980000 (cropped 20000)
+  |t| = 0.39  ->  PASS
+
+  Verdict: PASS.  |t| walked around zero rather than scaling with
+  sqrt(n) -- a real signal at 10x samples would have produced
+  |t| ~ 6.3 (1.99 * sqrt(10)); we got 0.39.  The Run 2 reading
+  of 1.99 was host-noise drift across the run, not a structural
+  data-dependent effect.
+
+
+================================================================
+Run 4 -- 2026-05-26  --target voleith_gf128_mul --samples 1000000
+================================================================
+
+  Timer:    CNTVCT_EL0; affinity pinned to CPU 0
+  Running |t| trace: 0.31, 0.20, 0.56, 0.70, 0.67, 0.53, 0.73, 0.79, 0.78, 0.80
+  class A:  mu = 4008.61  sigma = 94.53  n = 980000 (cropped 20000)
+  class B:  mu = 4008.50  sigma = 94.10  n = 980000 (cropped 20000)
+  |t| = 0.80  ->  PASS
+
+  Verdict: PASS.  |t| plateaued near 0.8 across the run rather than
+  scaling with sqrt(n) -- a real signal would have produced
+  |t| ~ 6.7 (2.11 * sqrt(10)); we got 0.80.  Same noise-convergence
+  signature as Run 3.  The Run 2 reading was the sharper CNTVCT_EL0
+  timer exposing residual host-state drift that the Phase A stub
+  timer smeared away, not a structural leak.
+
+
+================================================================
+Phase C status as of 2026-05-26  (macOS aarch64 / Apple M1)
+================================================================
+
+  Phase C plumbing complete on macOS aarch64:
+    C1.  CNTVCT_EL0 inline-asm timer with leading ISB barrier --
+         in place (timer banner reports it; Run 2 noise floor
+         is ~4x cleaner than the Run 1 stub baseline).
+    C2.  thread_policy_set + pthread_set_qos_class_self_np for
+         best-effort P-core affinity -- in place (affinity banner
+         reports pinned to CPU 0).
+    C3.  Sentinel re-validation under the cycle-counter timer --
+         sentinel_leak |t| = 4607 (planted leak still detected
+         strongly), sentinel_clean |t| = 0.18 (well below 4.5).
+    C4.  --all run captured (Run 2) plus two follow-up 1M-sample
+         re-runs (Runs 3 and 4) confirming the two borderline
+         Run 2 readings as host-noise rather than structural
+         signal.
+
+  Verdict for this platform: all 9 real targets PASS at the
+  release-gate sample count.  Source-level constant-time guarantee
+  for core/aes_ct64.c and the software paths in core/field.c is
+  supported on Apple Silicon by both structural review (security-
+  review items C-2, C-3) and empirical validation (this file).

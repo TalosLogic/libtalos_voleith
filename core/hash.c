@@ -19,9 +19,18 @@
 /* ---- Little-endian helpers ---- */
 
 static inline uint64_t
-rotl64(uint64_t x, int n)
+rotl64(uint64_t x, unsigned int n)
 {
-    return (x << n) | (x >> (64 - n));
+    /*
+     * Rotation-by-variable with no UB for n == 0.  C11 6.5.7p3 makes
+     * shifting a 64-bit value by 64 undefined; the naive
+     * (x << n) | (x >> (64 - n)) form hits that when n == 0 (which
+     * happens for Keccak lane (0, 0) whose ROT offset is 0).
+     * The (-n) & 63 idiom keeps both shift amounts in [0, 63] for any
+     * n in [0, 63], and compilers emit a single ROR/ROL instruction.
+     */
+    n &= 63;
+    return (x << n) | (x >> ((-n) & 63));
 }
 
 /* ---- Keccak-f[1600] round constants (FIPS 202 Section 3.2.5) ---- */
@@ -40,7 +49,7 @@ static const uint64_t RC[24] = {
 /*
  * Rotation offsets for ρ (FIPS 202 Table 2), indexed as ROT[x + 5*y] mod 64.
  */
-static const int ROT[25] = {
+static const unsigned int ROT[25] = {
     0,  1,  62, 28, 27, /* y=0: x=0..4 */
     36, 44, 6,  55, 20, /* y=1: x=0..4 */
     3,  10, 43, 25, 39, /* y=2: x=0..4 */

@@ -10,8 +10,9 @@
  *
  * Backend selection happens at compile time, in this priority:
  *   1. AES-NI         (x86_64; VOLEITH_HAVE_AES_NI defined).
- *   2. Variable-time  (test/debug only; VOLEITH_ALLOW_VARIABLE_TIME_AES).
- *   3. Bitsliced      (portable constant-time; default fallback).
+ *   2. ARMv8 Crypto   (aarch64; VOLEITH_HAVE_ARMV8_AES defined).
+ *   3. Variable-time  (test/debug only; VOLEITH_ALLOW_VARIABLE_TIME_AES).
+ *   4. Bitsliced      (portable constant-time; default fallback).
  *
  * The bitsliced backend (core/aes_ct64.c) is the universal fallback
  * and is always compiled in.  The variable-time path is gated off
@@ -38,10 +39,21 @@
  * code that peeks at ctx.rk[] (e.g., FIPS 197 Appendix A round-key
  * inspection in test_aes.c) only applies to the byte-rep backends.
  */
-#if defined(VOLEITH_HAVE_AES_NI) || defined(VOLEITH_ALLOW_VARIABLE_TIME_AES)
+#if defined(VOLEITH_HAVE_AES_NI) || defined(VOLEITH_HAVE_ARMV8_AES) ||         \
+    defined(VOLEITH_ALLOW_VARIABLE_TIME_AES)
 
+/*
+ * The AES-NI key-expand and encrypt paths cast ctx->rk to (__m128i *)
+ * and dereference it as rk[i], which compilers emit as MOVDQA
+ * (aligned-only).  Without an explicit alignment the struct's natural
+ * alignment is _Alignof(int) = 4 and a stack-local instance can land
+ * on an offset that #GP-faults the aligned store/load.  Forcing
+ * 16-byte alignment on rk also bumps the struct's alignment so
+ * embeddings (heap, stack, or as a member of a larger struct) carry
+ * the requirement through.
+ */
 typedef struct {
-    uint8_t rk[VOLEITH_AES_MAX_RK_BYTES];
+    _Alignas(16) uint8_t rk[VOLEITH_AES_MAX_RK_BYTES];
     int nr;
 } voleith_aes_ctx_t;
 

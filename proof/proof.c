@@ -319,9 +319,8 @@ voleith_prove_commit(voleith_prover_commit_t **ctx_out,
     }
 
     /* Step 2: VOLEitH commit */
-    int commit_rc =
-        voleith_commit(&ctx->com, &ctx->state, &ctx->vcp, root_seed, iv_ptr,
-                       (unsigned int)ellhat);
+    int commit_rc = voleith_commit(&ctx->com, &ctx->state, &ctx->vcp, root_seed,
+                                   iv_ptr, (unsigned int)ellhat);
     voleith_secure_zero(root_seed, sizeof(root_seed));
     if (commit_rc != 0) {
         voleith_prover_commit_free(ctx);

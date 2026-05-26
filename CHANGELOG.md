@@ -5,6 +5,53 @@ All notable changes to libtalos_voleith are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-05-26
+
+### Added
+
+- ARMv8 AES hardware backend (`core/aes.c`): AArch64 Crypto Extension
+  (`AESE` / `AESD` / `AESMC` / `AESIMC` via `<arm_neon.h>`) for
+  AES-128 / AES-256 encryption, key expansion, and the
+  `voleith_aes_encrypt_x4()` batched path. Dispatched alongside the
+  existing x86 AES-NI and constant-time bitsliced backends.
+- ARMv8 PMULL / PMULL2 hardware backend (`core/field.c`): carry-less
+  GF(2^k) multiplication via `vmull_p64` / `vmull_high_p64` for
+  k ∈ {64, 128, 192, 256}, the AArch64 analogue of the existing x86
+  CLMUL path. Gated behind the new `VOLEITH_HAVE_PMULL` define.
+- CMake now detects AArch64 AES and PMULL extensions in addition to
+  the existing x86 AES-NI / CLMUL detection, and only builds the
+  test variants whose required hardware extension was detected on
+  the host.
+- dudect-style empirical timing-validation harness under
+  `tools/dudect/`, gated behind `VOLEITH_BUILD_DUDECT` (default OFF).
+  Welch's two-sample t-test with symmetric percentile cropping per
+  Reparaz, Balasch, Verbauwhede (NDSS 2017). RDTSCP timer on x86_64,
+  inline-asm `CNTVCT_EL0` with ISB barrier on aarch64,
+  `clock_gettime` fallback. CPU pinning via `sched_setaffinity` on
+  Linux and `thread_policy_set` + `QOS_CLASS_USER_INTERACTIVE` on
+  macOS. Ten real targets (`aes_ct64_encrypt[_x4]_key`,
+  `aes_ct64_encrypt[_x4]_pt`, `voleith_gf{128,192,256}_mul`,
+  `voleith_byte_combine_{128,192,256}`) plus two self-validation
+  sentinels. Cross-platform evidence on Sandy Bridge, Gracemont, and
+  Apple M1 under `docs/dudect-runs/`. Issue #86.
+
+### Fixed
+
+- `voleith_aes_ctx_t::rk` now declared with `_Alignas(16)`. The
+  AES-NI key-expand and encrypt paths cast `rk` to `__m128i *` and
+  emit `MOVDQA` (aligned-only); without an explicit annotation the
+  struct's natural alignment was 4 bytes, so a stack-local context
+  could land on an unaligned offset and `#GP`. Latent in v1.0.1 but
+  masked on gcc-14 (which over-aligns stack locals when it sees
+  `__m128i` activity); reproducible on clang-14.
+- `rotl64` in `core/hash.c` no longer relies on `(64 - n) % 64` for
+  the reverse shift, which is undefined behaviour when `n == 0` and
+  was miscompiled on Apple Clang / Xcode 26.2. Replaced with the
+  `(-n) & 63` idiom. Issue #85.
+- `voleith_secure_zero()` on Apple targets falls back to the
+  volatile-pointer loop rather than calling `explicit_bzero`, which
+  is no longer exposed in recent macOS SDKs. Issue #83.
+
 ## [1.0.1] - 2026-05-23
 
 Security-hardening release. Every change in this version stems from a
@@ -42,7 +89,7 @@ callers that ignored the prove return value should review their flow.
   malformed parameter structs (invalid λ, τ = 0, τ > 32, w_grind ≥ λ,
   n_leafcom not in {2, 3}, T_open = 0) before any allocation or
   cryptographic work.
-- `docs/DESIGN.md` — design-rationale document covering the five-layer
+- `docs/DESIGN.md` - design-rationale document covering the five-layer
   architecture, the two-variant proof-system rationale, the circuit API as
   the core abstraction, VOLEitH versus interactive VOLE, two-phase
   Fiat-Shamir composition, parameter-set sizing trade-offs, the FAEST

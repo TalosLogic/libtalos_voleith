@@ -94,7 +94,7 @@ set_bit(uint8_t *buf, size_t pos, uint8_t val)
     if (val & 1)
         buf[pos / 8] |= (uint8_t)(1u << (pos % 8));
     else
-        buf[pos / 8] &= (uint8_t)~(1u << (pos % 8));
+        buf[pos / 8] &= (uint8_t) ~(1u << (pos % 8));
 }
 
 /* =====================================================================

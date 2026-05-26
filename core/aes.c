@@ -31,8 +31,7 @@
  * backend is active.  Greppable by build pipelines via the literal
  * prefix "voleith:".  Uses #pragma message rather than #warning so
  * it does not break -Werror builds on platforms where the bitsliced
- * fallback is the correct production choice (ARM without crypto
- * extension, RISC-V, etc.).
+ * fallback is the correct production choice (RISC-V, etc.).
  *
  * The variable-time path triggers its own loud CMake warning when
  * VOLEITH_ALLOW_VARIABLE_TIME_AES is set; no separate compile-time
@@ -391,6 +390,190 @@ encrypt_ni(const voleith_aes_ctx_t *ctx, uint8_t out[16], const uint8_t in[16])
 #endif /* VOLEITH_HAVE_AES_NI */
 
 /* ========================================================================
+ * ARMv8 Crypto Extension implementation
+ * ======================================================================== */
+
+#ifdef VOLEITH_HAVE_ARMV8_AES
+
+#include <arm_neon.h>
+
+/*
+ * Constant-time SubWord for key expansion.
+ *
+ * Places the 4 input bytes in AES state column 0, applies AESE with a zero
+ * round key (which performs SubBytes then ShiftRows), then extracts the
+ * substituted bytes from their post-ShiftRows positions:
+ *
+ *   (row 0, col 0) → stays at index 0
+ *   (row 1, col 0) → moves to (row 1, col 3) → index 1 + 4*3 = 13
+ *   (row 2, col 0) → moves to (row 2, col 2) → index 2 + 4*2 = 10
+ *   (row 3, col 0) → moves to (row 3, col 1) → index 3 + 4*1 = 7
+ *
+ * This is constant-time because AESE uses hardware S-box logic with no
+ * cache-indexed table lookups.
+ */
+static inline void
+armv8_subword(uint8_t out[4], const uint8_t in[4])
+{
+    uint8x16_t state = vdupq_n_u8(0);
+    state = vsetq_lane_u8(in[0], state, 0);
+    state = vsetq_lane_u8(in[1], state, 1);
+    state = vsetq_lane_u8(in[2], state, 2);
+    state = vsetq_lane_u8(in[3], state, 3);
+    state = vaeseq_u8(state, vdupq_n_u8(0));
+    out[0] = vgetq_lane_u8(state, 0);
+    out[1] = vgetq_lane_u8(state, 13);
+    out[2] = vgetq_lane_u8(state, 10);
+    out[3] = vgetq_lane_u8(state, 7);
+}
+
+/* Round constants (FIPS 197 Table 5) - public values, not secret. */
+static const uint8_t ARMV8_RCON[11] = {
+    0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36,
+};
+
+static void
+key_expand_128_armv8(voleith_aes_ctx_t *ctx, const uint8_t *key)
+{
+    memcpy(ctx->rk, key, 16);
+    for (int i = 4; i < 44; i++) {
+        uint8_t temp[4];
+        memcpy(temp, &ctx->rk[4 * (i - 1)], 4);
+        if (i % 4 == 0) {
+            /* RotWord */
+            uint8_t t = temp[0];
+            temp[0] = temp[1];
+            temp[1] = temp[2];
+            temp[2] = temp[3];
+            temp[3] = t;
+            /* SubWord (constant-time via AESE) */
+            armv8_subword(temp, temp);
+            temp[0] ^= ARMV8_RCON[i / 4];
+        }
+        ctx->rk[4 * i + 0] = ctx->rk[4 * (i - 4) + 0] ^ temp[0];
+        ctx->rk[4 * i + 1] = ctx->rk[4 * (i - 4) + 1] ^ temp[1];
+        ctx->rk[4 * i + 2] = ctx->rk[4 * (i - 4) + 2] ^ temp[2];
+        ctx->rk[4 * i + 3] = ctx->rk[4 * (i - 4) + 3] ^ temp[3];
+    }
+    ctx->nr = 10;
+}
+
+static void
+key_expand_192_armv8(voleith_aes_ctx_t *ctx, const uint8_t *key)
+{
+    memcpy(ctx->rk, key, 24);
+    for (int i = 6; i < 52; i++) {
+        uint8_t temp[4];
+        memcpy(temp, &ctx->rk[4 * (i - 1)], 4);
+        if (i % 6 == 0) {
+            uint8_t t = temp[0];
+            temp[0] = temp[1];
+            temp[1] = temp[2];
+            temp[2] = temp[3];
+            temp[3] = t;
+            armv8_subword(temp, temp);
+            temp[0] ^= ARMV8_RCON[i / 6];
+        }
+        ctx->rk[4 * i + 0] = ctx->rk[4 * (i - 6) + 0] ^ temp[0];
+        ctx->rk[4 * i + 1] = ctx->rk[4 * (i - 6) + 1] ^ temp[1];
+        ctx->rk[4 * i + 2] = ctx->rk[4 * (i - 6) + 2] ^ temp[2];
+        ctx->rk[4 * i + 3] = ctx->rk[4 * (i - 6) + 3] ^ temp[3];
+    }
+    ctx->nr = 12;
+}
+
+static void
+key_expand_256_armv8(voleith_aes_ctx_t *ctx, const uint8_t *key)
+{
+    memcpy(ctx->rk, key, 32);
+    for (int i = 8; i < 60; i++) {
+        uint8_t temp[4];
+        memcpy(temp, &ctx->rk[4 * (i - 1)], 4);
+        if (i % 8 == 0) {
+            uint8_t t = temp[0];
+            temp[0] = temp[1];
+            temp[1] = temp[2];
+            temp[2] = temp[3];
+            temp[3] = t;
+            armv8_subword(temp, temp);
+            temp[0] ^= ARMV8_RCON[i / 8];
+        } else if (i % 8 == 4) {
+            /* AES-256 extra SubWord (no RotWord, no Rcon) */
+            armv8_subword(temp, temp);
+        }
+        ctx->rk[4 * i + 0] = ctx->rk[4 * (i - 8) + 0] ^ temp[0];
+        ctx->rk[4 * i + 1] = ctx->rk[4 * (i - 8) + 1] ^ temp[1];
+        ctx->rk[4 * i + 2] = ctx->rk[4 * (i - 8) + 2] ^ temp[2];
+        ctx->rk[4 * i + 3] = ctx->rk[4 * (i - 8) + 3] ^ temp[3];
+    }
+    ctx->nr = 14;
+}
+
+/*
+ * Single-block encrypt.
+ *
+ * The ARM Crypto Extension AESE instruction computes:
+ *   ShiftRows(SubBytes(state XOR round_key))
+ * followed by AESMC for MixColumns.  This means the round key is consumed
+ * at the START of each iteration, matching the "equivalent cipher"
+ * representation: rounds 0..nr-2 are AESMC(AESE(s, rk[i])) and the final
+ * round is AESE(s, rk[nr-1]) XOR rk[nr].  The standard FIPS 197 key
+ * schedule byte array is used without modification.
+ */
+static void
+encrypt_armv8(const voleith_aes_ctx_t *ctx, uint8_t out[16],
+              const uint8_t in[16])
+{
+    const uint8_t *rk = ctx->rk;
+    uint8x16_t s = vld1q_u8(in);
+
+    for (int i = 0; i < ctx->nr - 1; i++) {
+        uint8x16_t k = vld1q_u8(rk + 16 * i);
+        s = vaesmcq_u8(vaeseq_u8(s, k));
+    }
+    s = vaeseq_u8(s, vld1q_u8(rk + 16 * (ctx->nr - 1)));
+    s = veorq_u8(s, vld1q_u8(rk + 16 * ctx->nr));
+
+    vst1q_u8(out, s);
+}
+
+/*
+ * 4-block interleaved encrypt.
+ *
+ * Interleaving four independent encryption streams lets the CPU issue
+ * AESE/AESMC pairs for all four blocks simultaneously, hiding the 2-3
+ * cycle latency of each instruction behind the others.  Throughput for
+ * AES-CTR mode (used by the PRG) increases roughly 4x over four serial
+ * single-block calls.
+ */
+static void
+encrypt_x4_armv8(const voleith_aes_ctx_t *ctx, uint8_t out[64],
+                 const uint8_t in[64])
+{
+    const uint8_t *rk = ctx->rk;
+    uint8x16_t s0 = vld1q_u8(in + 0);
+    uint8x16_t s1 = vld1q_u8(in + 16);
+    uint8x16_t s2 = vld1q_u8(in + 32);
+    uint8x16_t s3 = vld1q_u8(in + 48);
+
+    for (int i = 0; i < ctx->nr - 1; i++) {
+        uint8x16_t k = vld1q_u8(rk + 16 * i);
+        s0 = vaesmcq_u8(vaeseq_u8(s0, k));
+        s1 = vaesmcq_u8(vaeseq_u8(s1, k));
+        s2 = vaesmcq_u8(vaeseq_u8(s2, k));
+        s3 = vaesmcq_u8(vaeseq_u8(s3, k));
+    }
+    uint8x16_t kp = vld1q_u8(rk + 16 * (ctx->nr - 1));
+    uint8x16_t kl = vld1q_u8(rk + 16 * ctx->nr);
+    vst1q_u8(out + 0, veorq_u8(vaeseq_u8(s0, kp), kl));
+    vst1q_u8(out + 16, veorq_u8(vaeseq_u8(s1, kp), kl));
+    vst1q_u8(out + 32, veorq_u8(vaeseq_u8(s2, kp), kl));
+    vst1q_u8(out + 48, veorq_u8(vaeseq_u8(s3, kp), kl));
+}
+
+#endif /* VOLEITH_HAVE_ARMV8_AES */
+
+/* ========================================================================
  * Public API
  * ======================================================================== */
 
@@ -399,7 +582,6 @@ voleith_aes_key_expand(voleith_aes_ctx_t *ctx, const uint8_t *key, int key_bits)
 {
 #if defined(VOLEITH_HAVE_AES_NI)
     int nr;
-
     switch (key_bits) {
     case 128:
         nr = 10;
@@ -426,9 +608,23 @@ voleith_aes_key_expand(voleith_aes_ctx_t *ctx, const uint8_t *key, int key_bits)
         break;
     }
     return 0;
+#elif defined(VOLEITH_HAVE_ARMV8_AES)
+    switch (key_bits) {
+    case 128:
+        key_expand_128_armv8(ctx, key);
+        break;
+    case 192:
+        key_expand_192_armv8(ctx, key);
+        break;
+    case 256:
+        key_expand_256_armv8(ctx, key);
+        break;
+    default:
+        return -1;
+    }
+    return 0;
 #elif defined(VOLEITH_ALLOW_VARIABLE_TIME_AES)
     int nk, nr;
-
     switch (key_bits) {
     case 128:
         nk = 4;
@@ -459,6 +655,8 @@ voleith_aes_encrypt(const voleith_aes_ctx_t *ctx, uint8_t out[16],
 {
 #if defined(VOLEITH_HAVE_AES_NI)
     encrypt_ni(ctx, out, in);
+#elif defined(VOLEITH_HAVE_ARMV8_AES)
+    encrypt_armv8(ctx, out, in);
 #elif defined(VOLEITH_ALLOW_VARIABLE_TIME_AES)
     encrypt_soft(ctx, out, in);
 #else
@@ -481,13 +679,15 @@ void
 voleith_aes_encrypt_x4(const voleith_aes_ctx_t *ctx, uint8_t out[64],
                        const uint8_t in[64])
 {
-#if !defined(VOLEITH_HAVE_AES_NI) && !defined(VOLEITH_ALLOW_VARIABLE_TIME_AES)
-    aes_ct64_encrypt_x4(ctx, out, in);
-#else
+#if defined(VOLEITH_HAVE_ARMV8_AES)
+    encrypt_x4_armv8(ctx, out, in);
+#elif defined(VOLEITH_HAVE_AES_NI) || defined(VOLEITH_ALLOW_VARIABLE_TIME_AES)
     voleith_aes_encrypt(ctx, out + 0, in + 0);
     voleith_aes_encrypt(ctx, out + 16, in + 16);
     voleith_aes_encrypt(ctx, out + 32, in + 32);
     voleith_aes_encrypt(ctx, out + 48, in + 48);
+#else
+    aes_ct64_encrypt_x4(ctx, out, in);
 #endif
 }
 

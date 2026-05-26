@@ -305,11 +305,13 @@ Both DM and CMAC variants domain-separate leaf hashes from internal node hashes 
 
 ### Constant-time field arithmetic, with a gated variable-time path
 
-All software paths in `core/field.c` are constant-time. The CLMUL hardware paths are constant-time by hardware definition. There is no variable-time table-lookup path enabled by default.
+All software paths in `core/field.c` are constant-time. The CLMUL (x86_64) and PMULL (ARMv8) hardware paths are constant-time by ISA definition. There is no variable-time table-lookup path enabled by default.
 
 A `-DVOLEITH_ALLOW_VARIABLE_TIME_FIELD=ON` CMake flag exists to enable a variable-time path (faster for some operations, exposes a small timing side-channel on secret-dependent field elements). It is OFF by default and tests must opt in to use it. This gate exists for performance experiments and benchmarking; production deployments should leave it OFF.
 
-The same design applies to AES: a constant-time bitsliced AES backend is always built, and the AES-NI hardware path is constant-time by hardware definition. A variable-time table-lookup AES path is gated behind `-DVOLEITH_ALLOW_VARIABLE_TIME_AES=ON` and is OFF by default.
+The same design applies to AES: a constant-time bitsliced AES backend is always built, and the AES-NI (x86_64) and ARMv8 Crypto Extension (aarch64) hardware paths are constant-time by ISA definition. A variable-time table-lookup AES path is gated behind `-DVOLEITH_ALLOW_VARIABLE_TIME_AES=ON` and is OFF by default.
+
+The constant-time discipline is verified two ways. Structurally, by source review (no secret-dependent branches, no secret-indexed memory access, all conditional XORs routed through bitmask AND with the `ct_barrier_u64` optimiser barrier). Empirically, by a dudect-style timing harness (`tools/dudect/`) that runs Welch's t-test on the bitsliced AES, the software field-multiplication paths, and `voleith_byte_combine` under fix-vs-fix input distributions on real hardware. Release-gate evidence files live under `docs/dudect-runs/`, currently covering x86_64 (Sandy Bridge and Gracemont) and aarch64 (Apple M1).
 
 ### Parameter validation at the API boundary
 
@@ -366,13 +368,13 @@ The QuickSilver multiplication check in `proof/prover.c` and `proof/gf8_prover.c
 - The ConvertToVOLE algorithm (`vole/convert.c`, FAEST Figure 5.2).
 - The Fiat-Shamir challenge derivation order and transcript composition.
 
-Performance optimisations are applied only to operations that do not affect soundness: PRG block batching, GF(2^k) CLMUL acceleration, AES-NI dispatch. Anything that touches the multiplication check, the VOLEHash, or the challenge derivation is left exactly as the spec dictates.
+Performance optimisations are applied only to operations that do not affect soundness: PRG block batching, GF(2^k) CLMUL / PMULL acceleration, AES-NI and ARMv8 Crypto Extension dispatch. Anything that touches the multiplication check, the VOLEHash, or the challenge derivation is left exactly as the spec dictates.
 
 ---
 
 ## Correctness Testing
 
-The library is tested against known-answer vectors from multiple independent sources. Tests run in four build configurations: software-only, CLMUL, AES-NI, and combined CLMUL+AES-NI.
+The library is tested against known-answer vectors from multiple independent sources. CMake auto-detects the host's hardware extensions and builds every relevant variant: software-only (always), x86 CLMUL, AES-NI, and combined CLMUL+AES-NI on x86_64; ARMv8 AES, PMULL, and combined ARMv8 (AES+PMULL) on aarch64. Each variant runs the full test suite against the same vectors, ensuring backend dispatch does not affect correctness.
 
 ### Primitives (Layer 1)
 
@@ -419,35 +421,13 @@ Beyond known-answer vectors:
 - **Wrong instance:** verifier rejects (instance binding into the transcript).
 - **Two-phase round-trip:** `prove_commit` / `prove_respond` produces the same proof bytes as one-shot `prove`, and `chall_1` mismatches between the two phases are detected.
 
-The complete test suite runs in four build configurations (sw, clmul, aesni, clmul_aesni) and currently includes 96 tests (memory safety regression suite) plus per-module tests for each circuit building block and proof variant.
+The complete test suite runs once per built variant (up to eight: sw, clmul, aesni, clmul_aesni, sw_vartime on x86_64; armv8_aes, pmull, armv8 on aarch64; the CMake configuration step omits variants whose required hardware extension was not detected on the host). It currently includes 96 tests (memory safety regression suite) plus per-module tests for each circuit building block and proof variant.
 
 ---
 
 ## Future Enhancements
 
-These items are intentionally scoped out of the initial public release.
-
-### Hardware acceleration: additional CPU instruction extensions
-
-The library currently uses Intel AES-NI and CLMUL on x86_64, plus a portable constant-time bitsliced AES fallback for every other target. Several other CPU families ship cryptography extensions that match or approach AES-NI's throughput; using them on those targets avoids the ~30-50× slowdown that bitsliced AES costs versus hardware AES. Each extension below is a new backend that fits the existing dispatch model in `core/aes.c` and `core/field.c`.
-
-#### ARMv8 AES (AESE / AESD / AESMC / AESIMC)
-
-On Apple Silicon, AWS Graviton, modern Android / iOS, and most server-class aarch64 SoCs, the CPU has ARMv8 AES instructions (`AESE`, `AESD`, `AESMC`, `AESIMC`) that match AES-NI's throughput. Without an ARMv8 backend, every aarch64 deployment runs at bitsliced speed (~30-50× slower than hardware AES per block).
-
-**Implementation scope.** A new `core/aes_armv8.c` mirroring the AES-NI path's public surface (`voleith_aes_key_expand`, `voleith_aes_encrypt`, `voleith_aes_encrypt_x4`, `voleith_aes_ctx_clear`) using `<arm_neon.h>` intrinsics. The dispatcher in `core/aes.c` extends from three arms (AES-NI / variable-time / bitsliced) to four (AES-NI / ARMv8 / variable-time / bitsliced), gated on a CMake `CheckCSourceCompiles` probe with `-march=armv8-a+crypto`. No protocol or API changes. Primary validation target is Apple M1 / M2; secondary AWS Graviton.
-
-#### ARM CLMUL (PMULL / PMULL2)
-
-x86_64 uses the `pclmulqdq` instruction for carry-less multiplication, which underpins the fast paths in `core/field.c` for GF(2^k) arithmetic at k ∈ {64, 128, 192, 256}. ARMv8 provides equivalent instructions `PMULL` and `PMULL2` (64-bit operand widths producing 128-bit results), exposed via `<arm_neon.h>` intrinsics `vmull_p64` and `vmull_high_p64`. Adding an ARM CLMUL backend brings field arithmetic on aarch64 to parity with x86_64 hardware-accelerated paths.
-
-**Implementation scope.** A new `core/field_armv8.c` or extensions to `core/field.c` to route the relevant `gf{64,128,192,256}_mul` functions to `PMULL`-based implementations when available. CMake probe with `-march=armv8-a+crypto+aes` (PMULL is part of the crypto extension on most aarch64 SoCs that ship ARMv8 AES; verify per target). The same `CheckCSourceCompiles` machinery that gates the ARMv8 AES backend gates this one. Validation: re-run the existing field-arithmetic KAT vectors (cross-validated against `faest-ref` Appendix A.1) under the new backend, plus the constant-time discipline check (no secret-dependent branches survive in the PMULL wrapper).
-
-#### RISC-V cryptography extensions (future, gated on hardware availability)
-
-RISC-V is finalising scalar and vector cryptography extensions (`Zkn*`, `Zvbb`, `Zvbc`, `Zvkg`, `Zvkned`, `Zvksh`) that include AES round instructions (`AES32ESI`, `AES32ESMI`, `AES64ES`, `AES64ESM`, plus vector forms), GF(2) multiplication (`CLMUL`, `CLMULH`, vector `vclmul.vv`), and SHA-2 / SHA-3 acceleration. Linux distributions for RISC-V SoCs with these extensions are emerging; volume commercial silicon is still rare as of this writing.
-
-**Implementation scope.** A new `core/aes_riscv.c` and (eventually) `core/field_riscv.c` matching the existing dispatch surface. CMake probe based on the `-march` extension string (e.g., `-march=rv64gc_zkn`). This work is **deferred until validation hardware is available**: a hardware-accelerated backend that has not been run on real silicon is a liability, not an asset. Target hardware: a SiFive HiFive Premier P550 dev board, the Milk-V Jupiter / Megrez class, or any equivalent Zkn-capable SBC once they ship in volume and a constant-time validation host can be sourced.
+These items are intentionally scoped for future releases.
 
 ### Runtime hardware detection and dispatch (single-binary fat builds)
 
@@ -476,17 +456,11 @@ Once runtime dispatch (above) is in place, the default fat binary always picks t
 
 **Implementation scope.** A one-shot probe at first `voleith_aes_*` call using the same `voleith_cpu_features()` machinery. If the running CPU advertises a hardware path that this binary was not built with, print a single stderr warning suggesting either a rebuild with the relevant `-D...=ON` flag or a default (fat) build. Suppressed by `VOLEITH_QUIET=1`. Idempotent via a single `static atomic_flag`. No security implication; purely a deployment-mistake aid.
 
-### Empirical timing-validation (dudect-style)
+### RISC-V cryptography extensions (gated on hardware availability)
 
-The software-only fallback paths (constant-time bitsliced AES, constant-time field arithmetic) are designed to be timing-side-channel-free, but no empirical validation is currently performed. The dudect (Reparaz, Balasch, Verbauwhede, NDSS 2017) methodology empirically validates this by:
+RISC-V is finalising scalar and vector cryptography extensions (`Zkn*`, `Zvbb`, `Zvbc`, `Zvkg`, `Zvkned`, `Zvksh`) that include AES round instructions (`AES32ESI`, `AES32ESMI`, `AES64ES`, `AES64ESM`, plus vector forms), GF(2) multiplication (`CLMUL`, `CLMULH`, vector `vclmul.vv`), and SHA-2 / SHA-3 acceleration. Linux distributions for RISC-V SoCs with these extensions are emerging; volume commercial silicon is still rare as of this writing.
 
-1. **Fix-vs-fix sampling.** Pick two fixed inputs that exercise different secret-dependent paths. Run each through the target function many times (10⁵ to 10⁷ measurements) using a high-resolution timer (`__rdtsc` on x86_64, `cntvct_el0` on aarch64, `mach_absolute_time` on Apple Silicon).
-2. **Percentile cropping.** Drop the upper percentile of each sample (typically the [1st, 99th] band) to remove OS scheduling and cache-miss outliers.
-3. **Welch's t-test on Welford-aggregated means.** Compute online mean and variance via Welford's algorithm, then Welch's t-test. A `|t| > 4.5` statistic indicates a measurable timing difference between the two inputs; this threshold is justified by the dudect paper as giving a per-test false-positive rate below 10⁻⁵.
-
-**Target families.** Bitsliced AES single-block, AES `_x4` batched calls, GF(2^λ) multiplications for λ ∈ {128, 192, 256}, and `voleith_byte_combine`. These are the operations whose timing must not vary with secret-dependent operands.
-
-**Implementation scope.** A separate `tools/dudect/` directory, gated on a CMake `VOLEITH_BUILD_DUDECT=OFF` opt-in flag (so the dependency does not affect default builds). Tests are a manual release-gate, not a per-commit check; they take minutes per run and produce noisy results that confuse CI. Acceptance criteria for shipping a software-path binary release: every target family reports `|t| < 4.5` after at least 10⁶ samples on at least one validation host per architecture (x86_64 Linux, aarch64 Linux, aarch64 macOS).
+**Implementation scope.** A new `core/aes_riscv.c` and (eventually) `core/field_riscv.c` matching the existing dispatch surface alongside the AES-NI / ARMv8 / bitsliced backends. CMake probe based on the `-march` extension string (e.g., `-march=rv64gc_zkn`). This work is **deferred until validation hardware is available**: a hardware-accelerated backend that has not been run on real silicon is a liability, not an asset. Target hardware: a SiFive HiFive Premier P550 dev board, the Milk-V Jupiter / Megrez class, or any equivalent Zkn-capable SBC once they ship in volume and a constant-time validation host (including dudect) can be sourced.
 
 ### Half-tree GGM optimisation
 

@@ -270,8 +270,8 @@ voleith_gf8_prove_commit(voleith_gf8_prover_commit_t **ctx_out,
     /* Step 2: VOLEitH commit
      * The ellhat passed to voleith_commit is the bit count: ellhat_bytes * 8. */
     unsigned int ellhat_bits = (unsigned int)(ellhat_bytes * 8);
-    int commit_rc = voleith_commit(&ctx->com, &ctx->state, &ctx->vcp,
-                                   root_seed, iv_ptr, ellhat_bits);
+    int commit_rc = voleith_commit(&ctx->com, &ctx->state, &ctx->vcp, root_seed,
+                                   iv_ptr, ellhat_bits);
     voleith_secure_zero(root_seed, sizeof(root_seed));
     if (commit_rc != 0) {
         voleith_gf8_prover_commit_free(ctx);

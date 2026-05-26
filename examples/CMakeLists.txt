@@ -3,7 +3,7 @@
 
 cmake_minimum_required(VERSION 3.16)
 
-# Example programs — each demonstrates a ZK proof for one circuit type.
+# Example programs - each demonstrates a ZK proof for one circuit type.
 # All examples link against the production voleith_core library (with
 # hardware acceleration when available).
 

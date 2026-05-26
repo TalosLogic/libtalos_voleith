@@ -25,8 +25,8 @@
  * It is specifically designed to not be optimized away, unlike memset().
  * Fall back to a volatile-pointer loop on platforms that lack it.
  */
-#if defined(__linux__) || defined(__APPLE__) || defined(__OpenBSD__) ||        \
-    defined(__FreeBSD__) || defined(__NetBSD__)
+#if defined(__linux__) || defined(__OpenBSD__) || defined(__FreeBSD__) ||      \
+    defined(__NetBSD__)
 #define VOLEITH_HAVE_EXPLICIT_BZERO 1
 #endif
 

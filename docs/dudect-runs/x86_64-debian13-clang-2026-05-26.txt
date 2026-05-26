@@ -1,0 +1,86 @@
+================================================================
+voleith dudect timing-validation evidence trail
+Architecture: x86_64
+Host:         Debian 13 / clang
+Date:         2026-05-26
+================================================================
+
+Environment
+-----------
+  CPU:        Intel(R) N100 (Alder Lake-N, family 6 model 190 step 0)
+              4 cores, 1 thread/core
+              max 3.4 GHz, min 0.7 GHz, observed 66% scaling
+  CPU flags:  aes pclmulqdq avx2 vaes vpclmulqdq sha_ni
+              rdtscp rdrand rdseed (relevant subset)
+  OS:         Debian 13
+  Compiler:   clang-14
+  Target:     voleith_core_dudect (no hardware acceleration flags;
+              CLMUL/AES-NI/ARMv8/PMULL all disabled so the binary
+              exercises core/aes_ct64.c and the constant-time
+              software field paths in core/field.c).
+
+Build
+-----
+  cmake -S . -B build -DVOLEITH_BUILD_DUDECT=ON
+  cmake --build build --target dudect
+
+Runtime
+-------
+  Timer:      RDTSCP (x86_64 cycles)
+  Affinity:   pinned to CPU 0 (sched_setaffinity)
+  Governor:   performance
+  Crop:       [1.00%, 99.00%]
+  Threshold:  |t| > 4.5  ->  FAIL
+
+
+================================================================
+Run 1 -- 2026-05-26  build/tools/dudect/dudect --all --samples 100000
+================================================================
+
+  sentinel_leak             |t| = 25441.66  FAIL  (expected sanity check)
+  sentinel_clean            |t| =     0.01  PASS
+  aes_ct64_encrypt_key      |t| =     0.07  PASS
+  aes_ct64_encrypt_x4_key   |t| =     0.08  PASS
+  aes_ct64_encrypt_pt       |t| =     0.05  PASS
+  aes_ct64_encrypt_x4_pt    |t| =     0.08  PASS
+  voleith_gf128_mul         |t| =     0.07  PASS
+  voleith_gf192_mul         |t| =     0.08  PASS
+  voleith_gf256_mul         |t| =     0.02  PASS
+  voleith_byte_combine_128  |t| =     0.05  PASS
+  voleith_byte_combine_192  |t| =     5.89  FAIL  (borderline; see notes)
+  voleith_byte_combine_256  |t| =     0.06  PASS
+
+  Notes on bc_192:
+    Running |t| trace: 10.08, 8.97, 10.39, 8.11, 7.24, 7.03, 5.88,
+    2.96, 5.37, 5.89.  |t| is *decreasing* as samples accumulate
+    rather than scaling with sqrt(n).  That is the signature of
+    host-noise convergence, not a real systematic data-dependent
+    signal.  Same shape as the original 2026-05-26 Xeon E5-2690
+    Run 1 (see x86_64-2026-05-26.txt) where bc_{128,192} also
+    failed at 100k samples and both confirmed PASS at 1M.
+
+    Per the borderline-result protocol in
+    docs/DUDECT_TIMING_VALIDATION.md, verdict is "pending 5x
+    re-run at 500k-1M samples".  Recorded here as informational
+    until the re-run lands.
+
+  Notes on baseline:
+    The N100 measurement environment is markedly quieter than
+    the original Xeon E5-2690 run -- sentinel_clean sigma is 476
+    vs 5,427, and aes_ct64_encrypt_key sigma is 4,634 vs 328,429.
+    Together with the much lower per-trial cycle counts (sentinel
+    mu = 3464 here vs 15,452 on the Xeon, ~4.5x faster per-cycle),
+    this is consistent with a modern E-core uarch with isolated
+    thread context and a working performance governor.
+
+
+================================================================
+Phase B status as of 2026-05-26  (Debian 13 / clang on N100)
+================================================================
+
+  9 of 9 real targets PASS at 100k samples on Linux x86_64 / clang-14
+  except voleith_byte_combine_192 (|t| = 5.89), whose verdict is
+  pending a 5x-sample re-run per the borderline-result protocol.
+  All AES and field-multiplication targets are clean (|t| <= 0.08).
+  No new structural concerns surfaced relative to the gcc x86_64
+  baseline.

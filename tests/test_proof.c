@@ -618,8 +618,7 @@ test_params_validate(void)
     /* Bad w_grind. */
     p = voleith_params_em_128f;
     p.w_grind = p.lambda;
-    CHECK(voleith_params_validate(&p) != 0,
-          "X-7: w_grind == lambda rejected");
+    CHECK(voleith_params_validate(&p) != 0, "X-7: w_grind == lambda rejected");
     p.w_grind = p.lambda + 1;
     CHECK(voleith_params_validate(&p) != 0, "X-7: w_grind > lambda rejected");
     p.w_grind = UINT_MAX;
@@ -663,9 +662,9 @@ test_params_validate_at_api_boundary(void)
                                   sizeof(fs_seed), blob);
     CHECK(rc != 0, "X-7: voleith_prove_commit rejects invalid params");
 
-    voleith_proof_t proof = {NULL, voleith_proof_byte_size(
-                                       &voleith_params_em_128f,
-                                       voleith_qs_ell(c))};
+    voleith_proof_t proof = {
+        NULL,
+        voleith_proof_byte_size(&voleith_params_em_128f, voleith_qs_ell(c))};
     proof.data = calloc(proof.len, 1);
     voleith_verifier_reconstruct_t *vctx = NULL;
     int rc2 = voleith_verify_reconstruct(&vctx, &proof, &bad, c, blob);

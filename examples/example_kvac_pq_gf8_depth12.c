@@ -510,8 +510,8 @@ main(void)
 
     gf8_wire_id rev_root_computed[16];
     if (indexed_merkle_gf8_nonmember_circuit_secret_dir(
-            c, leaf_wires, 16, low_val_wires, low_next_wires, next_idx_wires,
-            1, rev_node_wires, rev_dir_wires, REV_DEPTH,
+            c, leaf_wires, 16, low_val_wires, low_next_wires, next_idx_wires, 1,
+            rev_node_wires, rev_dir_wires, REV_DEPTH,
             VOLEITH_MERKLE_HASH_AES_DM, rev_root_computed) != 0) {
         fprintf(stderr,
                 "indexed_merkle_gf8_nonmember_circuit_secret_dir: leaf data "

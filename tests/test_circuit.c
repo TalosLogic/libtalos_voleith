@@ -47,7 +47,7 @@ set_bit(uint8_t *arr, size_t idx, uint8_t val)
     if (val & 1)
         arr[idx / 8] |= (uint8_t)(1u << (idx % 8));
     else
-        arr[idx / 8] &= (uint8_t)~(1u << (idx % 8));
+        arr[idx / 8] &= (uint8_t) ~(1u << (idx % 8));
 }
 
 /*

@@ -539,7 +539,7 @@ test_correctness(void)
         uint8_t path_dirs[3] = {1, 0, 0};
 
         uint8_t circuit_root[16];
-        eval_nonmember_gf8(25, 20, 30, 2, (const uint8_t (*)[16])path_nodes,
+        eval_nonmember_gf8(25, 20, 30, 2, (const uint8_t(*)[16])path_nodes,
                            path_dirs, hash, circuit_root);
 
         if (!use_cmac)
@@ -574,7 +574,7 @@ test_path_directions(void)
         uint8_t path_dirs[3] = {0, 0, 0};
 
         uint8_t circuit_root[16];
-        eval_nonmember_gf8(15, 10, 20, 1, (const uint8_t (*)[16])path_nodes,
+        eval_nonmember_gf8(15, 10, 20, 1, (const uint8_t(*)[16])path_nodes,
                            path_dirs, VOLEITH_MERKLE_HASH_AES_DM, circuit_root);
         check("DM circuit root correct (leaf[0], path {0,0,0}, target=15)",
               memcmp(circuit_root, ref_root, 16) == 0);
@@ -589,7 +589,7 @@ test_path_directions(void)
         uint8_t path_dirs[3] = {1, 0, 1};
 
         uint8_t circuit_root[16];
-        eval_nonmember_gf8(65, 60, 70, 6, (const uint8_t (*)[16])path_nodes,
+        eval_nonmember_gf8(65, 60, 70, 6, (const uint8_t(*)[16])path_nodes,
                            path_dirs, VOLEITH_MERKLE_HASH_AES_DM, circuit_root);
         check("DM circuit root correct (leaf[5], path {1,0,1}, target=65)",
               memcmp(circuit_root, ref_root, 16) == 0);
@@ -616,7 +616,7 @@ test_field_binding(void)
     /* Test 9: wrong next_index (2 → 3) */
     {
         uint8_t bad_root[16];
-        eval_nonmember_gf8(25, 20, 30, 3, (const uint8_t (*)[16])path_nodes,
+        eval_nonmember_gf8(25, 20, 30, 3, (const uint8_t(*)[16])path_nodes,
                            path_dirs, VOLEITH_MERKLE_HASH_AES_DM, bad_root);
         check("Wrong next_index produces different root (field binding)",
               memcmp(bad_root, ref_root, 16) != 0);
@@ -625,7 +625,7 @@ test_field_binding(void)
     /* Test 10: wrong low_value (20 → 19) */
     {
         uint8_t bad_root[16];
-        eval_nonmember_gf8(25, 19, 30, 2, (const uint8_t (*)[16])path_nodes,
+        eval_nonmember_gf8(25, 19, 30, 2, (const uint8_t(*)[16])path_nodes,
                            path_dirs, VOLEITH_MERKLE_HASH_AES_DM, bad_root);
         check("Wrong low_value produces different root (field binding)",
               memcmp(bad_root, ref_root, 16) != 0);
@@ -654,7 +654,7 @@ test_soundness(void)
     bad_nodes[0][0] ^= 0xff;
 
     uint8_t bad_root[16];
-    eval_nonmember_gf8(25, 20, 30, 2, (const uint8_t (*)[16])bad_nodes,
+    eval_nonmember_gf8(25, 20, 30, 2, (const uint8_t(*)[16])bad_nodes,
                        path_dirs, VOLEITH_MERKLE_HASH_AES_DM, bad_root);
 
     check("Corrupted sibling produces different root (soundness)",
@@ -863,7 +863,7 @@ test_correctness_secret_dir(void)
 
         uint8_t circuit_root[16];
         eval_nonmember_gf8_secret_dir(25, 20, 30, 2,
-                                      (const uint8_t (*)[16])path_nodes,
+                                      (const uint8_t(*)[16])path_nodes,
                                       path_dirs, hash, circuit_root);
 
         if (!use_cmac)
@@ -894,7 +894,7 @@ test_secret_dir_mixed_path(void)
 
     uint8_t circuit_root[16];
     eval_nonmember_gf8_secret_dir(65, 60, 70, 6,
-                                  (const uint8_t (*)[16])path_nodes, path_dirs,
+                                  (const uint8_t(*)[16])path_nodes, path_dirs,
                                   VOLEITH_MERKLE_HASH_AES_DM, circuit_root);
 
     check("secret-dir DM root correct (leaf[5], path {1,0,1}, target=65)",
@@ -919,10 +919,10 @@ test_secret_public_equivalence(void)
     uint8_t path_dirs[3] = {1, 0, 0};
 
     uint8_t pub_root[16], sec_root[16];
-    eval_nonmember_gf8(25, 20, 30, 2, (const uint8_t (*)[16])path_nodes,
+    eval_nonmember_gf8(25, 20, 30, 2, (const uint8_t(*)[16])path_nodes,
                        path_dirs, VOLEITH_MERKLE_HASH_AES_DM, pub_root);
     eval_nonmember_gf8_secret_dir(25, 20, 30, 2,
-                                  (const uint8_t (*)[16])path_nodes, path_dirs,
+                                  (const uint8_t(*)[16])path_nodes, path_dirs,
                                   VOLEITH_MERKLE_HASH_AES_DM, sec_root);
 
     check(
@@ -953,7 +953,7 @@ test_secret_dir_binding(void)
 
     uint8_t bad_root[16];
     eval_nonmember_gf8_secret_dir(25, 20, 30, 2,
-                                  (const uint8_t (*)[16])path_nodes, wrong_dirs,
+                                  (const uint8_t(*)[16])path_nodes, wrong_dirs,
                                   VOLEITH_MERKLE_HASH_AES_DM, bad_root);
 
     check("Wrong path_dir produces different root (direction encoding is "

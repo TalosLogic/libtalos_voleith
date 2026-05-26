@@ -418,7 +418,7 @@ test_correctness(void)
         uint8_t path_dirs[3] = {1, 0, 0}; /* leaf index 1 = 0b001 */
 
         uint8_t circuit_root[16];
-        eval_nonmember_circuit(25, 20, 30, 2, (const uint8_t (*)[16])path_nodes,
+        eval_nonmember_circuit(25, 20, 30, 2, (const uint8_t(*)[16])path_nodes,
                                path_dirs, hash, circuit_root);
 
         if (!use_cmac)
@@ -456,7 +456,7 @@ test_path_directions(void)
         uint8_t path_dirs[3] = {0, 0, 0};
 
         uint8_t circuit_root[16];
-        eval_nonmember_circuit(15, 10, 20, 1, (const uint8_t (*)[16])path_nodes,
+        eval_nonmember_circuit(15, 10, 20, 1, (const uint8_t(*)[16])path_nodes,
                                path_dirs, VOLEITH_MERKLE_HASH_AES_DM,
                                circuit_root);
         check("DM circuit root correct (leaf[0], path {0,0,0}, target=15)",
@@ -472,7 +472,7 @@ test_path_directions(void)
         uint8_t path_dirs[3] = {1, 0, 1};
 
         uint8_t circuit_root[16];
-        eval_nonmember_circuit(65, 60, 70, 6, (const uint8_t (*)[16])path_nodes,
+        eval_nonmember_circuit(65, 60, 70, 6, (const uint8_t(*)[16])path_nodes,
                                path_dirs, VOLEITH_MERKLE_HASH_AES_DM,
                                circuit_root);
         check("DM circuit root correct (leaf[5], path {1,0,1}, target=65)",
@@ -507,7 +507,7 @@ test_field_binding(void)
         uint8_t bad_root[16];
         eval_nonmember_circuit(25, 20, 30,
                                3, /* next_index wrong: 3 instead of 2 */
-                               (const uint8_t (*)[16])path_nodes, path_dirs,
+                               (const uint8_t(*)[16])path_nodes, path_dirs,
                                VOLEITH_MERKLE_HASH_AES_DM, bad_root);
         check("Wrong next_index produces different root (field binding)",
               memcmp(bad_root, ref_root, 16) != 0);
@@ -518,7 +518,7 @@ test_field_binding(void)
         uint8_t bad_root[16];
         eval_nonmember_circuit(25, 19, 30,
                                2, /* low_value wrong: 19 instead of 20 */
-                               (const uint8_t (*)[16])path_nodes, path_dirs,
+                               (const uint8_t(*)[16])path_nodes, path_dirs,
                                VOLEITH_MERKLE_HASH_AES_DM, bad_root);
         check("Wrong low_value produces different root (field binding)",
               memcmp(bad_root, ref_root, 16) != 0);
@@ -548,7 +548,7 @@ test_soundness(void)
     bad_nodes[0][0] ^= 0xff;
 
     uint8_t bad_root[16];
-    eval_nonmember_circuit(25, 20, 30, 2, (const uint8_t (*)[16])bad_nodes,
+    eval_nonmember_circuit(25, 20, 30, 2, (const uint8_t(*)[16])bad_nodes,
                            path_dirs, VOLEITH_MERKLE_HASH_AES_DM, bad_root);
 
     check("Corrupted sibling produces different root (soundness)",

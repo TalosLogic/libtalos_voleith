@@ -386,8 +386,7 @@ test_cir2_stack_bound_signaled(void)
      * contract. */
     gf8_wire_id dummy_fi = voleith_gf8_add_instance(c);
     gf8_wire_id out[16];
-    int rc =
-        kdf_ctr_cmac_gf8_circuit(c, key, 16, &dummy_fi, HUGE_FI, out, 16);
+    int rc = kdf_ctr_cmac_gf8_circuit(c, key, 16, &dummy_fi, HUGE_FI, out, 16);
     check("CIR-2: kdf_ctr_cmac_gf8_circuit returns -1 on stack-VLA "
           "bound violation",
           rc == -1);

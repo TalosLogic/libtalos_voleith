@@ -149,7 +149,7 @@ typedef struct {
     uint8_t *leaf_seeds; /* per-leaf seeds: L entries, each seed_bytes */
                          /* for EM: leaf_seeds[α] = k_α (same as tree leaf) */
                          /* for FAEST: first λ bits of PRG(k_α,...) */
-    uint8_t com[64];   /* global commitment H_1(h_0‖...‖h_{τ-1}), 2λ/8 bytes */
+    uint8_t com[64]; /* global commitment H_1(h_0‖...‖h_{τ-1}), 2λ/8 bytes */
     size_t com_bytes;  /* bytes per leaf commitment: n_leafcom * lambda/8 */
     size_t seed_bytes; /* lambda / 8 */
 } voleith_bavc_t;
@@ -255,11 +255,11 @@ size_t voleith_bavc_opening_size(const voleith_vc_params_t *params);
  */
 typedef struct {
     uint8_t *leaf_seeds; /* L entries × seed_bytes; hidden leaves are zeroed */
-    uint8_t *leaf_coms;  /* L entries × com_bytes; hidden leaves from opening */
-    uint8_t com[64];     /* reconstructed global commitment, 2λ/8 bytes */
-    size_t seed_bytes;   /* lambda / 8 */
-    size_t com_bytes;    /* n_leafcom * lambda/8 */
-    size_t L;            /* number of leaves */
+    uint8_t *leaf_coms; /* L entries × com_bytes; hidden leaves from opening */
+    uint8_t com[64];    /* reconstructed global commitment, 2λ/8 bytes */
+    size_t seed_bytes;  /* lambda / 8 */
+    size_t com_bytes;   /* n_leafcom * lambda/8 */
+    size_t L;           /* number of leaves */
 } voleith_bavc_reconstruct_t;
 
 /*

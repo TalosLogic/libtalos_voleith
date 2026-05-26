@@ -66,7 +66,7 @@ typedef enum {
     GF8_WIRE_XOR_CONST,  /* output = a XOR const_val  (free: GF(2)-linear) */
     GF8_WIRE_LINEAR_MAP, /* output = M·a for 8×8 GF(2) matrix M (free) */
     GF8_WIRE_SQUARE,     /* output = a² = Frobenius(a) (free: GF(2)-linear) */
-    GF8_WIRE_MUL,        /* output = a · b in GF(2⁸)  (costs one VOLE slot) */
+    GF8_WIRE_MUL, /* output = a · b in GF(2⁸)  (costs one VOLE slot) */
 } gf8_wire_kind_t;
 
 /*
