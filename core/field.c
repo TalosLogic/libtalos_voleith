@@ -165,6 +165,42 @@ voleith_gf8_mul(voleith_gf8_t a, voleith_gf8_t b)
 
 #endif /* VOLEITH_ALLOW_VARIABLE_TIME_FIELD */
 
+/*
+ * Constant-time GF(2^8) inverse via Fermat's little theorem.
+ *
+ * For nonzero a in GF(2^8), a^255 = 1, hence a^254 = a^{-1}.  The
+ * exponent 254 = 0b1111_1110 = 2 + 4 + 8 + 16 + 32 + 64 + 128, so
+ *
+ *   a^254 = a^2 * a^4 * a^8 * a^16 * a^32 * a^64 * a^128.
+ *
+ * Each a^(2^k) is one squaring of a^(2^{k-1}).  Total: 7 squarings +
+ * 6 multiplications = 13 voleith_gf8_mul calls, fixed addition chain,
+ * constant-time.
+ *
+ * For a = 0 every intermediate is 0, so the chain returns 0 - matching
+ * the convention used by the AES S-box (Proposition 6.4) where the
+ * "inv_in" wire holds 0 when the S-box input is 0.
+ */
+voleith_gf8_t
+voleith_gf8_inv(voleith_gf8_t a)
+{
+    voleith_gf8_t a2 = voleith_gf8_mul(a, a);
+    voleith_gf8_t a4 = voleith_gf8_mul(a2, a2);
+    voleith_gf8_t a8 = voleith_gf8_mul(a4, a4);
+    voleith_gf8_t a16 = voleith_gf8_mul(a8, a8);
+    voleith_gf8_t a32 = voleith_gf8_mul(a16, a16);
+    voleith_gf8_t a64 = voleith_gf8_mul(a32, a32);
+    voleith_gf8_t a128 = voleith_gf8_mul(a64, a64);
+
+    voleith_gf8_t r = voleith_gf8_mul(a2, a4);
+    r = voleith_gf8_mul(r, a8);
+    r = voleith_gf8_mul(r, a16);
+    r = voleith_gf8_mul(r, a32);
+    r = voleith_gf8_mul(r, a64);
+    r = voleith_gf8_mul(r, a128);
+    return r;
+}
+
 /* ========================================================================
  * GF(2^64)
  * P_64 = x^64 + x^4 + x^3 + x + 1, reduction constant 0x1B

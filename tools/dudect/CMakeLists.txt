@@ -34,6 +34,7 @@ set(DUDECT_SOURCES
     targets_aes.c
     targets_field.c
     targets_byte_combine.c
+    targets_grostl.c
 )
 
 add_executable(dudect ${DUDECT_SOURCES})

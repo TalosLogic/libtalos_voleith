@@ -35,6 +35,9 @@ extern const dudect_target_t target_voleith_gf256_mul;
 extern const dudect_target_t target_voleith_byte_combine_128;
 extern const dudect_target_t target_voleith_byte_combine_192;
 extern const dudect_target_t target_voleith_byte_combine_256;
+extern const dudect_target_t target_voleith_grostl256_msg;
+extern const dudect_target_t target_voleith_grostl512_msg;
+extern const dudect_target_t target_voleith_grostl256_gf8_build_witness_msg;
 
 static const dudect_target_t *const target_registry[] = {
     &target_sentinel_leak,
@@ -49,6 +52,9 @@ static const dudect_target_t *const target_registry[] = {
     &target_voleith_byte_combine_128,
     &target_voleith_byte_combine_192,
     &target_voleith_byte_combine_256,
+    &target_voleith_grostl256_msg,
+    &target_voleith_grostl512_msg,
+    &target_voleith_grostl256_gf8_build_witness_msg,
     NULL,
 };
 

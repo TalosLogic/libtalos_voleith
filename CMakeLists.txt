@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 cmake_minimum_required(VERSION 3.16)
-project(libvoleith VERSION 1.0.0 LANGUAGES C)
+project(libvoleith VERSION 1.1.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -108,7 +108,7 @@ endif()
 
 if(VOLEITH_AES_NI)
     include(CheckCSourceCompiles)
-    set(CMAKE_REQUIRED_FLAGS "-maes -msse2")
+    set(CMAKE_REQUIRED_FLAGS "-maes -msse2 -mssse3")
     check_c_source_compiles("
         #include <wmmintrin.h>
         int main(void) {
@@ -189,6 +189,7 @@ set(VOLEITH_CORE_SOURCES
     core/field.c
     core/aes.c
     core/aes_ct64.c
+    core/grostl.c
     core/prg.c
     core/hash.c
     core/util.c
@@ -207,14 +208,17 @@ set(VOLEITH_CORE_SOURCES
     proof/gf8_proof.c
     circuits/aes_circuit.c
     circuits/aes_gf8_circuit.c
+    circuits/grostl_gf8_circuit.c
     circuits/aes_cmac_circuit.c
     circuits/aes_cmac_gf8_circuit.c
     circuits/kdf_ctr_cmac_circuit.c
     circuits/kdf_ctr_cmac_gf8_circuit.c
     circuits/merkle_circuit.c
     circuits/merkle_gf8_circuit.c
+    circuits/merkle_grostl_gf8_circuit.c
     circuits/indexed_merkle_circuit.c
     circuits/indexed_merkle_gf8_circuit.c
+    circuits/indexed_merkle_grostl_gf8_circuit.c
 )
 
 set(VOLEITH_CORE_INCLUDES
@@ -233,7 +237,7 @@ function(voleith_apply_hw_flags TARGET)
     endif()
     if(HAVE_AES_NI)
         target_compile_definitions(${TARGET} PUBLIC VOLEITH_HAVE_AES_NI)
-        target_compile_options(${TARGET} PRIVATE -maes -msse2)
+        target_compile_options(${TARGET} PRIVATE -maes -msse2 -mssse3)
     endif()
     if(HAVE_ARMV8_AES)
         target_compile_definitions(${TARGET} PUBLIC VOLEITH_HAVE_ARMV8_AES)
@@ -330,7 +334,7 @@ if(VOLEITH_BUILD_TESTS)
 
         if(USE_AES_NI AND HAVE_AES_NI)
             target_compile_definitions(${TARGET_NAME} PUBLIC VOLEITH_HAVE_AES_NI)
-            target_compile_options(${TARGET_NAME} PRIVATE -maes -msse2)
+            target_compile_options(${TARGET_NAME} PRIVATE -maes -msse2 -mssse3)
         endif()
 
         if(USE_ARMV8_AES AND HAVE_ARMV8_AES)

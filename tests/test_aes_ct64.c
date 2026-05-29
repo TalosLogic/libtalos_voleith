@@ -289,6 +289,137 @@ test_x4_consistency(void)
         PASS();
 }
 
+/* ================================================================
+ * Public bit-plane primitives - validates the exports added for
+ * core/grostl.c (and any other future consumer that shares the
+ * bitsliced S-box without paying for a full AES round).
+ *
+ *   aes_ct64_bitslice_pack / _unpack must be inverses.
+ *   aes_ct64_sbox_inplace_4blocks must reproduce the NIST AES S-box.
+ *   aes_ct64_sbox_bitslice must match the convenience wrapper when
+ *     composed manually with pack/unpack.
+ * ================================================================ */
+
+/* AES S-box (FIPS 197 §5.1.1).  Local copy for cross-validation
+ * against the bitsliced implementation.  The production AES path
+ * never instantiates this table - it computes S-box outputs via
+ * the constant-time tower-field decomposition in aes_ct64.c. */
+static const uint8_t NIST_SBOX[256] = {
+    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b,
+    0xfe, 0xd7, 0xab, 0x76, 0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0,
+    0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0, 0xb7, 0xfd, 0x93, 0x26,
+    0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
+    0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2,
+    0xeb, 0x27, 0xb2, 0x75, 0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0,
+    0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84, 0x53, 0xd1, 0x00, 0xed,
+    0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
+    0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f,
+    0x50, 0x3c, 0x9f, 0xa8, 0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5,
+    0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2, 0xcd, 0x0c, 0x13, 0xec,
+    0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
+    0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14,
+    0xde, 0x5e, 0x0b, 0xdb, 0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c,
+    0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79, 0xe7, 0xc8, 0x37, 0x6d,
+    0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
+    0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f,
+    0x4b, 0xbd, 0x8b, 0x8a, 0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e,
+    0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e, 0xe1, 0xf8, 0x98, 0x11,
+    0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
+    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f,
+    0xb0, 0x54, 0xbb, 0x16,
+};
+
+static void
+test_bitslice_pack_roundtrip(void)
+{
+    TEST("aes_ct64_bitslice_pack/unpack round-trip (64 trials)");
+
+    int fail = 0;
+    for (int t = 0; t < 64 && !fail; t++) {
+        uint8_t in[64];
+        uint8_t out[64];
+        uint64_t q[8];
+
+        fill_random(in, 64);
+        aes_ct64_bitslice_pack(q, in);
+        aes_ct64_bitslice_unpack(out, q);
+
+        if (memcmp(in, out, 64) != 0) {
+            fail = 1;
+            printf("\n    trial %d: pack/unpack not identity", t);
+        }
+    }
+
+    if (fail)
+        FAIL("pack/unpack not identity");
+    else
+        PASS();
+}
+
+static void
+test_sbox_inplace_against_nist(void)
+{
+    TEST("aes_ct64_sbox_inplace_4blocks vs NIST S-box (all 256 inputs)");
+
+    /* Cover all 256 S-box inputs in four calls of 64 bytes each. */
+    uint8_t state[64];
+    uint8_t expected[64];
+    int fail = 0;
+
+    for (int chunk = 0; chunk < 4 && !fail; chunk++) {
+        for (int i = 0; i < 64; i++) {
+            state[i] = (uint8_t)(chunk * 64 + i);
+            expected[i] = NIST_SBOX[chunk * 64 + i];
+        }
+        aes_ct64_sbox_inplace_4blocks(state);
+        if (memcmp(state, expected, 64) != 0) {
+            fail = 1;
+            printf("\n    chunk %d (inputs %d..%d) mismatch", chunk, chunk * 64,
+                   chunk * 64 + 63);
+        }
+    }
+
+    if (fail)
+        FAIL("S-box output != NIST table");
+    else
+        PASS();
+}
+
+static void
+test_sbox_bitslice_consistency(void)
+{
+    TEST("aes_ct64_sbox_bitslice matches sbox_inplace_4blocks (64 trials)");
+
+    int fail = 0;
+    for (int t = 0; t < 64 && !fail; t++) {
+        uint8_t in[64];
+        uint8_t out_hi[64];
+        uint8_t out_lo[64];
+        uint64_t q[8];
+
+        fill_random(in, 64);
+
+        /* Path A: convenience wrapper. */
+        memcpy(out_hi, in, 64);
+        aes_ct64_sbox_inplace_4blocks(out_hi);
+
+        /* Path B: bit-plane primitives composed manually. */
+        aes_ct64_bitslice_pack(q, in);
+        aes_ct64_sbox_bitslice(q);
+        aes_ct64_bitslice_unpack(out_lo, q);
+
+        if (memcmp(out_hi, out_lo, 64) != 0) {
+            fail = 1;
+            printf("\n    trial %d: convenience vs composed differ", t);
+        }
+    }
+
+    if (fail)
+        FAIL("low-level vs high-level mismatch");
+    else
+        PASS();
+}
+
 int
 main(void)
 {
@@ -309,6 +440,12 @@ main(void)
     differential_one(256, 64,
                      "AES-256 differential vs voleith_aes (64 trials)");
     test_x4_consistency();
+
+    /* Public bit-plane primitives (exported for core/grostl.c). */
+    printf("\n  Public bit-plane primitives\n");
+    test_bitslice_pack_roundtrip();
+    test_sbox_inplace_against_nist();
+    test_sbox_bitslice_consistency();
 
     /* Full NIST KAT suite via shared runner. */
     failures += aes_kat_run_all("aes_ct64", aes_ct64_kat_adapter, &tests_run,

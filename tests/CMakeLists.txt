@@ -16,6 +16,11 @@ function(voleith_add_test TEST_NAME TEST_SOURCE)
         add_executable(${TARGET_NAME} ${TEST_SOURCE} ${ARGN})
         target_link_libraries(${TARGET_NAME} ${LIB_NAME})
 
+        # Let tests that read fixtures (e.g. NIST KAT files under
+        # third_party/) locate the repo root at runtime.
+        target_compile_definitions(${TARGET_NAME} PRIVATE
+            VOLEITH_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
         # Add intrinsics compile flags for test source files that use them directly
         get_target_property(LIB_DEFS ${LIB_NAME} INTERFACE_COMPILE_DEFINITIONS)
         if(LIB_DEFS)
@@ -23,7 +28,7 @@ function(voleith_add_test TEST_NAME TEST_SOURCE)
                 target_compile_options(${TARGET_NAME} PRIVATE -mpclmul -msse2 -msse4.1)
             endif()
             if("VOLEITH_HAVE_AES_NI" IN_LIST LIB_DEFS)
-                target_compile_options(${TARGET_NAME} PRIVATE -maes -msse2)
+                target_compile_options(${TARGET_NAME} PRIVATE -maes -msse2 -mssse3)
             endif()
         endif()
 
@@ -31,10 +36,24 @@ function(voleith_add_test TEST_NAME TEST_SOURCE)
     endforeach()
 endfunction()
 
+# Apply CTest labels to every per-variant instance of a registered test.
+# Use the "slow" label for heavy tests (e.g. the Monte Carlo chains) so the
+# default loop can skip them with `ctest -LE slow` and run them on demand
+# with `ctest -L slow`.
+function(voleith_label_test TEST_NAME)
+    foreach(VARIANT ${VOLEITH_TEST_VARIANTS})
+        set_tests_properties(${TEST_NAME}_${VARIANT} PROPERTIES LABELS "${ARGN}")
+    endforeach()
+endfunction()
+
 # Register tests
 voleith_add_test(test_field test_field.c)
 voleith_add_test(test_aes test_aes.c aes_kat_runner.c)
 voleith_add_test(test_aes_ct64 test_aes_ct64.c aes_kat_runner.c)
+voleith_add_test(test_grostl test_grostl.c)
+voleith_add_test(test_grostl_kat test_grostl_kat.c)
+voleith_add_test(test_grostl_mct test_grostl_mct.c)
+voleith_label_test(test_grostl_mct slow)
 voleith_add_test(test_prg test_prg.c)
 voleith_add_test(test_hash test_hash.c)
 voleith_add_test(test_vc test_vc.c)
@@ -51,9 +70,12 @@ voleith_add_test(test_merkle_circuit test_merkle_circuit.c)
 voleith_add_test(test_indexed_merkle_circuit test_indexed_merkle_circuit.c)
 voleith_add_test(test_gf8_circuit test_gf8_circuit.c)
 voleith_add_test(test_aes_gf8_circuit test_aes_gf8_circuit.c)
+voleith_add_test(test_grostl_gf8_circuit test_grostl_gf8_circuit.c)
 voleith_add_test(test_aes_cmac_gf8_circuit test_aes_cmac_gf8_circuit.c)
 voleith_add_test(test_kdf_ctr_cmac_gf8_circuit test_kdf_ctr_cmac_gf8_circuit.c)
 voleith_add_test(test_merkle_gf8_circuit test_merkle_gf8_circuit.c)
+voleith_add_test(test_merkle_grostl_gf8_circuit test_merkle_grostl_gf8_circuit.c)
 voleith_add_test(test_indexed_merkle_gf8_circuit test_indexed_merkle_gf8_circuit.c)
+voleith_add_test(test_indexed_merkle_grostl_gf8_circuit test_indexed_merkle_grostl_gf8_circuit.c)
 voleith_add_test(test_gf8_quicksilver test_gf8_quicksilver.c)
 voleith_add_test(test_gf8_proof test_gf8_proof.c)

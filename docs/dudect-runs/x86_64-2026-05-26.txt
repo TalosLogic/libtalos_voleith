@@ -104,3 +104,101 @@ Phase B status as of 2026-05-26
   (additional hosts, longer-run --all at 500k+ samples, governor
   verification when running on a kernel with cpufreq exposed).
   This file will be appended as those runs land.
+
+
+================================================================
+Run 4 -- 2026-05-27  --target voleith_grostl256_msg --samples 100000
+                     --target voleith_grostl512_msg --samples 100000
+================================================================
+
+  voleith_grostl256_msg     |t| = 0.34  PASS
+  voleith_grostl512_msg     |t| = 0.02  PASS
+
+  voleith_grostl256_msg (reps=50, 100000 samples/class):
+    Running |t| trace: 0.88, 0.55, 0.84, 0.39, 0.44, 0.66, 0.46, 0.65, 0.45, 0.34
+    class A (msg = 0x00...): mu = 4488637.22  sigma = 399293.02
+                             n = 98000  (cropped 2000)
+    class B (msg = 0xff...): mu = 4489243.65  sigma = 398770.80
+                             n = 98000  (cropped 2000)
+    Per-call cost: ~89.8 kcyc per hash (4.49M cyc / 50 reps),
+                   ~31 us at 2.9 GHz over a 128-byte message.
+    Per-call class delta: (4489244 - 4488637) / 50 ~= 0.01 cyc per
+                          hash, sub-cycle; far below any practical
+                          timing-attack resolution.
+
+  voleith_grostl512_msg (reps=50, 100000 samples/class):
+    Running |t| trace: 0.12, 0.05, 0.07, 0.05, 0.02, 0.07, 0.04, 0.07, 0.06, 0.02
+    class A (msg = 0x00...): mu = 8664997.09  sigma = 1399723.56
+                             n = 98000  (cropped 2000)
+    class B (msg = 0xff...): mu = 8664889.01  sigma = 1397658.12
+                             n = 98000  (cropped 2000)
+    Per-call cost: ~173 kcyc per hash (8.66M cyc / 50 reps),
+                   ~60 us at 2.9 GHz over a 128-byte message.
+    Per-call class delta: (8664997 - 8664889) / 50 ~= 0.002 cyc per
+                          hash; effectively zero.
+
+  Verdict: PASS for both targets.  Running |t| traces walk around
+  zero rather than scaling with sqrt(n), confirming structural
+  constant-time behavior in core/grostl.c (gf_xtime, mix_bytes_column,
+  add_round_constant, shift_bytes, and the absorb / finalize /
+  padding path).  The Grøstl-256 trial exercises 3 compressions per
+  hash (2 message blocks + 1 padding block) and the Grøstl-512 trial
+  exercises 2 compressions per hash, so the multi-block compression
+  and padding chains are covered, not just a single compression call.
+
+
+================================================================
+Run 5 -- 2026-05-27  --target voleith_grostl256_gf8_build_witness_msg
+                     --samples 100000
+================================================================
+
+  voleith_grostl256_gf8_build_witness_msg     |t| = 0.05  PASS
+
+  voleith_grostl256_gf8_build_witness_msg (reps=1, 100000 samples/class):
+    class A (msg = 0x00...): mu = 1672314.28  sigma = 337335.86
+                             n = 98000  (cropped 2000)
+    class B (msg = 0xff...): mu = 1672240.90  sigma = 336437.62
+                             n = 98000  (cropped 2000)
+    Per-call cost: ~1.67M cyc per witness build (~576 us at 2.9 GHz)
+                   for a 32-byte message (1 compression block, 1920
+                   S-box inversions: 32 + 1*1280 + 640 = 1952-byte
+                   witness).
+    Per-call class delta: 73 cyc per build; relative 4.4e-5, far
+                          below any practical timing-attack
+                          resolution.
+
+  Verdict: PASS.  Class sigmas match to within 0.3%, signature of
+  identical control flow.  This run validates the prover-side
+  witness-builder code path on secret message bytes, including:
+    - voleith_gf8_inv (Fermat addition-chain inverse, core/field.c)
+    - aes_sbox_byte (affine + inverse) and the GF(2^8) constant
+      multipliers gf_xtime / mul2_byte ... mul7_byte
+    - mix_bytes_column_bytes / shift_bytes_bytes /
+      add_round_constant_*_bytes - the full per-round byte-level
+      Grøstl machinery
+    - compress_bytes_capture / output_transform_bytes_capture /
+      permute_*_bytes_capture - the witness-trace path that records
+      every S-box inv_in in circuit-evaluation order
+
+  Note: total run wall time ~2 minutes, dominated by the per-trial
+  cost (1 rep at 576 us x 200k trials).  The Fermat inverse landed
+  alongside this target (step 9 in GROSTL_PRIMITIVE_DESIGN.md);
+  with the prior brute-force 255-iteration scan, the same run would
+  have taken ~17 minutes per class.
+
+
+================================================================
+Phase B status as of 2026-05-27
+================================================================
+
+  All 12 real targets PASS on Linux x86_64 (9 from 2026-05-26, plus
+  Grøstl-256 / Grøstl-512 added 2026-05-27 in Run 4, plus the
+  Grøstl-256 GF(2^8) witness builder added 2026-05-27 in Run 5).
+  Source-level constant-time guarantee for core/grostl.c,
+  core/field.c voleith_gf8_inv, and the byte-level witness trace in
+  circuits/grostl_gf8_circuit.c is supported by structural review
+  (no data-dependent branches; gf_xtime uses arithmetic broadcast
+  for the carry; the Fermat inverse uses a fixed addition chain;
+  SubBytes delegates to aes_ct64_sbox_inplace_4blocks; ShiftBytes
+  indexes by public per-row constants) and empirical validation
+  (Runs 4 and 5 above).

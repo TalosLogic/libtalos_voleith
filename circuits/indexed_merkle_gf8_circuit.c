@@ -25,11 +25,14 @@
  * Processes bytes MSB-first, then bits within each byte MSB-first.
  * Uses 3 GF(2⁸) mul gates per bit, which acts as AND on {0x00, 0x01} values.
  * Adds one assert_zero constraint.
+ *
+ * Non-static: shared with indexed_merkle_grostl_gf8_circuit.c (the
+ * comparison is over the value field, independent of Merkle node size).
  * ================================================================ */
 
-static void
-assert_lt_gf8(voleith_gf8_circuit_t *c, const gf8_wire_id *a,
-              const gf8_wire_id *b, size_t n_bytes)
+void
+indexed_merkle_gf8_assert_lt(voleith_gf8_circuit_t *c, const gf8_wire_id *a,
+                             const gf8_wire_id *b, size_t n_bytes)
 {
     /* lt      - running "a < b" result; starts false (0x00) */
     /* eq_mask - all bits seen so far are equal; starts true (0x01) */
@@ -112,8 +115,10 @@ indexed_merkle_gf8_nonmember_circuit(
                             root);
 
     /* Step 3: assert ordering constraints (violations fail the proof at verify time) */
-    assert_lt_gf8(c, low_value, target, target_bytes); /* low_value < target  */
-    assert_lt_gf8(c, target, low_next, target_bytes);  /* target   < low_next */
+    indexed_merkle_gf8_assert_lt(c, low_value, target,
+                                 target_bytes); /* low_value < target  */
+    indexed_merkle_gf8_assert_lt(c, target, low_next,
+                                 target_bytes); /* target   < low_next */
     return 0;
 }
 
@@ -147,12 +152,16 @@ indexed_merkle_gf8_nonmember_circuit_secret_dir(
     merkle_gf8_leaf_hash_circuit(c, leaf_data, leaf_data_bytes, hash,
                                  leaf_hash);
 
-    /* Step 2: verify the Merkle authentication path (path_dirs are private wires) */
+    /*
+     * Step 2: verify the Merkle authentication path.  path_dirs are private
+     * wires; their booleanity (dir in {0, 1}) is enforced inside
+     * merkle_gf8_path_circuit_secret_dir, so it need not be repeated here.
+     */
     merkle_gf8_path_circuit_secret_dir(c, leaf_hash, path_nodes, path_dirs,
                                        depth, hash, root);
 
     /* Step 3: assert ordering constraints */
-    assert_lt_gf8(c, low_value, target, target_bytes);
-    assert_lt_gf8(c, target, low_next, target_bytes);
+    indexed_merkle_gf8_assert_lt(c, low_value, target, target_bytes);
+    indexed_merkle_gf8_assert_lt(c, target, low_next, target_bytes);
     return 0;
 }

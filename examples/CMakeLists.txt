@@ -16,11 +16,15 @@ set(EXAMPLE_NAMES
     example_kdf_gf8
     example_merkle
     example_merkle_gf8
+    example_merkle_grostl_gf8
     example_indexed_merkle
     example_indexed_merkle_gf8
+    example_indexed_merkle_grostl_gf8
     example_kvac_pq
     example_kvac_pq_gf8
     example_kvac_pq_gf8_depth12
+    example_kvac_pq_grostl_gf8
+    example_kvac_pq_grostl_gf8_depth12
 )
 
 foreach(EXAMPLE ${EXAMPLE_NAMES})

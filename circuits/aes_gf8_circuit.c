@@ -411,17 +411,21 @@ aes256_gf8_circuit(voleith_gf8_circuit_t *c, const gf8_wire_id key[32],
  * Witness builders - byte-level AES trace to produce inv_in values
  * ================================================================ */
 
-/* Compute GF(2⁸) inverse: brute-force scan (acceptable for setup, not hot path). */
-static uint8_t
+/*
+ * Compute GF(2⁸) inverse for the witness builder.  Delegates to the
+ * constant-time Fermat-based primitive in core/field.h: a^254 via a
+ * fixed addition chain of 7 squarings + 6 multiplications.  Returns
+ * 0 for x = 0, matching the Prop. 6.4 fix-up convention.
+ *
+ * Previously this was a 255-iteration brute-force scan; the Fermat
+ * form is ~20x faster and identical-output, freeing the witness
+ * builder for dudect timing validation (see step 9 in
+ * docs/GROSTL_PRIMITIVE_DESIGN.md).
+ */
+static inline uint8_t
 gf8_inv_byte(uint8_t x)
 {
-    if (x == 0)
-        return 0;
-    for (int y = 1; y < 256; y++) {
-        if (voleith_gf8_mul(x, (uint8_t)y) == 1)
-            return (uint8_t)y;
-    }
-    return 0; /* unreachable for nonzero x in GF(2⁸) */
+    return voleith_gf8_inv(x);
 }
 
 /* AES S-box byte computation: affine(inv(x)) XOR 0x63. */

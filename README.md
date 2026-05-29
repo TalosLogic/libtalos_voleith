@@ -52,6 +52,8 @@ milliseconds.
 | NIST SP 800-38A | AES-ECB validation vectors |
 | NIST SP 800-108r1 | KDF in Counter Mode (KDF-CTR) using AES-CMAC as PRF |
 | RFC 4493 | AES-CMAC subkey derivation, padding, and CBC-MAC chaining |
+| Grøstl (SHA-3 finalist) | Grøstl-256 / Grøstl-512 hash, as standard-eval primitive and as a wide-node Merkle hash circuit |
+| RFC 6962 | Leaf / internal-node domain-separation prefix for the Grøstl Merkle circuit |
 
 All protocol code is a clean-room implementation from the FAEST v2.0
 specification.  No source from the FAEST reference implementation (`faest-ref`)
@@ -220,11 +222,47 @@ second-preimage attacks.
 | CMAC-128, depth d | 14,400 leaf + d * 21,728 path | 400 leaf + d * 616 path |
 | CMAC-256, depth d | 19,872 leaf + d * 29,936 path | 552 leaf + d * 844 path |
 
-Path direction bits are supplied as public instance values, so the left/right
-swap is resolved at circuit-build time with zero additional gates.  A
-secret-leaf-index variant (where the leaf index is itself a witness) would
-require one `add_mul` per byte per level; add a new circuit function rather
-than modifying the public-dir API if that use case arises.
+Path direction bits come in two forms.  Public-dir (`merkle_gf8_path_circuit`)
+supplies them as public instance values, so the left/right swap is resolved at
+circuit-build time with zero additional gates, correct when the leaf index is
+public.  Secret-dir (`merkle_gf8_path_circuit_secret_dir`) takes them as witness
+wires and muxes each node byte (one `add_mul` per byte per level), hiding the
+leaf index.  Signal KVAC uses the secret-dir variant: it is an anonymous
+credential, so the member's position must stay private (only the root is
+public).  See [`docs/DESIGN.md`](docs/DESIGN.md) for the rationale and current coverage.
+
+#### Wide-node Grøstl hashing (high collision resistance)
+
+DM and CMAC nodes are 128 bits wide, so their collision resistance is only the
+birthday bound of 2⁶⁴ regardless of the security level.  That is fine when the
+tree is built by a trusted party, but too low whenever an adversary can grind
+leaf values to forge membership, the threat model of an anonymous-credential or
+ring-signature tree.  `merkle_grostl_gf8_circuit` (GF(2⁸) only) raises the node
+hash to Grøstl, the SHA-3 finalist whose S-box *is* the AES S-box, so it reuses
+the existing inversion gadget and adds no new costly gate type.  Three variants
+trade collision resistance against proof size:
+
+| Variant | Node width | Collision resistance | GF(2⁸) mul slots / internal node |
+|---------|-----------|----------------------|----------------------------------|
+| `VOLEITH_MERKLE_GROSTL_256`     | 32 B (256-bit) | 2¹²⁸ | 3,200 |
+| `VOLEITH_MERKLE_GROSTL_256_T27` | 27 B (216-bit) | 2¹⁰⁸ | 1,920 |
+| `VOLEITH_MERKLE_GROSTL_512`     | 64 B (512-bit) | 2²⁵⁶ | 8,960 |
+| `VOLEITH_MERKLE_GROSTL_512_T59` | 59 B (472-bit) | 2²³⁶ | 5,376 |
+
+The `_T27` variant truncates Grøstl-256 to 27 bytes (the largest node size whose
+internal-node input still fits a single Grøstl compression), cutting per-level
+cost by ~40% versus the full 32-byte node, at 2¹⁰⁸ instead of 2¹²⁸ collision
+resistance (a standard SHA-512/t-style truncation).  `_T59` is the same
+single-block trick one tier up, for the >2¹²⁸ regime that only Grøstl-512
+reaches: 59-byte nodes, 2²³⁶ CR, one compression (5,376 S-boxes) instead of the
+full Grøstl-512's two (8,960).  Leaf and internal nodes are
+domain-separated with an RFC 6962 prefix byte (`0x00` / `0x01`).  Both a
+public-dir (`merkle_grostl_gf8_path_circuit`) and a secret-dir
+(`merkle_grostl_gf8_path_circuit_secret_dir`, hidden leaf index) form are
+provided; the secret-dir form is what ring-signature and anonymous-credential
+trees need.  See
+[`docs/DESIGN.md`](docs/DESIGN.md#grøstl-wide-node-merkle-hashing-and-why-a-27-byte-truncation)
+for the full collision-resistance and `_T27` cost analysis.
 
 ### Indexed Merkle non-membership
 
@@ -235,6 +273,14 @@ demonstrating an adjacent leaf `(value, next_value, next_index)` such that
 
 Additional gate cost beyond the Merkle path: `2 * 3 * 8 * target_bytes`
 GF(2^8) mul gates for the two byte-wise less-than comparisons.
+
+A wide-node Grøstl variant, `indexed_merkle_grostl_gf8_nonmember_circuit`
+(plus a secret-dir form, `..._secret_dir`, for a hidden leaf index), is also
+provided.  Use it when an adversary can choose leaf values: non-membership
+soundness then rests on the node hash's collision resistance, and the 16-byte
+AES-DM/CMAC node's 2⁶⁴ bound is too low, and the Grøstl nodes restore it to the
+security level.  The range comparison is identical (shared with the DM/CMAC
+circuit); only the node hash changes.
 
 **Trust assumption (important for integrators):** the non-membership statement
 is sound *only* if the tree builder maintains the adjacency invariant, namely
@@ -287,23 +333,27 @@ Six parameter sets are provided, matching the FAEST security levels.  The `f`
 (fast) variants use a shallower GGM tree and are optimized for prover speed;
 the `s` (small) variants optimize proof size at some prover cost.
 
-| Parameter | Security | Proof size (AES-128 circuit) |
-|-----------|----------|------------------------------|
-| `voleith_params_em_128f` | 128-bit | ~5.5 KB |
-| `voleith_params_em_128s` | 128-bit | ~4.3 KB |
-| `voleith_params_em_192f` | 192-bit | ~10 KB |
-| `voleith_params_em_192s` | 192-bit | ~8 KB |
-| `voleith_params_em_256f` | 256-bit | ~17 KB |
-| `voleith_params_em_256s` | 256-bit | ~14 KB |
+| Parameter | Security | Proof size (GF(2⁸) AES-128 circuit) |
+|-----------|----------|-------------------------------------|
+| `voleith_params_em_128f` | 128-bit | 6,596 B |
+| `voleith_params_em_128s` | 128-bit | 4,962 B |
+| `voleith_params_em_192f` | 192-bit | 12,380 B |
+| `voleith_params_em_192s` | 192-bit | 9,340 B |
+| `voleith_params_em_256f` | 256-bit | 19,636 B |
+| `voleith_params_em_256s` | 256-bit | 15,344 B |
 
-Proof size scales with AND/mul gate count; the figures above are for the
-canonical AES-128-key-knowledge circuit from the FAEST specification.
+Proof size scales with mul-gate (S-box) count; the figures above are for the
+GF(2⁸) AES-128 circuit (ℓ = 216). Note "EM" names the leaf-commitment
+parameter family (`n_leafcom = 2`), not the circuit: the AES-128 example
+proves *standard* AES-128 (secret key, 200 S-boxes), the FAEST-128f
+statement, not the Even-Mansour OWF. See `docs/DESIGN.md` for the full
+breakdown.
 
 The `f` variants are strongly recommended for most applications.  The `s`
-variants reduce proof size by roughly 20% but use a much deeper GGM tree: for
-128-bit security, `em_128s` (τ=11, N=65536) requires approximately 22× more
-PRG calls during GGM expansion than `em_128f` (τ=16, N=2048), with no other
-benefit.
+variants reduce proof size by roughly 25% but use a much deeper GGM tree: for
+128-bit security, `em_128s` (τ=11) expands ~22,528 total GGM leaves versus
+~3,072 for `em_128f` (τ=16), roughly 7× more PRG work during GGM expansion,
+with no other benefit.
 
 ---
 
@@ -348,6 +398,9 @@ multiple independent sources:
 - **AES-CMAC:** RFC 4493 Examples 1-4, NIST CAVP CMAC vectors (partial /
   complete blocks, K1 / K2 paths, truncated tags).
 - **KDF-CTR(AES-CMAC):** NIST CAVS 14.4 (4 vectors, AES-128 / AES-256).
+- **Grøstl-256 / Grøstl-512:** NIST Grøstl ShortMsgKAT and LongMsgKAT
+  known-answer vectors plus the Monte Carlo Test; the GF(2⁸) circuit is
+  cross-checked against the software hash on every test run.
 - **GF(2^k) arithmetic:** `faest-ref` Appendix A.1 known-answer vectors for
   every field size from GF(2^8) to GF(2^256).
 - **PRG / GGM tree / vector commitment / AES circuit:** cross-validated
@@ -428,7 +481,7 @@ witness construction with `aes_gf8_build_witness`.
 
 ## Examples
 
-Fourteen runnable example programs in `examples/` exercise every circuit
+Eighteen runnable example programs in `examples/` exercise every circuit
 building block in both proof-system variants:
 
 | Example | What it proves |
@@ -436,10 +489,14 @@ building block in both proof-system variants:
 | `example_aes.c` / `example_aes_gf8.c`             | Knowledge of an AES-128 / AES-256 key |
 | `example_aes_cmac.c` / `example_aes_cmac_gf8.c`   | Knowledge of a CMAC key producing a given tag |
 | `example_kdf.c` / `example_kdf_gf8.c`             | Correct KDF-CTR(AES-CMAC) derivation from a secret key |
-| `example_merkle.c` / `example_merkle_gf8.c`       | Membership of a secret leaf at a public position in a Merkle tree |
+| `example_merkle.c` / `example_merkle_gf8.c`       | Membership of a secret leaf at a public position in a Merkle tree (AES-DM / CMAC node hash) |
+| `example_merkle_grostl_gf8.c`                     | The same, with a wide-node Grøstl hash, plus prove/verify timing |
 | `example_indexed_merkle.c` / `example_indexed_merkle_gf8.c` | Non-membership of a value in an indexed Merkle tree |
-| `example_kvac_pq.c` / `example_kvac_pq_gf8.c`     | Signal-style anonymous group membership credential |
+| `example_indexed_merkle_grostl_gf8.c`             | Non-membership with wide-node Grøstl-256 T27 nodes (2¹⁰⁸ collision resistance) |
+| `example_kvac_pq.c` / `example_kvac_pq_gf8.c`     | Signal-style anonymous group membership credential (AES-DM trees) |
 | `example_kvac_pq_gf8_depth12.c`                   | The above at depth 12 (4,096 group members) |
+| `example_kvac_pq_grostl_gf8.c`                    | The same KVAC statement over Grøstl-256 T27 trees with a hidden leaf index (secret-dir) |
+| `example_kvac_pq_grostl_gf8_depth12.c`            | The Grøstl KVAC at depth 12, with prove/verify timing |
 
 Each example builds the circuit, generates a valid witness, produces a proof,
 verifies it, and prints circuit statistics (AND-gate count, ell, proof size)
@@ -476,6 +533,10 @@ plus PASS/FAIL.  After building, run them from the build directory:
   [Faster VOLEitH Signatures from All-but-One Vector Commitments and Half
   Trees](https://eprint.iacr.org/2024/097) (2024).  The half-tree GGM
   optimization referenced in the future work section.
+- Gauravaram, Knudsen, Matusiewicz, Mendel, Rechberger, Schläffer, Thomsen.
+  [Grøstl – a SHA-3 candidate](https://www.groestl.info/) (SHA-3 competition
+  finalist).  The wide-pipe AES-S-box-based hash used for high-collision-resistance
+  Merkle nodes.
 
 ### Standards documents
 
@@ -489,6 +550,9 @@ plus PASS/FAIL.  After building, run them from the build directory:
   Recommendation for Key Derivation Using Pseudorandom Functions.
 - [RFC 4493](https://www.rfc-editor.org/rfc/rfc4493): The AES-CMAC
   Algorithm.
+- [RFC 6962](https://www.rfc-editor.org/rfc/rfc6962): Certificate Transparency
+  (source of the `0x00` / `0x01` leaf / internal-node domain-separation prefix
+  used by the Grøstl Merkle circuit).
 
 ### Reference implementations (test oracles only)
 

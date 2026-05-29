@@ -276,6 +276,15 @@ process_level_gf8_secret_dir(voleith_gf8_circuit_t *c,
                              const gf8_wire_id sibling[16], gf8_wire_id dir,
                              voleith_merkle_hash_t hash, gf8_wire_id out[16])
 {
+    /*
+     * Soundness: dir must be a single bit.  add_mux does not enforce this,
+     * and an unconstrained dir lets the prover make neither mux output equal
+     * to current, erasing the carried-up chain value and forging a path.
+     * dir == dir * dir holds only for dir in {0, 1} in GF(2^8), and the check
+     * is free (no mul-slot, no witness).
+     */
+    voleith_gf8_assert_product(c, dir, dir, dir);
+
     gf8_wire_id left[16], right[16];
     for (int i = 0; i < 16; i++) {
         left[i] = voleith_gf8_add_mux(c, current[i], sibling[i], dir);

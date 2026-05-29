@@ -71,6 +71,21 @@ voleith_gf8_add(voleith_gf8_t a, voleith_gf8_t b)
 /* Returns a * b in GF(2^8) modulo P_8. */
 voleith_gf8_t voleith_gf8_mul(voleith_gf8_t a, voleith_gf8_t b);
 
+/*
+ * Returns a^{-1} in GF(2^8) for nonzero a, and 0 for a == 0.
+ *
+ * Implemented via Fermat's little theorem: a^{-1} = a^254 in GF(2^8)
+ * for nonzero a (since a^255 = 1).  At a = 0 the chain produces 0,
+ * matching the convention used by the AES S-box circuit (Proposition
+ * 6.4 fix-up).
+ *
+ * Constant-time by construction: a fixed addition chain of 7
+ * squarings + 6 multiplications via voleith_gf8_mul, the same work
+ * regardless of input.  Suitable for witness-builder use on secret
+ * S-box inputs.
+ */
+voleith_gf8_t voleith_gf8_inv(voleith_gf8_t a);
+
 /* ========================================================================
  * GF(2^64) operations
  * ======================================================================== */

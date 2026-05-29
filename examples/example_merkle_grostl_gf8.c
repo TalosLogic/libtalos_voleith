@@ -2,19 +2,22 @@
  * Copyright (c) 2026 Jason Crawford
  * SPDX-License-Identifier: AGPL-3.0-only
  *
- * example_merkle_gf8.c - ZK proof of Merkle path membership (GF(2^8) circuit)
+ * example_merkle_grostl_gf8.c - ZK proof of Merkle path membership using
+ * the wide-node Grøstl Merkle circuit (circuits/merkle_grostl_gf8_circuit).
  *
- * 16-byte (128-bit) nodes hashed with Davies-Meyer AES-128: a cheap,
- * compact Merkle tree with 2^64 collision resistance.  Counterpart to
- * example_merkle_grostl_gf8.c, which uses wide Grøstl nodes for full
- * 2^128 / 2^256 collision resistance - run both at the same depth to
- * compare proof size and prover/verifier time.
+ * Counterpart to example_merkle_gf8.c, which uses 16-byte AES-DM nodes
+ * (2⁶⁴ collision resistance).  This example uses Grøstl-256 with 32-byte
+ * nodes for full 2¹²⁸ collision resistance - the "proper" Merkle option
+ * when 64-bit CR is not enough.  Switch GROSTL_VARIANT to
+ * VOLEITH_MERKLE_GROSTL_512 for 64-byte nodes / 2²⁵⁶ CR.
  *
- * Tree: depth 5 (32 leaves), Davies-Meyer AES-128, public leaf index.
+ * Tree: depth 5 (32 leaves), Grøstl-256, RFC-6962 domain separation
+ * (0x00 leaf / 0x01 inode), public leaf index.  Membership is proven for
+ * one chosen leaf.
  *
- * Public  (instance): root R (16 bytes)
- * Private (witness):  leaf data + AES S-box inv_in for every AES call +
- *                     sibling hashes along the path.
+ * Public  (instance): root R (node_bytes)
+ * Private (witness):  leaf data + all Grøstl S-box inv_in values + sibling
+ *                     hashes along the path.
  */
 
 /* POSIX.1b for clock_gettime / CLOCK_MONOTONIC */
@@ -22,120 +25,93 @@
 
 #include "gf8_circuit.h"
 #include "gf8_proof.h"
-#include "merkle_gf8_circuit.h"
-#include "aes_gf8_circuit.h"
-#include "aes.h"
+#include "grostl.h"
+#include "merkle_grostl_gf8_circuit.h"
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
-#include <time.h>
+#include <string.h>
+#include <time.h> /* needed for timing */
 #include "bench_util.h"
 
+#define GROSTL_VARIANT VOLEITH_MERKLE_GROSTL_256_T27
 #define DEPTH 5
 #define N_LEAVES (1u << DEPTH) /* 32 */
-#define NODE_BYTES 16
-#define LEAF_INDEX 21 /* 0b10101 - a mixed-bit path (matches Grøstl example) */
+#define LEAF_DATA_BYTES 32
+#define LEAF_INDEX 21 /* 0b10101 - a mixed-bit path */
 
 /* Benchmark iteration counts (tune as needed). */
 #define BENCH_WARMUP 2
 #define BENCH_PROVE_ITERS 25
 #define BENCH_VERIFY_ITERS 100
 
-static const uint8_t LEAF_DOM[16] = {0x56, 0x4f, 0x4c, 0x45, 0x69, 0x74,
-                                     0x48, 0x2d, 0x4c, 0x65, 0x61, 0x66,
-                                     0x00, 0x00, 0x00, 0x00};
-static const uint8_t NODE_DOM[16] = {0x56, 0x4f, 0x4c, 0x45, 0x69, 0x74,
-                                     0x48, 0x2d, 0x4e, 0x6f, 0x64, 0x65,
-                                     0x00, 0x00, 0x00, 0x00};
-
-/* DM compress: AES_key(pt) XOR pt */
-static void
-dm_compress(const uint8_t key[16], const uint8_t pt[16], uint8_t out[16])
+static const char *
+variant_label(voleith_merkle_grostl_variant_t v)
 {
-    voleith_aes_ctx_t ctx;
-    voleith_aes_key_expand(&ctx, key, 128);
-    voleith_aes_encrypt(&ctx, out, pt);
-    for (int i = 0; i < 16; i++)
-        out[i] ^= pt[i];
-}
-
-static void
-leaf_hash_dm(const uint8_t leaf[16], uint8_t out[16])
-{
-    dm_compress(LEAF_DOM, leaf, out);
-}
-
-static void
-inode_hash_dm(const uint8_t L[16], const uint8_t R[16], uint8_t out[16])
-{
-    uint8_t P[16];
-    for (int i = 0; i < 16; i++)
-        P[i] = R[i] ^ NODE_DOM[i];
-    dm_compress(L, P, out);
-}
-
-/*
- * get_aes_inv_in - compute the 200 inv_in bytes for AES_{key}(plaintext).
- * Calls aes128_gf8_build_witness and extracts witness[16..215].
- */
-static void
-get_aes_inv_in(const uint8_t key[16], const uint8_t pt[16], uint8_t inv_in[200])
-{
-    uint8_t tmp[216];
-    aes128_gf8_build_witness(key, pt, tmp, NULL);
-    memcpy(inv_in, tmp + 16, 200);
+    switch (v) {
+    case VOLEITH_MERKLE_GROSTL_256:
+        return "Grøstl-256, 32-byte nodes (2^128 CR, 2-block inode)";
+    case VOLEITH_MERKLE_GROSTL_256_T27:
+        return "Grøstl-256/T27, 27-byte nodes (2^108 CR, 1-block inode)";
+    case VOLEITH_MERKLE_GROSTL_512:
+        return "Grøstl-512, 64-byte nodes (2^256 CR, 2-block inode)";
+    default:
+        return "?";
+    }
 }
 
 int
 main(void)
 {
-    printf("=== Merkle path ZK proof (GF(2^8) circuit, AES-DM nodes) ===\n");
+    const voleith_merkle_grostl_variant_t variant = GROSTL_VARIANT;
+    const size_t nb = merkle_grostl_node_bytes(variant);
+
+    printf("=== Merkle path ZK proof (wide-node Grøstl Merkle circuit) ===\n");
     printf("Statement: knowledge of leaf[%u] and path s.t. Merkle path → "
            "root\n",
            LEAF_INDEX);
-    printf("Tree: %u leaves (depth %u), Davies-Meyer AES-128 16-byte nodes "
-           "(2^64 CR), public index\n\n",
-           N_LEAVES, DEPTH);
+    printf("Tree: %u leaves (depth %u), %s, public index\n\n", N_LEAVES, DEPTH,
+           variant_label(variant));
 
     /* ================================================================
      * Build the depth-5 tree in software.
      *
-     * leaf[i]      = a 16-byte record: {i, i+1, ..., i+15}
-     * layer[0][i]  = leaf_hash_dm(leaf[i])
-     * layer[k+1][j]= inode_hash_dm(layer[k][2j], layer[k][2j+1])
+     * leaf[i]      = a 32-byte record: {i, i+1, ..., i+31}
+     * layer[0][i]  = Grøstl(0x00 ‖ leaf[i])              (leaf hashes)
+     * layer[k+1][j]= Grøstl(0x01 ‖ layer[k][2j] ‖ [2j+1]) (inode hashes)
      * root         = layer[DEPTH][0]
      * ================================================================ */
-    uint8_t leaves[N_LEAVES][NODE_BYTES];
+    uint8_t leaves[N_LEAVES][LEAF_DATA_BYTES];
     for (unsigned i = 0; i < N_LEAVES; i++)
-        for (unsigned j = 0; j < NODE_BYTES; j++)
+        for (unsigned j = 0; j < LEAF_DATA_BYTES; j++)
             leaves[i][j] = (uint8_t)(i + j);
 
-    /* layer[k] holds (N_LEAVES >> k) nodes of NODE_BYTES each. */
+    /* layer[k] holds (N_LEAVES >> k) nodes of nb bytes each. */
     uint8_t *layer[DEPTH + 1];
     for (unsigned k = 0; k <= DEPTH; k++)
-        layer[k] = malloc(((size_t)N_LEAVES >> k) * NODE_BYTES);
+        layer[k] = malloc(((size_t)N_LEAVES >> k) * nb);
 
     for (unsigned i = 0; i < N_LEAVES; i++)
-        leaf_hash_dm(leaves[i], layer[0] + (size_t)i * NODE_BYTES);
+        merkle_grostl_leaf_hash(leaves[i], LEAF_DATA_BYTES, variant,
+                                layer[0] + (size_t)i * nb);
 
     for (unsigned k = 0; k < DEPTH; k++) {
         unsigned n_parents = N_LEAVES >> (k + 1);
         for (unsigned j = 0; j < n_parents; j++)
-            inode_hash_dm(layer[k] + (size_t)(2 * j) * NODE_BYTES,
-                          layer[k] + (size_t)(2 * j + 1) * NODE_BYTES,
-                          layer[k + 1] + (size_t)j * NODE_BYTES);
+            merkle_grostl_inode_hash(layer[k] + (size_t)(2 * j) * nb,
+                                     layer[k] + (size_t)(2 * j + 1) * nb,
+                                     variant, layer[k + 1] + (size_t)j * nb);
     }
 
     const uint8_t *root = layer[DEPTH]; /* layer[DEPTH][0] */
 
     /* Sibling and direction at each path level for LEAF_INDEX. */
     uint8_t path_dirs[DEPTH];
-    uint8_t siblings[DEPTH * NODE_BYTES];
+    uint8_t siblings[DEPTH * 64]; /* nb <= 64 */
     for (unsigned k = 0; k < DEPTH; k++) {
         unsigned cur = LEAF_INDEX >> k;
         path_dirs[k] = (uint8_t)(cur & 1u);
-        memcpy(siblings + (size_t)k * NODE_BYTES,
-               layer[k] + (size_t)(cur ^ 1u) * NODE_BYTES, NODE_BYTES);
+        memcpy(siblings + (size_t)k * nb, layer[k] + (size_t)(cur ^ 1u) * nb,
+               nb);
     }
 
     /* ================================================================
@@ -149,25 +125,24 @@ main(void)
         return 1;
     }
 
-    gf8_wire_id leaf_wires[NODE_BYTES];
-    for (int i = 0; i < NODE_BYTES; i++)
+    gf8_wire_id leaf_wires[LEAF_DATA_BYTES];
+    for (int i = 0; i < LEAF_DATA_BYTES; i++)
         leaf_wires[i] = voleith_gf8_add_witness(c);
 
-    gf8_wire_id leaf_hash_wires[16];
-    merkle_gf8_leaf_hash_circuit(c, leaf_wires, NODE_BYTES,
-                                 VOLEITH_MERKLE_HASH_AES_DM, leaf_hash_wires);
+    gf8_wire_id leaf_hash_wires[64];
+    merkle_grostl_gf8_leaf_hash_circuit(c, leaf_wires, LEAF_DATA_BYTES, variant,
+                                        leaf_hash_wires);
 
-    gf8_wire_id *node_wires =
-        malloc((size_t)DEPTH * NODE_BYTES * sizeof(*node_wires));
-    for (size_t i = 0; i < (size_t)DEPTH * NODE_BYTES; i++)
+    gf8_wire_id *node_wires = malloc((size_t)DEPTH * nb * sizeof(*node_wires));
+    for (size_t i = 0; i < (size_t)DEPTH * nb; i++)
         node_wires[i] = voleith_gf8_add_witness(c);
 
-    gf8_wire_id root_computed[16];
-    merkle_gf8_path_circuit(c, leaf_hash_wires, node_wires, path_dirs, DEPTH,
-                            VOLEITH_MERKLE_HASH_AES_DM, root_computed);
+    gf8_wire_id root_computed[64];
+    merkle_grostl_gf8_path_circuit(c, leaf_hash_wires, node_wires, path_dirs,
+                                   DEPTH, variant, root_computed);
 
-    /* Root: 16 public instance wires; assert equal. */
-    for (int i = 0; i < NODE_BYTES; i++) {
+    /* Root: nb public instance wires; assert equal. */
+    for (size_t i = 0; i < nb; i++) {
         gf8_wire_id root_inst = voleith_gf8_add_instance(c);
         voleith_gf8_assert_equal(c, root_computed[i], root_inst);
     }
@@ -176,13 +151,18 @@ main(void)
     const voleith_params_t *params = &voleith_params_em_128f;
     size_t proof_bytes = voleith_gf8_proof_byte_size(params, ell);
 
+    size_t leaf_invin =
+        merkle_grostl_gf8_leaf_invin_bytes(LEAF_DATA_BYTES, variant);
+    size_t inode_invin = merkle_grostl_gf8_inode_invin_bytes(variant);
+
     printf("Circuit statistics:\n");
     printf("  mul gates:       %zu (S-box uses assert_product, not add_mul)\n",
            voleith_gf8_circuit_mul_count(c));
     printf("  Witness wires:   %zu\n", voleith_gf8_circuit_witness_count(c));
-    printf("    = %d leaf + 200 leaf inv_in + %u siblings + %u×200 inode "
+    printf("    = %d leaf + %zu leaf inv_in + %u siblings + %u×%zu inode "
            "inv_in\n",
-           NODE_BYTES, (unsigned)(DEPTH * NODE_BYTES), DEPTH);
+           LEAF_DATA_BYTES, leaf_invin, (unsigned)(DEPTH * nb), DEPTH,
+           inode_invin);
     printf("  Instance wires:  %zu (root)\n",
            voleith_gf8_circuit_instance_count(c));
     printf("  ell:             %zu\n", ell);
@@ -190,61 +170,50 @@ main(void)
 
     /* ================================================================
      * Assemble the witness in declaration order.
-     *
-     * For DM inode at level k:
-     *   dirs[k]=0 (current LEFT):  inv_in for AES_{current}(sibling XOR NODE_DOM)
-     *   dirs[k]=1 (current RIGHT): inv_in for AES_{sibling}(current XOR NODE_DOM)
      * ================================================================ */
-    size_t total =
-        NODE_BYTES + 200 + (size_t)DEPTH * NODE_BYTES + (size_t)DEPTH * 200;
+    size_t total = LEAF_DATA_BYTES + leaf_invin + (size_t)DEPTH * nb +
+                   (size_t)DEPTH * inode_invin;
     uint8_t *witness = calloc(total, 1);
     size_t off = 0;
 
     /* (1) leaf data */
-    memcpy(witness + off, leaves[LEAF_INDEX], NODE_BYTES);
-    off += NODE_BYTES;
+    memcpy(witness + off, leaves[LEAF_INDEX], LEAF_DATA_BYTES);
+    off += LEAF_DATA_BYTES;
 
     /* (2) leaf hash inv_in */
-    get_aes_inv_in(LEAF_DOM, leaves[LEAF_INDEX], witness + off);
-    off += 200;
+    merkle_grostl_gf8_leaf_build_witness(leaves[LEAF_INDEX], LEAF_DATA_BYTES,
+                                         variant, witness + off);
+    off += leaf_invin;
 
     /* (3) siblings (must precede the path inv_in) */
-    memcpy(witness + off, siblings, (size_t)DEPTH * NODE_BYTES);
-    off += (size_t)DEPTH * NODE_BYTES;
+    memcpy(witness + off, siblings, (size_t)DEPTH * nb);
+    off += (size_t)DEPTH * nb;
 
     /* (4) per-level inode inv_in, walking the path from the leaf hash up */
-    uint8_t current[16];
-    leaf_hash_dm(leaves[LEAF_INDEX], current);
+    uint8_t current[64];
+    merkle_grostl_leaf_hash(leaves[LEAF_INDEX], LEAF_DATA_BYTES, variant,
+                            current);
     for (unsigned lvl = 0; lvl < DEPTH; lvl++) {
-        const uint8_t *sib = siblings + (size_t)lvl * NODE_BYTES;
-        uint8_t P[16];
-        uint8_t next[16];
+        const uint8_t *sib = siblings + (size_t)lvl * nb;
+        const uint8_t *L = path_dirs[lvl] ? sib : current;
+        const uint8_t *R = path_dirs[lvl] ? current : sib;
 
-        if (path_dirs[lvl] == 0) {
-            /* current LEFT: H(current, sibling) */
-            for (int i = 0; i < 16; i++)
-                P[i] = sib[i] ^ NODE_DOM[i];
-            get_aes_inv_in(current, P, witness + off);
-            dm_compress(current, P, next);
-        } else {
-            /* current RIGHT: H(sibling, current) */
-            for (int i = 0; i < 16; i++)
-                P[i] = current[i] ^ NODE_DOM[i];
-            get_aes_inv_in(sib, P, witness + off);
-            dm_compress(sib, P, next);
-        }
-        off += 200;
-        memcpy(current, next, 16);
+        merkle_grostl_gf8_inode_build_witness(L, R, variant, witness + off);
+        off += inode_invin;
+
+        uint8_t next[64];
+        merkle_grostl_inode_hash(L, R, variant, next);
+        memcpy(current, next, nb);
     }
 
     /* Sanity: walked root must equal the tree root. */
-    if (memcmp(current, root, NODE_BYTES) != 0) {
+    if (memcmp(current, root, nb) != 0) {
         fprintf(stderr, "witness build: root mismatch\n");
         return 1;
     }
 
     const uint8_t *instance = root;
-    const char *ds = "example_merkle_gf8:depth5-DM-leaf21";
+    const char *ds = "example_merkle_grostl_gf8:depth5-G256-leaf21";
 
     /* ================================================================
      * Benchmark prove + verify.  The witness build above stays outside

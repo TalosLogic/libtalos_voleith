@@ -736,3 +736,38 @@ aes_ct64_ctx_clear(aes_ct64_ctx_t *ctx)
 {
     voleith_secure_zero(ctx, sizeof(*ctx));
 }
+
+/* ================================================================
+ * Reusable bit-plane primitives - thin public wrappers over the
+ * internal static helpers used by the AES encrypt path.  No
+ * additional logic; the AES tests exercise the same code paths.
+ * ================================================================ */
+
+void
+aes_ct64_bitslice_pack(uint64_t q[8], const uint8_t in[64])
+{
+    orthogonalize(q, in);
+}
+
+void
+aes_ct64_bitslice_unpack(uint8_t out[64], const uint64_t q[8])
+{
+    un_orthogonalize(out, q);
+}
+
+void
+aes_ct64_sbox_bitslice(uint64_t q[8])
+{
+    sub_bytes(q);
+}
+
+void
+aes_ct64_sbox_inplace_4blocks(uint8_t state[64])
+{
+    uint64_t q[8];
+
+    orthogonalize(q, state);
+    sub_bytes(q);
+    un_orthogonalize(state, q);
+    voleith_secure_zero(q, sizeof(q));
+}

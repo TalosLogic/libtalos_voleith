@@ -5,6 +5,51 @@ All notable changes to libtalos_voleith are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-05-28
+
+Adds the Grøstl hash family and wide-node Grøstl Merkle circuits. No
+wire-format or API breakage; existing proofs verify unchanged.
+
+### Added
+
+- Grøstl-256 / Grøstl-512 hash (`core/grostl.{c,h}`), constant-time,
+  with x86 AES-NI and ARMv8 AES hardware paths for SubBytes.
+- `circuits/grostl_gf8_circuit.{c,h}`: Grøstl as a GF(2⁸) circuit
+  (reuses the AES S-box gadget).
+- `circuits/merkle_grostl_gf8_circuit.{c,h}`: wide-node Grøstl Merkle
+  path, four node variants (`GROSTL_256`, `_256_T27`, `_512`, `_512_T59`),
+  public-dir and secret-dir. See DESIGN.md "Grøstl wide-node Merkle
+  hashing".
+- `circuits/indexed_merkle_grostl_gf8_circuit.{c,h}`: Grøstl indexed
+  non-membership, public-dir and secret-dir.
+- `voleith_gf8_inv()` (`core/field.c`): constant-time GF(2⁸) inverse
+  (Fermat); shared by every AES-S-box witness builder, ~20× faster than
+  the prior scan and dudect-validatable.
+- Reusable bitsliced S-box primitives in `core/aes_ct64` for Grøstl's
+  SubBytes.
+- NIST Grøstl KAT and Monte Carlo test harnesses; vectors vendored
+  in-repo (MCT tagged slow).
+- dudect timing targets for the software Grøstl path and witness
+  builder.
+- Examples: `example_merkle_grostl_gf8`, `example_indexed_merkle_grostl_gf8`,
+  Grøstl KVAC (`example_kvac_pq_grostl_gf8`, `..._depth12`), and shared
+  `bench_util.h`.
+
+### Fixed
+
+- Secret-dir Merkle / indexed-Merkle circuits now enforce direction-bit
+  booleanity in-circuit (`assert_product(dir, dir, dir)`); an
+  unconstrained mux selector was a soundness break. See DESIGN.md
+  "Merkle path direction bits".
+
+### Changed
+
+- CMake AES-NI flags now include `-mssse3` (Grøstl `pshufb`).
+- README proof-size table refreshed to byte-exact GF(2⁸) AES-128
+  figures; "EM" naming clarified.
+- README and `docs/DESIGN.md` document the public-dir vs secret-dir
+  Merkle distinction.
+
 ## [1.0.2] - 2026-05-26
 
 ### Added
@@ -33,7 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `aes_ct64_encrypt[_x4]_pt`, `voleith_gf{128,192,256}_mul`,
   `voleith_byte_combine_{128,192,256}`) plus two self-validation
   sentinels. Cross-platform evidence on Sandy Bridge, Gracemont, and
-  Apple M1 under `docs/dudect-runs/`. Issue #86.
+  Apple M1 under `docs/dudect-runs/`.
 
 ### Fixed
 
@@ -47,10 +92,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `rotl64` in `core/hash.c` no longer relies on `(64 - n) % 64` for
   the reverse shift, which is undefined behaviour when `n == 0` and
   was miscompiled on Apple Clang / Xcode 26.2. Replaced with the
-  `(-n) & 63` idiom. Issue #85.
+  `(-n) & 63` idiom.
 - `voleith_secure_zero()` on Apple targets falls back to the
   volatile-pointer loop rather than calling `explicit_bzero`, which
-  is no longer exposed in recent macOS SDKs. Issue #83.
+  is no longer exposed in recent macOS SDKs.
 
 ## [1.0.1] - 2026-05-23
 
@@ -241,4 +286,5 @@ specification.
   Examples 1-4, NIST CAVP CMAC vectors, and NIST CAVS 14.4 KDF-CTR
   vectors.
 
+[1.1.0]: https://github.com/TalosLogic/libtalos_voleith/releases/tag/v1.1.0
 [1.0.1]: https://github.com/TalosLogic/libtalos_voleith/releases/tag/v1.0.1

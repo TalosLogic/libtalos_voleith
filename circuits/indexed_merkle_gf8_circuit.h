@@ -58,6 +58,22 @@
 #include <stdint.h>
 
 /*
+ * indexed_merkle_gf8_assert_lt - assert a < b for two n_bytes-wide
+ * unsigned integers (byte 0 = LSB byte), failing the proof otherwise.
+ *
+ * Shared by the DM/CMAC indexed circuit and the wide-node Grøstl
+ * indexed circuit (indexed_merkle_grostl_gf8_circuit.h): the comparison
+ * is over the value field and is independent of the Merkle node size,
+ * so there is a single implementation to audit.  Processes bits from
+ * the MSB of the MSB byte down to the LSB of the LSB byte; costs
+ * 3 GF(2^8) mul gates per bit (3 × 8 × n_bytes total) plus one
+ * assert_zero, and adds no witness slots.
+ */
+void indexed_merkle_gf8_assert_lt(voleith_gf8_circuit_t *c,
+                                  const gf8_wire_id *a, const gf8_wire_id *b,
+                                  size_t n_bytes);
+
+/*
  * indexed_merkle_gf8_nonmember_circuit - prove T is not in an indexed Merkle tree.
  *
  * Appends gates that hash the adjacent leaf record, verify its Merkle path,

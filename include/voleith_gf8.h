@@ -61,6 +61,9 @@
  *   merkle_gf8_leaf_hash_circuit                - Merkle leaf hash
  *   merkle_gf8_path_circuit                     - Merkle path verification
  *   indexed_merkle_gf8_nonmember_circuit        - Indexed Merkle non-membership
+ *   grostl256_gf8_circuit / grostl512_gf8_circuit - Grøstl hash
+ *   merkle_grostl_gf8_path_circuit              - Wide-node Grøstl Merkle path
+ *   indexed_merkle_grostl_gf8_nonmember_circuit - Wide-node Grøstl indexed non-membership
  *
  * ================================================================
  * VOLE slot costs (ell = n_witness + n_mul)
@@ -121,9 +124,9 @@
 /* Library version */
 #ifndef VOLEITH_VERSION_MAJOR
 #define VOLEITH_VERSION_MAJOR 1
-#define VOLEITH_VERSION_MINOR 0
+#define VOLEITH_VERSION_MINOR 1
 #define VOLEITH_VERSION_PATCH 0
-#define VOLEITH_VERSION_STRING "1.0.0"
+#define VOLEITH_VERSION_STRING "1.1.0"
 #endif
 
 /* GF(2⁸) proof system: circuit builder and prove/verify API */
@@ -136,5 +139,8 @@
 #include "kdf_ctr_cmac_gf8_circuit.h"
 #include "merkle_gf8_circuit.h"
 #include "indexed_merkle_gf8_circuit.h"
+#include "grostl_gf8_circuit.h"
+#include "merkle_grostl_gf8_circuit.h"
+#include "indexed_merkle_grostl_gf8_circuit.h"
 
 #endif /* VOLEITH_GF8_H */

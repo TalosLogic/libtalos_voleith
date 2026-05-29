@@ -67,4 +67,58 @@ void aes_ct64_encrypt_x4(const aes_ct64_ctx_t *ctx, uint8_t out[64],
  */
 void aes_ct64_ctx_clear(aes_ct64_ctx_t *ctx);
 
+/* ================================================================
+ * Reusable bit-plane primitives.
+ *
+ * Exposed for callers that share the bitsliced S-box but do not
+ * perform a full AES round (e.g. core/grostl.c, which interleaves
+ * SubBytes with Grøstl's own ShiftBytes / MixBytes).  The AES encrypt
+ * paths above continue to use the original static internals
+ * unchanged.
+ * ================================================================ */
+
+/*
+ * Pack 64 input bytes into 8 bit-plane registers.
+ *
+ * Bit k of input byte i (i in 0..63) lives at bit position i of q[k].
+ *
+ * Constant-time: a fixed sequence of XOR / AND / shift operations on
+ * the input bytes; no data-dependent branches.
+ */
+void aes_ct64_bitslice_pack(uint64_t q[8], const uint8_t in[64]);
+
+/*
+ * Inverse of aes_ct64_bitslice_pack: recover 64 bytes from bit-planes.
+ *
+ * Constant-time.
+ */
+void aes_ct64_bitslice_unpack(uint8_t out[64], const uint64_t q[8]);
+
+/*
+ * AES S-box applied to all 64 byte slots of a bit-plane state, in
+ * place.
+ *
+ * Implementation: Canright (2005) tower-field decomposition, 36 ANDs
+ * per S-box.  Constant-time by construction.
+ *
+ * Use this directly (with aes_ct64_bitslice_pack / _unpack around the
+ * entire round sequence) when amortizing the pack/unpack cost over
+ * multiple operations on the same state, as Grøstl does for its 10 or
+ * 14 rounds.  For a single one-off SubBytes call on 64 bytes, prefer
+ * aes_ct64_sbox_inplace_4blocks.
+ */
+void aes_ct64_sbox_bitslice(uint64_t q[8]);
+
+/*
+ * AES S-box applied to 64 bytes in place.
+ *
+ * Convenience wrapper: aes_ct64_bitslice_pack ->
+ * aes_ct64_sbox_bitslice -> aes_ct64_bitslice_unpack, with the
+ * intermediate bit-plane state securely zeroed before return.
+ *
+ * Pays the pack/unpack cost once per call.  For repeated S-box calls
+ * on the same state, use the bit-plane primitives directly.
+ */
+void aes_ct64_sbox_inplace_4blocks(uint8_t state[64]);
+
 #endif /* VOLEITH_AES_CT64_H */
