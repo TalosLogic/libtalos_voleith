@@ -21,11 +21,16 @@ The library is organised into five layers, each independently testable and each 
 Layer 5: circuits/                 Reusable circuit building blocks
   aes_circuit / aes_gf8_circuit         AES-128 and AES-256 encryption
   grostl_gf8_circuit                    Grøstl-256 / Grøstl-512 hash
+  hirose_gf8_circuit                    Hirose-AES-256 DBL iteration
   aes_cmac_circuit / gf8 variant        AES-CMAC (RFC 4493)
   kdf_ctr_cmac_circuit / gf8 variant    NIST SP 800-108 KDF-CTR(AES-CMAC)
   merkle_circuit / merkle_gf8_circuit   Merkle path verification (AES-DM / CMAC)
   merkle_grostl_gf8_circuit             Wide-node Grøstl Merkle path
   indexed_merkle_circuit / gf8 variant  Indexed Merkle non-membership
+  node_hash_vt                          Hash-agnostic node-hash interface (vt)
+  node_hash_{aes,grostl,hirose}_gf8     Per-family vt instances
+  merkle_vt_gf8_circuit                 Generic vt-driven Merkle path
+  indexed_merkle_vt_gf8_circuit         Generic vt-driven indexed non-member
 
 Layer 4: proof/                    QuickSilver proof system
   circuit / gf8_circuit                 Circuit definition API
@@ -34,10 +39,12 @@ Layer 4: proof/                    QuickSilver proof system
   proof / gf8_proof                     Fiat-Shamir wrapper (non-interactive)
   vole_hash                             VOLEHash (FAEST Figure 4.4)
 
-Layer 2-3: vole/                   VOLE-in-the-Head protocol
-  vc                                    GGM tree vector commitment
+Layer 3: vole/ (VOLEitH)           VOLE-in-the-Head protocol
   convert                               ConvertToVOLE (FAEST Figure 5.2)
   voleith                               VOLEitH commitment and reconstruction
+
+Layer 2: vole/ (vector commitment) GGM-tree vector commitment
+  vc                                    Commit, Open, Reconstruct (BAVC)
 
 Layer 1: core/                     Symmetric-key primitives
   field                                 GF(2^k) arithmetic, k in {8,64,128,192,256}
@@ -204,12 +211,12 @@ parameter line (`n_leafcom = 2`); see "What 'EM' refers to" below.
 
 | Parameter | λ | τ | Leaves/instance | w_grind | T_open | Proof size¹ |
 |-----------|---|---|-----------------|---------|--------|-------------|
-| `em_128f` | 128 | 16 | 128–256 | 8 | 112 | 6,596 B |
+| `em_128f` | 128 | 16 | 128-256 | 8 | 112 | 6,596 B |
 | `em_128s` | 128 | 11 | 2,048 | 7 | 103 | 4,962 B |
-| `em_192f` | 192 | 24 | 128–256 | 8 | 176 | 12,380 B |
-| `em_192s` | 192 | 16 | 2,048–4,096 | 8 | 162 | 9,340 B |
-| `em_256f` | 256 | 32 | 128–256 | 8 | 234 | 19,636 B |
-| `em_256s` | 256 | 22 | 2,048–4,096 | 6 | 218 | 15,344 B |
+| `em_192f` | 192 | 24 | 128-256 | 8 | 176 | 12,380 B |
+| `em_192s` | 192 | 16 | 2,048-4,096 | 8 | 162 | 9,340 B |
+| `em_256f` | 256 | 32 | 128-256 | 8 | 234 | 19,636 B |
+| `em_256s` | 256 | 22 | 2,048-4,096 | 6 | 218 | 15,344 B |
 
 ¹ GF(2⁸) AES-128 circuit (ℓ = 216 elements: 16 key bytes + 200 S-box
 inverses), computed from `voleith_gf8_proof_byte_size`. The `em_128f` row is
@@ -302,7 +309,7 @@ The library provides both forms. `merkle_gf8_path_circuit` (and the bit-level eq
 
 **Signal KVAC uses the secret-dir variant.** It is an *anonymous* group-membership credential, so the prover must not reveal which leaf is theirs: publishing the position would identify the member and defeat anonymity. Both the leaf value *and* the direction bits (the leaf index) are witness; only the Merkle root is a public instance value. These secret-dir variants are the foundation for ring-signature circuits in general.
 
-Current coverage is complete across both hash families: the DM/CMAC and the wide-node Grøstl Merkle path and indexed non-membership circuits all exist in both public-dir and secret-dir forms (`merkle_grostl_gf8_path_circuit` / `_secret_dir`, `indexed_merkle_grostl_gf8_nonmember_circuit` / `_secret_dir`). Every secret-dir circuit enforces direction-bit booleanity in-circuit.
+Current coverage is complete across all three hash families: the DM/CMAC, the wide-node Grøstl, and the Hirose-AES-256 Merkle path and indexed non-membership circuits all exist in both public-dir and secret-dir forms (`merkle_grostl_gf8_path_circuit` / `_secret_dir`, `indexed_merkle_grostl_gf8_nonmember_circuit` / `_secret_dir`, and the generic vt-driven `merkle_vt_gf8_path_circuit` / `_secret_dir` and `merkle_vt_gf8_indexed_nonmember_circuit` / `_secret_dir` parameterised by `voleith_node_hash_vt`, which is how Hirose ships). Every secret-dir circuit, fixed-hash or vt-driven, enforces direction-bit booleanity in-circuit.
 
 The secret-dir variant adds `node_bytes` mul-slots plus one direction-bit witness per level (≈ 8% over a DM level's ~216 slots; proportionally far less for the wide Grøstl nodes). **Do not collapse the two into one API**: keeping the public-dir path gate-free avoids silently inflating proof size for the public-index case. **Every secret-dir circuit must constrain each direction wire to `{0,1}` inside the circuit** via `assert_product(dir, dir, dir)` (free: zero mul-slots, zero witnesses). This is soundness-critical: an unconstrained mux selector lets the prover make neither mux output equal the carried-up value, erasing it and forging a path, so booleanity must never be left to the caller.
 
@@ -359,13 +366,94 @@ The cost of the truncation is collision resistance: a 216-bit digest gives the b
 
 `_T59` applies the identical single-block trick one tier up, for the >2^128 regime that only Grøstl-512 can reach (Grøstl-256's 32-byte output caps at 2^128). The full Grøstl-512 inode (`1 + 2·64 = 129` bytes + 9 padding) already spans two 128-byte blocks; `1 + 2n + 9 ≤ 128` gives `n ≤ 59`, so a 59-byte node is the largest whose inode stays a single compression, halving it to 5,376 S-boxes (1 compression + Ω) from the full 8,960 at 2^236 instead of 2^256 CR. A single Grøstl-512 block is one compression regardless of how full it is, so 59 maximises collision resistance at no extra per-level proof cost; a smaller truncation (e.g. 48 bytes for a clean 2^192 / NIST-L3 label) costs the same in S-boxes and only saves a handful of sibling/mux bytes per level. The software `core/grostl.c` is validated against the published NIST Grøstl KAT and Monte Carlo test vectors, and the circuit is cross-checked against it on every test run.
 
-### Constant-time field arithmetic, with a gated variable-time path
+### Hirose-AES-256 double-block-length hash (primitive + circuit)
 
-All software paths in `core/field.c` are constant-time. The CLMUL (x86_64) and PMULL (ARMv8) hardware paths are constant-time by ISA definition. There is no variable-time table-lookup path enabled by default.
+This section documents Hirose-AES-256: the iteration primitive, the leaf / inode framing built on top of it, and how that framing plugs into the generic vt-driven Merkle path / indexed-non-member circuits described in the next subsection.  Unlike DM/CMAC and Grøstl, Hirose has no fixed-hash Merkle path entry point of its own: it ships *only* as `voleith_node_hash_vt` instances consumed by the generic vt-driven Merkle circuits.  That choice is structural: Hirose was the first new hash family added after the vt interface existed, so there was no benefit to building a hash-specific path circuit alongside it.
 
-A `-DVOLEITH_ALLOW_VARIABLE_TIME_FIELD=ON` CMake flag exists to enable a variable-time path (faster for some operations, exposes a small timing side-channel on secret-dependent field elements). It is OFF by default and tests must opt in to use it. This gate exists for performance experiments and benchmarking; production deployments should leave it OFF.
+**Why a double-block-length construction at all.**  A single-block-length AES hash (Davies-Meyer-style) produces a 128-bit digest and is capped at 2^64 collision resistance by the birthday bound on the block size.  Any AES-based hash that needs to go above 2^64 CR therefore has to output ≥200 bits, which a 128-bit-block cipher cannot do in a single compression call; it requires a *double-block-length* (DBL) construction that emits a 2n-bit chaining value from two cipher calls per message block.  Of the published DBL constructions over a 2n-bit-key block cipher, Hirose (FSE 2006) is the one with a *tight* collision bound of ≈2^n in the ideal-cipher model (birthday-optimal for a 2n-bit output).  Earlier DBL families (MDC-2, Tandem-DM, Abreast-DM) have weaker bounds: MDC-2-AES-128 admits a 2^77 collision attack (Knudsen et al., below the 2^100 line), and naïve counter-widening of AES-128 hits the Joux multicollision bound at ~2^70.  Instantiated over AES-256 (n=128), Hirose lands cleanly at 2^128 CR.
 
-The same design applies to AES: a constant-time bitsliced AES backend is always built, and the AES-NI (x86_64) and ARMv8 Crypto Extension (aarch64) hardware paths are constant-time by ISA definition. A variable-time table-lookup AES path is gated behind `-DVOLEITH_ALLOW_VARIABLE_TIME_AES=ON` and is OFF by default.
+**The compression function `f`.**  With block cipher `E` of n-bit block and 2n-bit key, a 2n-bit chaining value `(G, H)`, an n-bit message block `M`, and a fixed nonzero n-bit constant `c`:
+
+```
+K       = H ‖ M                    (256-bit AES-256 key)
+G_next  = E(K, G)        XOR  G
+H_next  = E(K, G XOR c)  XOR  G XOR c
+```
+
+Both encryptions use the same key `K = H ‖ M` and differ only in plaintext (`G` vs. `G ⊕ c`).  `c ≠ 0` is required by the security argument: a zero `c` collapses the two encryptions to the same call and breaks the collision bound.  Hirose's reduction (FSE 2006) proves CR ≈ 2^n in the ideal-cipher model, and crucially holds with an *adversarially chosen* IV: the chaining-value slot can carry attacker-controlled bytes without weakening the bound.
+
+**Why this matters at the circuit-cost level.**  AES-256's key-schedule produces 15 round keys and consumes 52 S-boxes in the GF(2^8) circuit; the data-path encryption consumes 224 S-boxes; a full encrypt is 276.  A naïve "two independent AES-256 calls" Hirose iteration is 2·276 = 552 S-boxes.  Because the two calls inside `f` use the *same key*, the key schedule can be computed once and fed into both data-path encryptions.  That saving of 52 S-boxes per iteration is realised structurally by splitting `aes256_gf8_circuit` (`circuits/aes_gf8_circuit.c`) into two public entry points:
+
+```c
+void aes256_gf8_expand_key(c, key[32], rk[15][16]);     /* 52 S-boxes  */
+void aes256_gf8_encrypt_rk(c, rk[15][16], pt[16], ct[16]);   /* 224 S-boxes */
+```
+
+with matching witness builders.  `aes256_gf8_circuit` becomes a thin wrapper that calls both in sequence, so all existing AES-256 callers (CMAC, the FIPS-197 / faest-ref-OWF KATs, the existing 308-byte witness layout) are byte-identical after the refactor.  One Hirose iteration then emits `aes256_gf8_expand_key` once over `H ‖ M` and `aes256_gf8_encrypt_rk` twice (once on `G`, once on `G ⊕ c`), giving 52 + 2·224 = **500 S-boxes per iteration**, the structural floor for any AES-256-based Hirose iteration at 2^128 CR.
+
+**Linear glue is free.**  The remaining work in one iteration is `K = H ‖ M` (a wire-ID array reshape, no gates), one `add_xor_const` per byte for `G ⊕ c` (16 free ops), one `add_xor` per byte for `G_next = AES_K(G) ⊕ G` (16 free ops), and one `add_xor` per byte for `H_next = AES_K(G ⊕ c) ⊕ G ⊕ c` (16 free ops).  All 48 glue operations are `add_xor` / `add_xor_const` / `add_linear_map` (or wire reshape) and contribute zero VOLE slots and zero `assert_product` constraints.  So the full per-iteration cost in the GF(2^8) variant is exactly 500 inv_in witness bytes and 1000 `assert_product` constraints, both pure consequences of the AES S-boxes inside the two `encrypt_rk` emits.
+
+**Software primitive as independent oracle.**  `core/hirose.c` exposes a single function, `voleith_hirose_iteration(G, H, M, c, G_out, H_out)`, that implements `f` over `voleith_aes_encrypt`.  It deliberately does *not* share the key schedule across the two encryptions: it builds one `voleith_aes_ctx_t` over `H ‖ M` and calls `voleith_aes_encrypt` twice.  Sharing or not sharing the schedule changes only gate-count cost, not output, so the software form is functionally equivalent to the in-circuit KS-shared form.  Two consequences: (a) the software primitive serves as an **independent oracle**, since any divergence between in-circuit output and software output is by construction a circuit-side bug, never a shared-spec-misreading bug; (b) the primitive is genuinely standalone, since `core/hirose.c` exports `voleith_hirose_iteration` only and does not expose leaf / inode framing, so it cannot be used as a general-purpose hash by accident.
+
+**Test vector grounding.**  No canonical Hirose-AES-256 KAT exists: the original FSE 2006 paper is theoretical and the construction is not in any NIST / ISO / IETF standard.  The strongest external anchor available is **FIPS 197 Appendix C.3** (AES-256 KAT): constructing a Hirose input with `H ‖ M = K_FIPS` and `G = P_FIPS` produces `G_out = C_FIPS XOR P_FIPS`, a value derivable from NIST's published triple plus the spec equation.  `tests/test_hirose.c` checks this byte-for-byte; it grounds the `G_out` path of one iteration in a citable third-party vector.  The `H_out` path falls back to the in-test reference (FIPS 197 publishes only one `(P, C)` triple per key), but a shared-misreading bug in the spec equations is ruled out by the FIPS-anchored `G_out` half: a typo like `AES_K(G XOR c) XOR G` instead of `AES_K(G XOR c) XOR (G XOR c)` would fail the FIPS-anchored equality even though the in-test reference would still pass.
+
+**Aliasing-safe in-circuit semantics.**  `hirose_gf8_iteration_circuit` supports `G_out` aliasing `G` (and `H_out` aliasing `H`) so callers can chain iterations in-place:
+
+```c
+hirose_gf8_iteration_circuit(c, G, H, M, k_const, G, H);
+hirose_gf8_iteration_circuit(c, G, H, M2, k_const, G, H);
+```
+
+Internally the function snapshots `G`'s wire IDs at the start (16 integer copies, no gates) before any write to `G_out`. `G` is read three times during emission (once by `encrypt_rk` for the first AES gates, once for the `G_out` feed-forward XOR, once for the `G ⊕ c` XOR), and without the snapshot an `in-place` chaining call corrupts the wire-ID array between reads.  `H` and `M` are each read exactly once (into the `K = H ‖ M` array at the top), so they need no snapshot.  A regression test (`tests/test_node_hash_hirose_gf8.c::test_iteration_in_place_aliasing`) pins this contract: a future refactor that drops the snapshot fails that test directly, before any downstream wrapper test would.
+
+**Why no truncated Hirose variant.**  Unlike Grøstl, where the truncation trick (T27 / T59) saves a compression by keeping the inode input inside a single block, Hirose has **no analogous saving**.  Truncation in Grøstl is justified by *block-padding economics* (one Grøstl compression covers the entire `0x01 ‖ L ‖ R` if and only if `1 + 2n + 9 ≤ block_size`).  Hirose has no padding inside the iteration (every iteration consumes exactly one 16-byte message block), so truncating the 32-byte node would not eliminate any S-boxes.  A 200-bit Hirose variant would have to drop iterations, and 2-iter is already the floor (R = ≥200 bits ⇒ ≥2 message blocks).  So Hirose ships as a single-variant primitive: 256-bit node, 2^128 CR, 500 S-boxes / iteration.
+
+**Leaf and inode framing.**  Two ways to compose the iteration into a hash are shipped, both as wrappers in `circuits/node_hash_hirose_gf8.c`:
+
+- **Fixed-32 leaf** (`voleith_node_hash_hirose_fixed32`).  Assumes a 32-byte input; no padding.  Two iterations: the first chains from `HIROSE_IV_LEAF` with the first 16 input bytes as the message block, the second uses the iteration-1 output `(G, H)` as the chaining value and the next 16 input bytes as the message block.  Output is `G ‖ H` (32 bytes).  Per-leaf cost: 1,000 S-boxes.
+- **Variable-length leaf** (`voleith_node_hash_hirose`).  Accepts arbitrary input length; uses `10*` always-pad (append `0x80`, then zero-pad to the next 16-byte boundary; if input is already block-aligned, append a full block of `0x80 ‖ 0x00·15`); **no length suffix**.  Iteration count is `n_iter = ⌈(len + 1) / 16⌉`.  `10*` alone suffices for CR via Merkle's strengthening theorem (injective padding + iteration-count derivable from padded length); length-extension defense is a MAC concern that doesn't apply to Merkle-internal hashing.  **Scope constraint:** this leaf hash is Merkle-internal only, not exposed as a general-purpose hash.  Per-leaf cost: `n_iter × 500` S-boxes.
+- **Inode** (shared between both vts).  The left child `L = (L_G, L_H)` is loaded into the chaining state as the IV, and the right child `R` is absorbed as two 16-byte message blocks across two iterations.  Output is the final `G ‖ H`.  The "L as IV" trick is what keeps an inode at exactly 2 iterations (1,000 S-boxes); using a fixed IV and absorbing `L ‖ R` as message would cost 4 message blocks = 4 iterations = 2,000 S-boxes.  Hirose's collision-resistance proof holds with an adversarially chosen IV, so this is safe.
+
+Two iterations is the structural floor for any AES-based Hirose hash over a ≥256-bit input at >2⁶⁴ CR (R = ≥200 bits ⇒ ≥2 message blocks).  Both the fixed-32 leaf and the inode hit it; the variable-length leaf reaches it for inputs up to 15 bytes and grows linearly beyond that.
+
+**Domain-separation constants.**  Four hard-coded constants encode the per-hash identity:
+
+| Constant                | Size | Value                                  | Role                                  |
+|-------------------------|------|----------------------------------------|---------------------------------------|
+| `HIROSE_IV_LEAF`        | 32 B | `"VOLEitH-Hirose-IV"` + zero-pad        | leaf chaining IV (both vts)           |
+| `HIROSE_C_LEAF_FIXED32` | 16 B | `"VOLEitH-Hirose-L"` (exactly 16 bytes) | `c` for the fixed-32 leaf vt          |
+| `HIROSE_C_LEAF_VAR`     | 16 B | `"VOLEitH-Hirose-V"` (exactly 16 bytes) | `c` for the variable-length leaf vt   |
+| `HIROSE_C_INODE`        | 16 B | `"VOLEitH-Hirose-N"` (exactly 16 bytes) | `c` for the inode (shared by both vts) |
+
+All `c` values are 16 bytes (the AES block size: `c` is an n-bit half-block tweak XORed into the second encryption's plaintext, not a key-side input), nonzero (`c = 0` collapses the two encryptions to the same call and breaks the CR bound), and pairwise distinct.  Distinctness gives **structural** rather than probabilistic separation: a leaf-vs-inode collision would have to be a collision *across two genuinely different compression families* (not merely a near-miss on the same compression), because the `c` constant participates in every iteration's H-side encryption.  The same argument forces `HIROSE_C_LEAF_FIXED32 ≠ HIROSE_C_LEAF_VAR`: a 32-byte input fed to the fixed-32 vt and the same bytes fed to the variable-leaf vt would otherwise collide (the variable vt would emit a different gate stream because of `10*` padding, but the H-side encryption would land in the same compression family, and distinct `c_leaf` closes that).  The inode `c` is shared between the two vts because the inode hash is identical between them: children are always exactly 32 bytes, no padding ambiguity, and leaf-vs-inode separation is already guaranteed by `c_leaf_* ≠ c_inode`.  All four constants are pure circuit constants (`add_const` / `add_xor_const`) and contribute zero VOLE slots.
+
+**`IV_LEAF` is 32 bytes by design** while the three `c` constants are 16 bytes by design: they occupy different slots in the compression.  `IV_LEAF` is the full 2n-bit initial chaining value `(G₀, H₀)` (must be 32 bytes, since a 256-bit state cannot be seeded with fewer bits); `c` is an n-bit half-block tweak XORed into the plaintext `G ⊕ c` (must be 16 bytes).  They never interchange.
+
+**The vt bridge.**  The `voleith_node_hash_vt` interface (`circuits/node_hash_vt.h`) is a struct of function pointers (`leaf_circuit`, `inode_circuit`, the matching `*_build_witness` and software helpers, plus `name` / `node_bytes` / `cr_bits` / `*_invin_bytes` identity fields) that lets higher layers (the generic vt-driven Merkle path circuit `merkle_vt_gf8_path_circuit`, its secret-dir form, the indexed-non-member counterparts, ring signatures, any future tree-shaped consumer) operate on a hash without knowing which one.  The two Hirose vts both have `node_bytes = 32`, `cr_bits = 128`, and share the inode-side fields; they differ only in their leaf-side dispatch.  The vt is consumed during circuit *construction*: indirect calls happen at build time only.  The prover and verifier never see the vt; they process the resulting gate stream, identical to what a hand-written hash-specific circuit would have produced.  Hash agnosticism is therefore a structural property of the codebase at zero proof-time cost.
+
+### Generic vt-driven Merkle path and indexed-non-member circuits
+
+The hash-agnostic Merkle refactor lifts the per-hash path and indexed-non-member bodies into two generic entry points parameterised by `const voleith_node_hash_vt *h`:
+
+```c
+void merkle_vt_gf8_path_circuit            (c, h, leaf, leaf_bytes, path_nodes, path_dirs_uint8,    depth, root);
+void merkle_vt_gf8_path_circuit_secret_dir (c, h, leaf, leaf_bytes, path_nodes, path_dirs_wire,     depth, root);
+
+int  merkle_vt_gf8_indexed_nonmember_circuit            (c, h, target, target_bytes, low_value, low_next, low_next_index, index_bytes, path_nodes, path_dirs_uint8, depth, root);
+int  merkle_vt_gf8_indexed_nonmember_circuit_secret_dir (c, h, target, target_bytes, low_value, low_next, low_next_index, index_bytes, path_nodes, path_dirs_wire,  depth, root);
+```
+
+The body owns only the path traversal, the direction handling (static swap for public-dir; per-byte mux with `assert_product(dir, dir, dir)` booleanity for secret-dir), and, for the indexed variant, the `low_value < target < low_next` comparison.  All hash-specific gates live in `h->leaf_circuit` and `h->inode_circuit`.  Eight vt instances ship: AES-DM, AES-128-CMAC, Grøstl-{256, 256_T27, 512, 512_T59}, and Hirose-{fixed32, variable-leaf}.
+
+**Bit-exact gate-stream equivalence with the fixed-hash entries.**  For every hash that has both forms (AES-DM, AES-128-CMAC, all four Grøstl variants), the generic vt-driven body produces a circuit byte-identical to the hand-written fixed-hash entry point: same `witness_count`, same `mul_count`, same `assert_product_count`, same `constraint_count`, same root wire values on every input.  The equivalence is checked in `tests/test_merkle_vt_gf8_equivalence.c` and `tests/test_indexed_merkle_vt_gf8_equivalence.c` across 12 path × hash × dir-flavour pairings each.  Per-vt conformance (invin sizing matches circuit emission, leaf and inode circuits match the software helpers, domain separation between leaf and inode, depth-3 end-to-end through the generic path, secret-dir non-{0,1} direction-bit rejection) is verified in `tests/test_node_hash_vt_conformance.c` uniformly across all eight vts.
+
+**Existing fixed-hash entry points are unchanged.**  `merkle_gf8_path_circuit`, `merkle_grostl_gf8_path_circuit`, and their secret-dir / indexed counterparts stay in place; the vt-driven additions are purely additive.  Collapsing the fixed-hash entries to thin wrappers around the generic body is a future-work item that has no observable effect on the proof system (the gate streams are already identical).
+
+### Constant-time field arithmetic and AES
+
+All field-multiplication paths in `core/field.c` are constant-time: the CLMUL (x86_64) and PMULL (ARMv8) hardware paths by ISA definition, and the software fallback by construction (bitmask-conditional XOR routed through an inline-asm optimiser barrier). No variable-time table-lookup or branch-on-secret path ships in the library; the previous opt-in `-DVOLEITH_ALLOW_VARIABLE_TIME_FIELD` gate was removed in 1.2.0.
+
+AES follows the same design. A constant-time bitsliced backend (`core/aes_ct64.c`) is always built as the universal fallback; AES-NI (x86_64) and ARMv8 Crypto Extension (aarch64) hardware paths are constant-time by ISA definition. No variable-time table-lookup AES path ships; the previous opt-in `-DVOLEITH_ALLOW_VARIABLE_TIME_AES` gate was removed in 1.2.0.
 
 The constant-time discipline is verified two ways. Structurally, by source review (no secret-dependent branches, no secret-indexed memory access, all conditional XORs routed through bitmask AND with the `ct_barrier_u64` optimiser barrier). Empirically, by a dudect-style timing harness (`tools/dudect/`) that runs Welch's t-test on the bitsliced AES, the software field-multiplication paths, `voleith_byte_combine`, the software Grøstl path, and the GF(2^8) Grøstl witness builder (whose `voleith_gf8_inv` is a fixed Fermat addition chain, hence data-independent; the prior brute-force inverse scan was not) under fix-vs-fix input distributions on real hardware. Release-gate evidence files live under `docs/dudect-runs/`, currently covering x86_64 (Sandy Bridge and Gracemont) and aarch64 (Apple M1).
 
@@ -383,6 +471,16 @@ Every public API entry point (`voleith_prove`, `voleith_verify`, `voleith_prove_
 The validation is centralised in `voleith_params_validate` (in `proof/proof.c`) rather than scattered across each entry point. This both deduplicates the checks and makes the contract explicit: "any caller-supplied `voleith_params_t` is validated; out-of-range fields are rejected before any allocation or cryptographic operation."
 
 This is defense-in-depth: the library ships only six well-formed parameter sets, but a caller could construct a `voleith_params_t` directly with garbage fields, and the API boundary must reject that case rather than relying on internal code to fail downstream.
+
+### Circuit validation at the API boundary
+
+The `voleith_circuit_t` (and its GF(2^8) twin `voleith_gf8_circuit_t`) is the second caller-supplied input that flows into every prove / verify entry point, and the same boundary-rejection discipline applies. Two checks run before any cryptographic work:
+
+1. **Construction-completeness check** via `voleith_circuit_ok` / `voleith_gf8_circuit_ok`. The builder functions (`add_xor`, `add_and`, `add_mul`, `assert_zero`, `assert_product`, etc.) cannot signal OOM through their return value, so on `realloc` failure they set an internal `alloc_ok` flag and continue. A circuit with silently dropped wires or constraints would be a soundness break (the application's assertions are no longer enforced), so prove / verify reject when this flag is clear.
+
+2. **Reference-bounds check** via `voleith_circuit_validate` / `voleith_gf8_circuit_validate`. A one-shot O(n_wires + n_constraints) pass that enforces the topological-order invariant on gate inputs (for every gate at index *i*, its input wire ids are strictly less than *i*) and bounds every constraint's referenced wire ids against `n_wires`. Catches malformed circuits before they OOB-read wire / tag buffers in the QS hot loop.
+
+Both checks run at the public boundary (`voleith_prove_commit`, `voleith_verify_reconstruct`, and the GF(2^8) equivalents); the one-shot `voleith_prove` / `voleith_verify` flow through them. The validators are also public so callers that ever accept circuits from a less-trusted source (a future deserialize path, for instance) can run the same check up front. Neither check imposes any per-gate cost in the QS hot loop.
 
 ### Witness-correctness rejection at the prover
 
@@ -414,7 +512,7 @@ All secret-dependent equality checks use `voleith_const_memcmp()` (volatile XOR 
 
 The AES S-box circuit uses a purely algebraic tower-field decomposition; no lookup tables are accessed inside the proof circuit. This is required for soundness in the proof model (table lookups are not expressible in the QuickSilver gate language) and for constant-time guarantees outside it.
 
-The standard-eval AES used by the PRG and by test code does use S-box tables (in the variable-time path) or bitsliced AES (in the constant-time fallback). Neither is accessible to the proof circuit's prover or verifier.
+The standard-eval AES used by the PRG and by test code is either the hardware AES-NI / ARMv8 backend or the constant-time bitsliced backend (`core/aes_ct64.c`). Neither is accessible to the proof circuit's prover or verifier.
 
 ### Soundness-critical paths: implemented exactly per spec
 
@@ -477,62 +575,150 @@ Beyond known-answer vectors:
 - **Wrong instance:** verifier rejects (instance binding into the transcript).
 - **Two-phase round-trip:** `prove_commit` / `prove_respond` produces the same proof bytes as one-shot `prove`, and `chall_1` mismatches between the two phases are detected.
 
-The complete test suite runs once per built variant (up to eight: sw, clmul, aesni, clmul_aesni, sw_vartime on x86_64; armv8_aes, pmull, armv8 on aarch64; the CMake configuration step omits variants whose required hardware extension was not detected on the host). It currently includes 96 tests (memory safety regression suite) plus per-module tests for each circuit building block and proof variant.
+The complete test suite runs once per built variant (up to seven: sw, clmul, aesni, clmul_aesni on x86_64; armv8_aes, pmull, armv8 on aarch64; the CMake configuration step omits variants whose required hardware extension was not detected on the host). It currently includes 96 tests (memory safety regression suite) plus per-module tests for each circuit building block and proof variant.
 
 ---
 
-## Future Enhancements
+## Performance Benchmarking
 
-These items are intentionally scoped for future releases.
+### Scope: in `examples/`, not in the library
 
-### Runtime hardware detection and dispatch (single-binary fat builds)
+The library exposes no benchmarking surface of its own: `voleith_prove` and
+`voleith_verify` are the only entry points needed to measure prove / verify
+cost.  Benchmarking helpers live alongside the example programs in
+[`examples/bench_util.h`](../examples/bench_util.h) so that the public API
+stays focused on the proof system, and so that consumers can copy the same
+pattern into their own application code without depending on a measurement
+API that would otherwise have to be supported as part of the ABI.
 
-The library currently selects its AES and field-multiplication backends at compile time based on CMake feature probes. This produces a binary that is fast on its build target but suboptimal everywhere else: a binary built without AES-NI runs at bitsliced speed on a host that has AES-NI; a generic distro-package build targeting "any aarch64" cannot use Apple Silicon's hardware AES even when present.
+Two examples are wired up out of the box: `example_merkle_gf8` (AES-DM
+nodes) and `example_merkle_grostl_gf8` (wide-node Grøstl).  They were the
+first targets because the prove / verify cost trade-off between the two
+hash families (cheap-but-2⁶⁴ vs. expensive-but-2¹²⁸) is the most
+load-bearing per-application choice in the library, and the only one where
+"how much does that actually cost?" needs to be answered with numbers, not
+just gate-count algebra.
 
-The fix is a fat-binary build that compiles every backend the toolchain can produce, then chooses the best one at first use via runtime CPU-feature detection. The pattern is well-established in audio / video codec libraries; the cleanest reference implementation to study is FFmpeg (`libavutil/cpu.c`, `libavutil/aarch64/cpu.c`, `libavutil/x86/cpu.c`, and the per-codec `_init` dispatchers in `libavcodec/`). FFmpeg's design factors cleanly into "detect features once" plus "per-function dispatch table populated from those features" - the same shape libtalos_voleith needs.
+### `bench_util.h` API
 
-**Design.** A new `core/dispatch.c` exposes `voleith_cpu_features()` returning a bitmask populated once at first call via:
+Header-only, three functions:
 
-- x86_64: `__get_cpuid_count` / `__cpuid_count` (GCC, Clang) for AES-NI (`CPUID.01H:ECX[25]`), CLMUL (`CPUID.01H:ECX[1]`), AVX2 if useful (`CPUID.07H:EBX[5]`).
-- aarch64 Linux: `getauxval(AT_HWCAP)` for `HWCAP_AES`, `HWCAP_PMULL`, `HWCAP_SHA2`.
-- aarch64 macOS: `sysctlbyname("hw.optional.arm.FEAT_AES", ...)`, `FEAT_PMULL`, etc.
-- RISC-V Linux: `getauxval(AT_HWCAP)` once the kernel exposes the relevant bits; `riscv_hwprobe` syscall as fallback.
+- `bench_now_ns()`: `clock_gettime(CLOCK_MONOTONIC)` wrapped to a `uint64_t`
+  nanosecond timestamp.  Requires `_POSIX_C_SOURCE >= 199309L` defined
+  before any include.
+- `bench_compute(samples, n)`: sorts the samples in place and returns
+  `{min, median, mean, max, n}` over a millisecond-sample array.
+- `bench_print(label, stats)`: prints the four statistics on one line.
 
-The `voleith_aes_*` and `voleith_field_*` entry points become thin dispatchers that select the best available backend on first call and cache the choice in a `static atomic` function-pointer table. Subsequent calls pay one indirect-branch cost, which is negligible relative to AES round latency.
+The examples define `BENCH_WARMUP`, `BENCH_PROVE_ITERS`, and
+`BENCH_VERIFY_ITERS` (2 / 25 / 100 by default) at the top of `main` so that
+consumers cribbing the pattern can adjust them in one place.  Sample arrays
+are stack-allocated; no allocation in the timed region.
 
-**Build impact.** CMake compiles every backend the toolchain can target, regardless of the build host's CPU. The single resulting binary picks the right backend at runtime. Lean builds (size-constrained embedded targets) opt out per-backend with `-DVOLEITH_AES_NI=OFF`, `-DVOLEITH_ARMV8_AES=OFF`, etc. The default is fat.
+### Methodology
 
-**Cost.** Binary size grows by approximately 30-50 KB per additional AES backend and 10-20 KB per field backend. For a 200-300 KB library, that is a 20-30% size increase in exchange for "works fast everywhere out of the box." On hosts where size matters, the per-backend opt-out flags keep the lean-build option available.
+Timing noise on a loaded OS is **one-sided slow**: preemption, cache
+misses, page faults, frequency dips can only ever make a sample slower, not
+faster.  Two consequences shape the methodology:
 
-**Test impact.** Each backend is currently validated under its own build configuration in the four-variant CI matrix (sw, clmul, aesni, clmul_aesni). With runtime dispatch the matrix collapses: one fat binary runs every backend its hardware supports, on every test host. A `VOLEITH_FORCE_BACKEND=<name>` environment variable lets tests pin a specific backend regardless of available hardware, preserving per-backend coverage on a single host.
+- **The minimum is the cleanest estimate of intrinsic cost.**  It is the
+  sample least contaminated by the noise floor.  Report it as the floor for
+  "how fast can this code run on this host."
+- **The fast tail is never trimmed.**  Symmetric percentile cropping
+  (e.g. dudect's 5th/95th percentile crop) exists to stabilise the
+  two-sample t-test that dudect runs for leakage detection, not to estimate
+  runtime.  For runtime estimation, trimming the fast tail throws away the
+  cleanest signal.
 
-### Runtime backend-mismatch detection (lean builds only)
+`bench_util.h` therefore reports min / median / mean / max and lets the
+caller pick the right statistic for the question being asked.  Median is
+the typical-run number to compare against a budget; mean is sensitive to
+outliers and usually less useful than median here; max bounds the
+preemption tail and is useful for "could this miss a latency target."
 
-Once runtime dispatch (above) is in place, the default fat binary always picks the best available backend, and the deployment-mistake case largely disappears. It remains relevant only for **lean builds** that explicitly compile out a backend (e.g., `-DVOLEITH_AES_NI=OFF` for an embedded target with size constraints) and are then deployed to a host that has that hardware. The binary silently uses the bitsliced fallback at ~30-50× the speed it could be running at. This is functionally correct (bitsliced is constant-time and produces identical outputs) but operationally a pitfall.
+Warmup iterations fill caches, settle frequency scaling, and (on the
+prover side) let the grinding loop's random hit-rate stabilise.  The
+default of 2 is enough for the existing examples but is exposed as a
+`#define` so it can be raised for noisier hosts.
 
-**Implementation scope.** A one-shot probe at first `voleith_aes_*` call using the same `voleith_cpu_features()` machinery. If the running CPU advertises a hardware path that this binary was not built with, print a single stderr warning suggesting either a rebuild with the relevant `-D...=ON` flag or a default (fat) build. Suppressed by `VOLEITH_QUIET=1`. Idempotent via a single `static atomic_flag`. No security implication; purely a deployment-mistake aid.
+The `example_merkle_*` benchmarks generate a fresh proof per `prove`
+iteration (the grinding loop's variance is a real prover cost and should be
+visible in the spread) and run the verify loop against one fixed proof
+(valid-proof verify cost does not depend on which valid proof, so pinning to
+one removes a confound).
 
-### RISC-V cryptography extensions (gated on hardware availability)
+### Why `taskset -c 0`
 
-RISC-V is finalising scalar and vector cryptography extensions (`Zkn*`, `Zvbb`, `Zvbc`, `Zvkg`, `Zvkned`, `Zvksh`) that include AES round instructions (`AES32ESI`, `AES32ESMI`, `AES64ES`, `AES64ESM`, plus vector forms), GF(2) multiplication (`CLMUL`, `CLMULH`, vector `vclmul.vv`), and SHA-2 / SHA-3 acceleration. Linux distributions for RISC-V SoCs with these extensions are emerging; volume commercial silicon is still rare as of this writing.
+`taskset(1)` pins the process to a single logical core.  This eliminates
+two large sources of variance:
 
-**Implementation scope.** A new `core/aes_riscv.c` and (eventually) `core/field_riscv.c` matching the existing dispatch surface alongside the AES-NI / ARMv8 / bitsliced backends. CMake probe based on the `-march` extension string (e.g., `-march=rv64gc_zkn`). This work is **deferred until validation hardware is available**: a hardware-accelerated backend that has not been run on real silicon is a liability, not an asset. Target hardware: a SiFive HiFive Premier P550 dev board, the Milk-V Jupiter / Megrez class, or any equivalent Zkn-capable SBC once they ship in volume and a constant-time validation host (including dudect) can be sourced.
+1. **Cross-core migration.**  Unpinned processes move between cores at the
+   scheduler's discretion, and a migration costs a full cold-cache restart
+   on the destination core, visible as a long-tail spike in the samples.
+2. **Frequency-domain churn.**  Even with the governor in `performance`
+   mode, the package-level boost decision is per-core; pinning makes the
+   per-iteration frequency stable.
 
-### Half-tree GGM optimisation
+Core 0 is the conventional pick because it is the boot CPU and is normally
+the lowest-numbered logical core (with no SMT sibling on single-socket
+configurations).  Any specific core works; the important properties are
+"the same one each iteration" and "not shared with another CPU-heavy
+process."  Disabling Hyper-Threading or pinning to one logical CPU per
+physical core (`taskset -c 0,2,4,...` on most x86 layouts) removes
+sibling-contention variance on top of that.
 
-The "Faster VOLEitH Signatures" paper (ePrint 2024/097) describes a half-tree construction for the GGM vector commitment. Instead of expanding a full binary tree of depth log₂(N), one half of the tree is derived from the VOLE correlation, halving the number of PRG calls during commitment and cutting the `c` component of the proof by approximately 50%.
+Other hygiene that helps when the noise floor matters:
 
-This is the single highest-priority optimisation for large-circuit workloads such as the Signal KVAC anonymous credential circuit (ell = 7,808, τ = 16, 128–256 leaves per instance, ~3,072 total): the GGM tree commitment currently dominates both proving time (~3,072 leaf expansions) and proof size, so halving it would deliver a roughly 2× improvement in both. The optimisation is protocol-level (it benefits all parameter sets and both proof variants equally) and is a drop-in replacement for the GGM expansion in `vole/vc.c` with no API changes required.
+- `sudo cpupower frequency-set -g performance` (Linux): keeps the
+  governor from down-clocking between samples.
+- Disable Intel Turbo / AMD Boost via `/sys/devices/system/cpu/cpufreq/`
+  if you want a flat clock; otherwise the boost will be active during the
+  benchmark (often what you want, but variable).
+- Run on a host that is not doing anything else.  The fast tail will
+  reflect the host's idle floor; the slow tail will reflect whatever else
+  is contending.
 
-**Implementation scope.** The change is contained to `vole/vc.c` (GGM expansion and opening) and the corresponding verifier reconstruction path. The Fiat-Shamir transcript composition, QuickSilver gates, and parameter-set numerics are unchanged. The principal subtlety is that the half-tree construction introduces a correlation-robust hash (H_ccr) over GGM nodes that must be domain-separated from the existing leaf-commit hash; getting that domain separation wrong would silently weaken soundness, so the implementation must include faest-ref half-tree cross-validation vectors before being trusted.
+### Adapting the pattern to a consumer circuit
 
-### `n_leafcom = 3` FAEST variant
+Users instrumenting their own circuit can follow the same shape in their
+own program:
 
-The non-EM FAEST variants use `n_leafcom = 3` with a different leaf commitment construction. Two `TODO` comments in `vole/vc.c` mark the code paths that would need to change. The six FAEST-EM parameter sets cover all use cases known to the maintainers; the non-EM variants would be added if a consumer needed them.
+```c
+#define _POSIX_C_SOURCE 199309L
+#include "bench_util.h"   /* copied or vendored from examples/ */
 
-### Boyar-Peralta S-box for bit-level AES circuit
+#define WARMUP 2
+#define PROVE_ITERS 25
 
-If proof size in the bit-level variant becomes a concern, replacing the Canright `gf8_inv` in `circuits/aes_circuit.c` with the Boyar-Peralta circuit (32 AND gates per S-box, down from 36) is a contained change that does not affect the GF(2^8) variant (already at the minimum cost of 1 byte per S-box).
+double prove_ms[PROVE_ITERS];
+
+for (int w = 0; w < WARMUP; w++) {
+    voleith_proof_t p = {0};
+    voleith_gf8_prove(&p, params, c, witness, instance, ds, ds_len);
+    voleith_proof_free(&p);
+}
+
+for (int i = 0; i < PROVE_ITERS; i++) {
+    voleith_proof_t p = {0};
+    uint64_t t0 = bench_now_ns();
+    voleith_gf8_prove(&p, params, c, witness, instance, ds, ds_len);
+    uint64_t t1 = bench_now_ns();
+    prove_ms[i] = (double)(t1 - t0) / 1e6;
+    voleith_proof_free(&p);
+}
+
+bench_print("prove", bench_compute(prove_ms, PROVE_ITERS));
+```
+
+Run with `taskset -c 0 ./your_program`.  The same shape applies for verify;
+keep the witness-build work outside the timed region so it does not pollute
+the prove samples (the verify loop has no witness, so no equivalent
+concern).
+
+`bench_util.h` is intentionally a header-only file with no `voleith_`
+prefix; it is not part of the library's ABI surface and is meant to be
+copied into consumer projects (or vendored as-is) rather than depended on
+across a library version boundary.
 
 ---
 
@@ -548,7 +734,8 @@ If proof size in the bit-level variant becomes a concern, replacing the Canright
 - Yang, Sarkar, Weng, Wang. *QuickSilver: Efficient and Affordable Zero-Knowledge Proofs for Circuits and Polynomials over Any Field*. CCS 2021. ePrint 2021/076.
 - Baum, Beck, Delpech de Saint Guilhem, Klooß, Orsini, Roy, Scholl. *Faster VOLEitH Signatures from All-but-One Vector Commitments and Half Trees*. ePrint 2024/097.
 - Canright. *A Very Compact S-Box for AES*. CHES 2005.
-- Gauravaram, Knudsen, Matusiewicz, Mendel, Rechberger, Schläffer, Thomsen. *Grøstl – a SHA-3 candidate*. SHA-3 competition finalist (Round 3 specification).
+- Gauravaram, Knudsen, Matusiewicz, Mendel, Rechberger, Schläffer, Thomsen. *Grøstl: a SHA-3 candidate*. SHA-3 competition finalist (Round 3 specification).
+- Hirose. *Some Plausible Constructions of Double-Block-Length Hash Functions*. FSE 2006, LNCS 4047 pp. 210-225. The Hirose-DBL compression and its ideal-cipher collision-resistance proof; instantiated here over AES-256 for the 2¹²⁸-CR Merkle node hash.
 - Reparaz, Balasch, Verbauwhede. *Dude, is my code constant time?* NDSS 2017. (dudect methodology)
 
 ### Standards

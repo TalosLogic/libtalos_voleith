@@ -17,6 +17,10 @@ set(EXAMPLE_NAMES
     example_merkle
     example_merkle_gf8
     example_merkle_grostl_gf8
+    example_merkle_hirose_gf8
+    example_hirose_gf8
+    example_hirose_leaf_gf8
+    example_hirose_inode_gf8
     example_indexed_merkle
     example_indexed_merkle_gf8
     example_indexed_merkle_grostl_gf8

@@ -124,6 +124,15 @@ voleith_params_validate(const voleith_params_t *params)
         return -1;
     if (params->T_open == 0)
         return -1;
+    /* C-N1: bound the per-vector depth k = (lambda - w_grind) / tau + 1.
+     * vole/convert.c sizes a `v_ptrs[VOLEITH_MAX_K]` stack array and
+     * computes `(int)1 << k` (UB at k >= 32) on the verifier-side
+     * reconstruct path.  All shipping parameter sets satisfy this with
+     * margin (k <= 12); the check exists for custom voleith_params_t
+     * structs with tau small relative to lambda. */
+    unsigned int k = (params->lambda - params->w_grind) / params->tau + 1;
+    if (k > VOLEITH_MAX_K)
+        return -1;
     return 0;
 }
 
@@ -256,6 +265,15 @@ voleith_prove_commit(voleith_prover_commit_t **ctx_out,
         return -1;
     /* X-7: full parameter validation at the public API boundary. */
     if (voleith_params_validate(params) != 0)
+        return -1;
+    /* H-N1 / M-N1: reject circuits whose construction silently dropped
+     * wires or constraints under OOM. */
+    if (!voleith_circuit_ok(circuit))
+        return -1;
+    /* L-N2: validate every wire-id reference at the public boundary so
+     * a malformed circuit fails fast instead of OOB-reading wire / tag
+     * buffers in the QS hot loop. */
+    if (voleith_circuit_validate(circuit) != 0)
         return -1;
 
     unsigned int lambda = params->lambda;
@@ -486,6 +504,15 @@ voleith_verify_reconstruct(voleith_verifier_reconstruct_t **ctx_out,
         return -1;
     /* X-7: full parameter validation at the public API boundary. */
     if (voleith_params_validate(params) != 0)
+        return -1;
+    /* H-N1 / M-N1: reject circuits whose construction silently dropped
+     * wires or constraints under OOM. */
+    if (!voleith_circuit_ok(circuit))
+        return -1;
+    /* L-N2: validate every wire-id reference at the public boundary so
+     * a malformed circuit fails fast instead of OOB-reading wire / tag
+     * buffers in the QS hot loop. */
+    if (voleith_circuit_validate(circuit) != 0)
         return -1;
 
     unsigned int lambda = params->lambda;

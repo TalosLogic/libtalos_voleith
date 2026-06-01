@@ -62,7 +62,19 @@ size_t voleith_gf8_proof_byte_size(const voleith_params_t *params, size_t ell);
  * instance:    public input - one byte per instance wire (instance_count bytes);
  *              may be NULL if instance_count == 0
  * fs_seed:     Fiat-Shamir seed; should incorporate all public data and be
- *              unique per proof (include fresh randomness)
+ *              unique per proof (include fresh randomness).
+ *
+ *              SECURITY (M-N2): the Fiat-Shamir transcript hashes
+ *              only fs_seed, instance, and the BAVC commitment.  It
+ *              does NOT bind the circuit identity, parameter set, or
+ *              library version.  The caller MUST hash into fs_seed:
+ *                - a circuit/protocol identifier,
+ *                - a packed encoding of `params` (lambda, tau,
+ *                  w_grind, n_leafcom, T_open),
+ *                - a library/transcript version tag.
+ *              Auto-binding is planned for 1.3.0 alongside the proof
+ *              metadata header; until then this is a caller
+ *              obligation.
  * fs_seed_len: length of fs_seed in bytes
  * proof:       output - proof->data is malloc'd; caller calls voleith_proof_free()
  *
@@ -75,6 +87,9 @@ int voleith_gf8_prove(voleith_proof_t *proof, const voleith_params_t *params,
 
 /*
  * Verify a non-interactive proof for a GF(2⁸) element-level circuit.
+ *
+ * See voleith_gf8_prove() above for the M-N2 caller-binding
+ * requirement on fs_seed.
  *
  * Returns 0 if the proof is valid, -1 if invalid or malformed.
  */

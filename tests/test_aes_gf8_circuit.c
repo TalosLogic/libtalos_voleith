@@ -17,6 +17,10 @@
  *   8:  AES-256 FIPS 197 Appendix C.3 test vector (round-trip evaluate)
  *   9:  AES-128 ciphertext output matches voleith_aes_encrypt (core AES)
  *  10:  AES-256 ciphertext output matches voleith_aes_encrypt (core AES)
+ *  11:  AES-256 split (expand_key + encrypt_rk) matches monolithic
+ *       wrapper in witness/assert counts and ciphertext
+ *  12:  AES-256 split witness builders produce byte-identical inv_in
+ *       and ciphertext to aes256_gf8_build_witness
  */
 
 #include "../circuits/aes_gf8_circuit.h"
@@ -473,6 +477,85 @@ test_aes256_matches_core_aes(void)
 }
 
 /* ================================================================
+ * Test 11: AES-256 split functions (expand_key + encrypt_rk) emit the
+ * same circuit and same ciphertext as the monolithic wrapper.
+ * ================================================================ */
+static void
+test_aes256_split_circuit_equivalence(void)
+{
+    static const uint8_t KEY[32] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+        0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
+        0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f};
+    static const uint8_t PT[16] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+                                   0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb,
+                                   0xcc, 0xdd, 0xee, 0xff};
+    static const uint8_t EXPECTED[16] = {0x8e, 0xa2, 0xb7, 0xca, 0x51, 0x67,
+                                         0x45, 0xbf, 0xea, 0xfc, 0x49, 0x90,
+                                         0x4b, 0x49, 0x60, 0x89};
+
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    gf8_wire_id key[32], pt[16], ct[16];
+    gf8_wire_id rk[15][16];
+    for (int i = 0; i < 32; i++)
+        key[i] = voleith_gf8_add_witness(c);
+    for (int i = 0; i < 16; i++)
+        pt[i] = voleith_gf8_add_instance(c);
+    aes256_gf8_expand_key(c, key, rk);
+    aes256_gf8_encrypt_rk(c, rk, pt, ct);
+
+    check("AES-256 split: witness_count = 308",
+          voleith_gf8_circuit_witness_count(c) == 308);
+    check("AES-256 split: assert_product_count = 552",
+          voleith_gf8_circuit_assert_product_count(c) == 552);
+    check("AES-256 split: mul_count = 0",
+          voleith_gf8_circuit_mul_count(c) == 0);
+
+    uint8_t witness[308];
+    aes256_gf8_build_witness(KEY, PT, witness, NULL);
+    size_t n = voleith_gf8_circuit_wire_count(c);
+    uint8_t *vals = calloc(n, 1);
+    voleith_gf8_circuit_eval(c, witness, PT, vals);
+    uint8_t got[16];
+    for (int i = 0; i < 16; i++)
+        got[i] = vals[ct[i]];
+    check("AES-256 split: ciphertext matches FIPS 197 C.3",
+          memcmp(got, EXPECTED, 16) == 0);
+
+    free(vals);
+    voleith_gf8_circuit_free(c);
+}
+
+static void
+test_aes256_split_witness_equivalence(void)
+{
+    static const uint8_t KEY[32] = {
+        0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe, 0x01, 0x23, 0x45,
+        0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xed, 0xfa, 0xce, 0xde, 0xad,
+        0xbe, 0xef, 0xfe, 0xed, 0xfa, 0xce, 0xde, 0xad, 0xbe, 0xef};
+    static const uint8_t PT[16] = {0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x2c,
+                                   0x20, 0x57, 0x6f, 0x72, 0x6c, 0x64,
+                                   0x21, 0x00, 0x00, 0x00};
+
+    uint8_t w_mono[308], ct_mono[16];
+    aes256_gf8_build_witness(KEY, PT, w_mono, ct_mono);
+
+    uint8_t inv_ks[AES256_GF8_KS_INVIN_BYTES];
+    uint8_t inv_enc[AES256_GF8_ENC_INVIN_BYTES];
+    uint8_t rk[15][16], ct_split[16];
+    aes256_gf8_expand_key_witness(KEY, inv_ks, rk);
+    aes256_gf8_encrypt_rk_witness(rk, PT, inv_enc, ct_split);
+
+    check("AES-256 split witness: KS inv_in matches monolithic",
+          memcmp(inv_ks, w_mono + 32, AES256_GF8_KS_INVIN_BYTES) == 0);
+    check("AES-256 split witness: data-path inv_in matches monolithic",
+          memcmp(inv_enc, w_mono + 32 + AES256_GF8_KS_INVIN_BYTES,
+                 AES256_GF8_ENC_INVIN_BYTES) == 0);
+    check("AES-256 split witness: ciphertext matches monolithic",
+          memcmp(ct_split, ct_mono, 16) == 0);
+}
+
+/* ================================================================
  * main
  * ================================================================ */
 int
@@ -490,6 +573,8 @@ main(void)
     test_aes256_fips197_c3();
     test_aes128_matches_core_aes();
     test_aes256_matches_core_aes();
+    test_aes256_split_circuit_equivalence();
+    test_aes256_split_witness_equivalence();
 
     printf("  %d / %d passed\n", pass_count, test_count);
     return (pass_count == test_count) ? 0 : 1;

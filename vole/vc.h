@@ -29,6 +29,36 @@
 #include <stddef.h>
 
 /*
+ * Upper bound on the per-vector depth k = (lambda - w_grind) / tau + 1.
+ *
+ * Enforced at the public API boundary by voleith_params_validate.  Two
+ * downstream sites depend on this bound being respected:
+ *
+ *   - vole/convert.c sizes a stack array `v_ptrs[VOLEITH_MAX_K]` in
+ *     voleith_vole_reconstruct (one slot per level of a single VOLE
+ *     vector's tree).
+ *   - vole/convert.c:216 computes `(int)1 << k` for the per-vector
+ *     leaf-seed allocation; the shift becomes undefined behaviour at
+ *     k >= 32 (operand-width cliff).
+ *
+ * All six predefined FAEST-EM parameter sets satisfy k <= 12 with
+ * room to spare, so the bound is non-binding for any shipping
+ * configuration; it exists to reject custom voleith_params_t structs
+ * whose tau is small enough relative to lambda to drive k past the
+ * downstream cliffs.
+ *
+ * L-N4 (size_t overflow): several allocations in vole/vc.c are sized
+ * as `size_t` products of derived quantities (e.g. `Ni * com_bytes`,
+ * `total_nodes * seed_bytes`, `2 * L - 1`).  With current bounds
+ * (k <= 32 above, com_bytes <= 64, leaf counts L <= 2^k <= 2^32)
+ * these stay well under SIZE_MAX on any 64-bit target.  If future
+ * parameter additions raise k beyond 32, raise n_leafcom, or
+ * introduce a new commitment shape, audit these products for
+ * overflow before shipping.
+ */
+#define VOLEITH_MAX_K 32
+
+/*
  * VOLE parameters derived from the FAEST parameter set.
  * See FAEST spec Table 5.1 for definitions.
  */

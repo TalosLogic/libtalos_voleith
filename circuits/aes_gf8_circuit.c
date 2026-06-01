@@ -325,12 +325,12 @@ aes128_gf8_circuit(voleith_gf8_circuit_t *c, const gf8_wire_id key[16],
 }
 
 /* ================================================================
- * AES-256 key schedule
+ * Public API: AES-256 key schedule (gate-level)
  * ================================================================ */
 
-static void
-aes256_gf8_key_schedule(voleith_gf8_circuit_t *c, const gf8_wire_id key[32],
-                        gf8_wire_id rk[15][16])
+void
+aes256_gf8_expand_key(voleith_gf8_circuit_t *c, const gf8_wire_id key[32],
+                      gf8_wire_id rk[15][16])
 {
     /* Store all 60 key-schedule words. */
     gf8_wire_id w[60][4];
@@ -375,16 +375,13 @@ aes256_gf8_key_schedule(voleith_gf8_circuit_t *c, const gf8_wire_id key[32],
 }
 
 /* ================================================================
- * Public API: AES-256 circuit
+ * Public API: AES-256 encryption with precomputed round keys
  * ================================================================ */
 
 void
-aes256_gf8_circuit(voleith_gf8_circuit_t *c, const gf8_wire_id key[32],
-                   const gf8_wire_id plaintext[16], gf8_wire_id output[16])
+aes256_gf8_encrypt_rk(voleith_gf8_circuit_t *c, const gf8_wire_id rk[15][16],
+                      const gf8_wire_id plaintext[16], gf8_wire_id output[16])
 {
-    gf8_wire_id rk[15][16];
-    aes256_gf8_key_schedule(c, key, rk);
-
     aes_gf8_state state;
     for (int k = 0; k < 16; k++)
         state[k] = plaintext[k];
@@ -405,6 +402,19 @@ aes256_gf8_circuit(voleith_gf8_circuit_t *c, const gf8_wire_id key[32],
 
     for (int k = 0; k < 16; k++)
         output[k] = state[k];
+}
+
+/* ================================================================
+ * Public API: AES-256 circuit (thin wrapper)
+ * ================================================================ */
+
+void
+aes256_gf8_circuit(voleith_gf8_circuit_t *c, const gf8_wire_id key[32],
+                   const gf8_wire_id plaintext[16], gf8_wire_id output[16])
+{
+    gf8_wire_id rk[15][16];
+    aes256_gf8_expand_key(c, key, rk);
+    aes256_gf8_encrypt_rk(c, rk, plaintext, output);
 }
 
 /* ================================================================
@@ -573,19 +583,16 @@ aes128_gf8_build_witness(const uint8_t key[16], const uint8_t plaintext[16],
 }
 
 void
-aes256_gf8_build_witness(const uint8_t key[32], const uint8_t plaintext[16],
-                         uint8_t witness[308], uint8_t ciphertext[16])
+aes256_gf8_expand_key_witness(const uint8_t key[32],
+                              uint8_t inv_out[AES256_GF8_KS_INVIN_BYTES],
+                              uint8_t rk_out[15][16])
 {
-    /* witness[0..31] = key bytes */
-    memcpy(witness, key, 32);
-    uint8_t *inv_slot = witness + 32;
+    uint8_t *inv_slot = inv_out;
 
     /* All 60 key-schedule words. */
     uint8_t w[60][4];
     for (int word = 0; word < 8; word++)
         memcpy(w[word], key + 4 * word, 4);
-
-    uint8_t rk[15][16];
 
     for (int i = 8; i < 60; i++) {
         uint8_t temp[4];
@@ -616,9 +623,21 @@ aes256_gf8_build_witness(const uint8_t key[32], const uint8_t plaintext[16],
     /* Build round key table from w. */
     for (int n = 0; n < 15; n++)
         for (int word = 0; word < 4; word++)
-            memcpy(rk[n] + 4 * word, w[4 * n + word], 4);
+            memcpy(rk_out[n] + 4 * word, w[4 * n + word], 4);
 
-    /* Data path. */
+    /* CIR-11: clear the expanded-words scratch.  The caller is
+     * responsible for clearing rk_out at the appropriate point. */
+    voleith_secure_zero(w, sizeof(w));
+}
+
+void
+aes256_gf8_encrypt_rk_witness(const uint8_t rk[15][16],
+                              const uint8_t plaintext[16],
+                              uint8_t inv_out[AES256_GF8_ENC_INVIN_BYTES],
+                              uint8_t ciphertext[16])
+{
+    uint8_t *inv_slot = inv_out;
+
     uint8_t state[16];
     for (int k = 0; k < 16; k++)
         state[k] = plaintext[k] ^ rk[0][k];
@@ -646,8 +665,23 @@ aes256_gf8_build_witness(const uint8_t key[32], const uint8_t plaintext[16],
     if (ciphertext)
         memcpy(ciphertext, state, 16);
 
-    /* CIR-11: same cleanup as the AES-128 variant. */
-    voleith_secure_zero(w, sizeof(w));
-    voleith_secure_zero(rk, sizeof(rk));
+    /* CIR-11: clear per-block mid-encrypt state. */
     voleith_secure_zero(state, sizeof(state));
+}
+
+void
+aes256_gf8_build_witness(const uint8_t key[32], const uint8_t plaintext[16],
+                         uint8_t witness[308], uint8_t ciphertext[16])
+{
+    /* witness[0..31] = key bytes */
+    memcpy(witness, key, 32);
+
+    uint8_t rk[15][16];
+    aes256_gf8_expand_key_witness(key, witness + 32, rk);
+    aes256_gf8_encrypt_rk_witness(
+        rk, plaintext, witness + 32 + AES256_GF8_KS_INVIN_BYTES, ciphertext);
+
+    /* CIR-11: clear the round-key table that the split functions
+     * leave to the caller. */
+    voleith_secure_zero(rk, sizeof(rk));
 }

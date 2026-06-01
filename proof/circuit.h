@@ -120,6 +120,9 @@ void voleith_circuit_free(voleith_circuit_t *c);
  * Builder API - add wires and gates
  *
  * All functions return WIRE_ID_INVALID on allocation failure.
+ * Allocation failures are also recorded in an internal flag readable
+ * via voleith_circuit_ok(); callers may defer error handling until
+ * the circuit is complete rather than checking every call.
  * ================================================================ */
 
 /*
@@ -164,12 +167,17 @@ wire_id voleith_circuit_add_not(voleith_circuit_t *c, wire_id a);
  * Assert that wire w evaluates to 0. Used to express that a computed
  * output equals a known constant (e.g., computed XOR of ciphertext bits
  * with expected ciphertext must be zero).
+ *
+ * On allocation failure the constraint is dropped and the circuit's
+ * internal alloc_ok flag is cleared. Callers must check
+ * voleith_circuit_ok() before passing the circuit to prove / verify.
  */
 void voleith_circuit_assert_zero(voleith_circuit_t *c, wire_id w);
 
 /*
  * Assert that wire a equals wire b.
- * Implemented as assert_zero(a XOR b).
+ * Implemented as assert_zero(a XOR b). See assert_zero for the
+ * OOM contract.
  */
 void voleith_circuit_assert_equal(voleith_circuit_t *c, wire_id a, wire_id b);
 
@@ -191,6 +199,34 @@ size_t voleith_circuit_and_gate_count(const voleith_circuit_t *c);
 
 /* Number of constraints */
 size_t voleith_circuit_constraint_count(const voleith_circuit_t *c);
+
+/*
+ * Returns 1 if all builder operations succeeded (no allocation failure),
+ * 0 if any operation failed silently. Builder functions like add_xor /
+ * add_and / assert_zero / assert_equal cannot signal OOM through their
+ * return values; on realloc failure they set an internal flag instead.
+ * Callers must check this before passing a circuit to prove / verify.
+ */
+int voleith_circuit_ok(const voleith_circuit_t *c);
+
+/*
+ * Validate that every wire-id reference in the circuit is in range.
+ *
+ * For each gate wire at index i, requires that input wire ids (a, b)
+ * are strictly less than i - the topological-order property the
+ * evaluator relies on.  For each constraint, requires referenced wire
+ * ids to be less than n_wires.  Primary input wires (WITNESS,
+ * INSTANCE, CONST) have unused a/b fields (WIRE_ID_INVALID) and are
+ * skipped.
+ *
+ * Returns 0 on success, -1 if any reference is out of range or c is
+ * NULL.  Called automatically by the prove / verify entry points to
+ * fail fast on a malformed circuit (covering L-N2 from the 1.2.0
+ * security review).  Available as a public function so callers that
+ * accept circuits from less-trusted sources (e.g. a future
+ * deserialize path) can validate up-front.
+ */
+int voleith_circuit_validate(const voleith_circuit_t *c);
 
 /*
  * Read-only access to the wire table (for QuickSilver and evaluation).

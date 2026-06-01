@@ -5,6 +5,154 @@ All notable changes to libtalos_voleith are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Adds Hirose-AES-256 as a hash primitive and GF(2⁸) circuit, the
+`voleith_node_hash_vt` hash-agnostic interface, and generic vt-driven
+Merkle path / indexed-non-member circuits that carry Hirose and the
+existing hash families uniformly.  No wire-format or proof-format
+change; existing proofs verify unchanged.  Existing fixed-hash entry
+points (`merkle_gf8_path_circuit`, `merkle_grostl_gf8_path_circuit`,
+their secret-dir and indexed counterparts) are unchanged: the
+vt-driven additions are purely additive and produce bit-exact gate
+streams.  See DESIGN.md "Hirose-AES-256 double-block-length hash" and
+"Generic vt-driven Merkle path and indexed-non-member circuits".
+
+### Added
+
+- `core/hirose.{c,h}`: Hirose DBL compression (FSE 2006) over AES-256.
+  Naive two-encrypt software form serves as an independent oracle for
+  the KS-shared in-circuit form.
+- `circuits/node_hash_hirose_gf8.{c,h}`: Hirose iteration as a GF(2⁸)
+  circuit (KS-shared, 500 S-boxes / iteration, the structural floor at
+  2¹²⁸ CR), plus fixed-32-leaf / variable-leaf / inode wrappers,
+  witness builders, and software helpers.  Iteration emit is
+  aliasing-safe for in-place chaining.
+- `circuits/node_hash_vt.h`: `voleith_node_hash_vt` interface, the
+  hash-agnostic bridge consumed by the generic vt-driven Merkle / IMT
+  circuits.
+- Hirose vt instances `voleith_node_hash_hirose_fixed32` (32-byte
+  leaves, no padding) and `voleith_node_hash_hirose` (variable-length
+  leaves, `10*` always-pad, Merkle-internal only).  Both share inode
+  dispatch.
+- `circuits/node_hash_aes_gf8.{c,h}` and `circuits/node_hash_grostl_gf8.{c,h}`:
+  vt instances wrapping the existing AES-DM, AES-128-CMAC, and four
+  Grøstl variants.  Eight vts ship in total.
+- `circuits/merkle_vt_gf8_circuit.{c,h}`: generic vt-driven Merkle
+  path circuit, public-dir and secret-dir.  Secret-dir enforces
+  per-level `assert_product(dir, dir, dir)` booleanity structurally.
+- `circuits/indexed_merkle_vt_gf8_circuit.{c,h}`: generic vt-driven
+  indexed Merkle non-membership circuit, public-dir and secret-dir.
+- Conformance / equivalence tests: `tests/test_merkle_vt_gf8_equivalence.c`,
+  `tests/test_indexed_merkle_vt_gf8_equivalence.c` (bit-exact match
+  against the fixed-hash entries for every wrapped vt), and
+  `tests/test_node_hash_vt_conformance.c` (per-vt invin sizing, leaf /
+  inode circuit-vs-software, domain separation, depth-3 end-to-end,
+  booleanity rejection), uniform across all eight vts.
+- AES-256 key-schedule sharing refactor (`aes256_gf8_expand_key`,
+  `aes256_gf8_encrypt_rk`, matching witness builders).
+  `aes256_gf8_circuit` becomes a thin wrapper that is byte-identical
+  for all existing AES-256 callers.
+- Examples: `example_hirose_gf8`, `example_hirose_leaf_gf8`,
+  `example_hirose_inode_gf8`: three concrete cost points for the
+  iteration primitive, the fixed-32 leaf, and the inode.
+- `examples/example_merkle_hirose_gf8.c`: depth-5 Merkle path proof
+  through the vt-driven `merkle_vt_gf8_path_circuit` with the
+  Hirose-AES-256 fixed-32 leaf vt, mirroring `example_merkle_gf8`
+  (AES-DM) and `example_merkle_grostl_gf8` (Grøstl) so the three node-
+  hash families can be benchmarked apples-to-apples on the same host.
+- Prove / verify benchmarking helpers (`examples/bench_util.h`) and
+  `taskset(1)` workflow documented in README and DESIGN.md
+  "Performance Benchmarking".
+
+### Changed
+
+- `tests/test_aes.c` FIPS 197 Appendix A round-key inspection tests
+  now also run under the ARMv8 Crypto Extension backend (gate widened
+  from `VOLEITH_HAVE_AES_NI` to `VOLEITH_HAVE_AES_NI ||
+  VOLEITH_HAVE_ARMV8_AES`).  ARMv8 stores `ctx->rk` in the same flat
+  byte layout as AES-NI, so the existing assertions apply unchanged.
+  Previously these tests were skipped on aarch64 hosts.
+
+### Removed
+
+- The variable-time table-lookup AES backend and the variable-time
+  software field-multiplication path have been removed entirely,
+  along with their CMake gates (`-DVOLEITH_ALLOW_VARIABLE_TIME_AES`,
+  `-DVOLEITH_ALLOW_VARIABLE_TIME_FIELD`).  Both were already gated
+  OFF by default since 1.0.1 and unused by any shipping
+  configuration; they survived only as in-tree reference oracles,
+  but that role is covered by NIST AES KATs and the faest-ref oracle
+  for field arithmetic, so deletion is a strict reduction of the
+  side-channel surface and the maintenance burden.  Affected:
+  `core/aes.{c,h}` (the FIPS 197 table-lookup path,
+  `VOLEITH_AES_BACKEND_VARIABLE_TIME` enum value, and dispatch
+  fallbacks), `core/field.c` (the variable-time arms of
+  `voleith_gf8_mul`, `clmul64_soft`, `voleith_gf{128,192,256}_mul`,
+  and `voleith_byte_combine`; the orphaned `limbs_xor` /
+  `limbs_test_bit` helpers), `CMakeLists.txt` (option blocks, loud
+  warnings, dispatch propagation, the `sw_vartime` test variant, and
+  the `FORCE_VARTIME_FIELD` parameter of `voleith_add_variant`).
+  Builds previously passing `-DVOLEITH_ALLOW_VARIABLE_TIME_*=ON`
+  will fail with an "unknown CMake option" warning; the gates are
+  no longer recognised.  All other build options behave unchanged.
+
+### Security
+
+- **Bounded the per-vector tree depth `k` in `voleith_params_validate`**.
+  Prevents a stack-buffer overflow on the verifier-side reconstruct
+  path for custom `voleith_params_t` with tau small relative to
+  lambda; all six predefined `em_*` sets are well under the bound.
+- **Reject circuits with silent allocation failures at the prove /
+  verify boundary**.  Added `alloc_ok` flag + `voleith_circuit_ok()`
+  to `voleith_circuit_t`; prove / verify entry points (bit-level and
+  GF(2⁸)) now check it.
+- **Auto-check `voleith_gf8_circuit_ok()` in the GF(2⁸) prove /
+  verify entry points**. Previously only tested by callers; closes
+  H-N2.
+- **Validate wire-id references at the prove / verify boundary**.
+  Added `voleith_circuit_validate` / `voleith_gf8_circuit_validate`,
+  called from the prove / verify entry points after `*_circuit_ok`.
+  One-shot topological + bounds check; closes L-N2.
+- **Zero verifier-side reconstructed seed and qtmp buffers before
+  free** in `voleith_vole_reconstruct`. Aligns with the prover-side
+  V-5 discipline; closes L-N3.
+- **Document the `fs_seed` caller-binding obligation** on every
+  prove / verify entry point in `proof/proof.h` and
+  `proof/gf8_proof.h`. Doc-only mitigation for M-N2; structural
+  auto-binding deferred to 1.3.0.
+
+### Performance
+
+Depth-5 Merkle path, GF(2⁸) circuit, EM-128f parameters (the proof
+system's smallest fast-variant set).  Measured with the
+`example_merkle_*_gf8` programs: 25 prove and 100 verify iterations
+after 2 warmup runs, pinned to a single core with `taskset -c 0`.
+Reported as min: the cleanest estimate of intrinsic cost since prove
+variance is dominated by the grinding loop (see `examples/bench_util.h`).
+
+x86_64 (Intel Xeon E5-2690 0 @ 2.90GHz, Sandy Bridge-EP; CLMUL + AES-NI;
+`taskset -c 0`):
+
+| Node hash         | CR    | Proof size | Prove (min) | Verify (min) |
+|---|---|---|---|---|
+| AES-DM (16 B)     | 2⁶⁴  | 24 KB      | 45 ms       | 13 ms        |
+| Hirose-AES-256    | 2¹²⁸ | 102 KB     | 63 ms       | 58 ms        |
+| Grøstl-256_T27    | 2¹⁰⁸ | 190 KB     | 139 ms      | 134 ms       |
+
+aarch64 (Apple M1, macOS 15.7.7; ARMv8 Crypto Extension; no CPU pinning):
+
+| Node hash         | CR    | Proof size | Prove (min) | Verify (min) |
+|---|---|---|---|---|
+| AES-DM (16 B)     | 2⁶⁴  | 24 KB      | 19 ms       | 17 ms        |
+| Hirose-AES-256    | 2¹²⁸ | 102 KB     | 64 ms       | 59 ms        |
+| Grøstl-256_T27    | 2¹⁰⁸ | 190 KB     | 124 ms      | 111 ms       |
+
+At the 2¹²⁸ CR floor, the new Hirose-AES-256 node hash produces 1.86×
+smaller proofs and is ~2× faster (x86: 2.3×, M1: 1.9×) to verify than
+Grøstl-256_T27, which is at the strictly weaker 2¹⁰⁸ CR - confirming
+Hirose as the 2¹²⁸ option on both hardware families.
+
 ## [1.1.0] - 2026-05-28
 
 Adds the Grøstl hash family and wide-node Grøstl Merkle circuits. No

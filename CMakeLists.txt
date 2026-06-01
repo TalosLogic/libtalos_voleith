@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 cmake_minimum_required(VERSION 3.16)
-project(libvoleith VERSION 1.1.0 LANGUAGES C)
+project(libvoleith VERSION 1.2.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -18,37 +18,6 @@ option(VOLEITH_BUILD_EXAMPLES "Build example programs" ON)
 option(VOLEITH_BUILD_SHARED "Build shared library (libvoleith.so/.dylib) in addition to static" OFF)
 option(VOLEITH_BUILD_DUDECT "Build dudect timing-validation harness (tools/dudect)" OFF)
 
-# Test/debug-only flag.  Compiles in the FIPS 197 table-lookup AES
-# path, which has a cache-timing side channel on secret keys.  See
-# docs/SECURITY_REVIEW.md C-1 and docs/AES_MIGRATION_PLAN.md §3.
-option(VOLEITH_ALLOW_VARIABLE_TIME_AES
-       "Enable the variable-time table-lookup AES backend (test/debug only)"
-       OFF)
-
-if(VOLEITH_ALLOW_VARIABLE_TIME_AES)
-    message(WARNING
-        "voleith: variable-time AES (table lookups indexed by secret bytes)\n"
-        "is being compiled in.  This is a cache-timing side channel and is\n"
-        "for TEST/DEBUG only.  Do NOT ship this configuration to production.\n"
-        "See docs/SECURITY_REVIEW.md finding C-1 for context.")
-endif()
-
-# Test/debug-only flag.  Compiles in the variable-time software
-# field-multiplication path (branches on secret bits of the
-# multiplier).  See docs/SECURITY_REVIEW.md C-2 and
-# docs/CONSTANT_TIME_FIELD_DESIGN.md.
-option(VOLEITH_ALLOW_VARIABLE_TIME_FIELD
-       "Enable the variable-time software field multiplication path (test/debug only)"
-       OFF)
-
-if(VOLEITH_ALLOW_VARIABLE_TIME_FIELD)
-    message(WARNING
-        "voleith: variable-time field multiplication (branches on secret\n"
-        "bits of the multiplier) is being compiled in.  Cache/timing side\n"
-        "channel.  For TEST/DEBUG only.  Do NOT ship this configuration\n"
-        "to production.  See docs/SECURITY_REVIEW.md finding C-2 for context.")
-endif()
-
 # Report which AES backend will be active.  Done after the AES-NI
 # detection probe (below) populates HAVE_AES_NI, so the report
 # reflects the actually-selected backend.  Deferred via a helper:
@@ -57,8 +26,6 @@ function(voleith_report_aes_backend)
         message(STATUS "voleith: AES backend = AES-NI (x86_64 hardware)")
     elseif(HAVE_ARMV8_AES)
         message(STATUS "voleith: AES backend = ARMv8 Crypto Extension (aarch64 hardware)")
-    elseif(VOLEITH_ALLOW_VARIABLE_TIME_AES)
-        # The WARNING above already announces this loudly.
     else()
         # NOTICE (CMake 3.15+) prints to stderr without the "-- " STATUS
         # prefix and is not suppressed by -Wno-dev - easy for CI/CD to
@@ -77,8 +44,6 @@ function(voleith_report_field_backend)
         message(STATUS "voleith: field backend = CLMUL/PCLMULQDQ (x86_64 hardware)")
     elseif(HAVE_PMULL)
         message(STATUS "voleith: field backend = PMULL (aarch64 hardware)")
-    elseif(VOLEITH_ALLOW_VARIABLE_TIME_FIELD)
-        # The WARNING above already announces this loudly.
     else()
         message(NOTICE
             "voleith: field backend = constant-time scalar software "
@@ -190,6 +155,7 @@ set(VOLEITH_CORE_SOURCES
     core/aes.c
     core/aes_ct64.c
     core/grostl.c
+    core/hirose.c
     core/prg.c
     core/hash.c
     core/util.c
@@ -219,6 +185,11 @@ set(VOLEITH_CORE_SOURCES
     circuits/indexed_merkle_circuit.c
     circuits/indexed_merkle_gf8_circuit.c
     circuits/indexed_merkle_grostl_gf8_circuit.c
+    circuits/node_hash_hirose_gf8.c
+    circuits/node_hash_aes_gf8.c
+    circuits/node_hash_grostl_gf8.c
+    circuits/merkle_vt_gf8_circuit.c
+    circuits/indexed_merkle_vt_gf8_circuit.c
 )
 
 set(VOLEITH_CORE_INCLUDES
@@ -251,14 +222,6 @@ function(voleith_apply_hw_flags TARGET)
             target_compile_options(${TARGET} PRIVATE ${ARMV8_CRYPTO_FLAGS})
         endif()
     endif()
-    if(VOLEITH_ALLOW_VARIABLE_TIME_AES)
-        target_compile_definitions(${TARGET} PUBLIC
-                                   VOLEITH_ALLOW_VARIABLE_TIME_AES)
-    endif()
-    if(VOLEITH_ALLOW_VARIABLE_TIME_FIELD)
-        target_compile_definitions(${TARGET} PUBLIC
-                                   VOLEITH_ALLOW_VARIABLE_TIME_FIELD)
-    endif()
 endfunction()
 
 # Production static library (libtalos_voleith.a)
@@ -289,11 +252,7 @@ if(VOLEITH_BUILD_TESTS)
     set(VOLEITH_TEST_VARIANTS "")
 
     # Helper function to create a library variant with specific intrinsics.
-    # FORCE_VARTIME_FIELD: if ON, compile this variant's field-mul software
-    # path as variable-time regardless of the top-level option.  Used by the
-    # sw_vartime test variant so the reference path is exercised even when
-    # the top-level VOLEITH_ALLOW_VARIABLE_TIME_FIELD is OFF.
-    function(voleith_add_variant SUFFIX USE_CLMUL USE_AES_NI FORCE_VARTIME_FIELD
+    function(voleith_add_variant SUFFIX USE_CLMUL USE_AES_NI
                                         USE_ARMV8_AES USE_PMULL)
         # Skip the variant when a required hardware feature is absent on
         # this host.  Building it would either fail (compiler rejects the
@@ -351,31 +310,20 @@ if(VOLEITH_BUILD_TESTS)
             endif()
         endif()
 
-        if(VOLEITH_ALLOW_VARIABLE_TIME_AES)
-            target_compile_definitions(${TARGET_NAME} PUBLIC
-                                       VOLEITH_ALLOW_VARIABLE_TIME_AES)
-        endif()
-
-        if(FORCE_VARTIME_FIELD OR VOLEITH_ALLOW_VARIABLE_TIME_FIELD)
-            target_compile_definitions(${TARGET_NAME} PUBLIC
-                                       VOLEITH_ALLOW_VARIABLE_TIME_FIELD)
-        endif()
-
         # Record this suffix so tests can iterate only over the variants
         # that were actually built.
         set(VOLEITH_TEST_VARIANTS ${VOLEITH_TEST_VARIANTS} ${SUFFIX}
             PARENT_SCOPE)
     endfunction()
 
-    #                   suffix          CLMUL  AES_NI  VARTIME  ARMV8_AES  PMULL
-    voleith_add_variant(sw              OFF    OFF     OFF      OFF        OFF)
-    voleith_add_variant(clmul           ON     OFF     OFF      OFF        OFF)
-    voleith_add_variant(aesni           OFF    ON      OFF      OFF        OFF)
-    voleith_add_variant(clmul_aesni     ON     ON      OFF      OFF        OFF)
-    voleith_add_variant(sw_vartime      OFF    OFF     ON       OFF        OFF)
-    voleith_add_variant(armv8_aes       OFF    OFF     OFF      ON         OFF)
-    voleith_add_variant(pmull           OFF    OFF     OFF      OFF        ON)
-    voleith_add_variant(armv8           OFF    OFF     OFF      ON         ON)
+    #                   suffix          CLMUL  AES_NI  ARMV8_AES  PMULL
+    voleith_add_variant(sw              OFF    OFF     OFF        OFF)
+    voleith_add_variant(clmul           ON     OFF     OFF        OFF)
+    voleith_add_variant(aesni           OFF    ON      OFF        OFF)
+    voleith_add_variant(clmul_aesni     ON     ON      OFF        OFF)
+    voleith_add_variant(armv8_aes       OFF    OFF     ON         OFF)
+    voleith_add_variant(pmull           OFF    OFF     OFF        ON)
+    voleith_add_variant(armv8           OFF    OFF     ON         ON)
 
     # VOLEITH_TEST_VARIANTS is now populated with only the suffixes
     # whose underlying hardware feature was detected on this host;

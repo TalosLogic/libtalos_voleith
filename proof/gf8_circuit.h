@@ -279,6 +279,25 @@ size_t voleith_gf8_qs_ell(const voleith_gf8_circuit_t *c);
 int voleith_gf8_circuit_ok(const voleith_gf8_circuit_t *c);
 
 /*
+ * Validate that every wire-id reference in the circuit is in range.
+ *
+ * For each gate wire at index i, requires that input wire ids (a, b
+ * where applicable) are strictly less than i - the topological-order
+ * property the evaluator relies on.  For each constraint, requires
+ * referenced wire ids to be less than n_wires.  Primary input wires
+ * (WITNESS, INSTANCE, CONST) carry no wire references and are
+ * skipped.
+ *
+ * Returns 0 on success, -1 if any reference is out of range or c is
+ * NULL.  Called automatically by the GF(2⁸) prove / verify entry
+ * points to fail fast on a malformed circuit (covering L-N2 from the
+ * 1.2.0 security review).  Available as a public function so callers
+ * that accept circuits from less-trusted sources can validate
+ * up-front.
+ */
+int voleith_gf8_circuit_validate(const voleith_gf8_circuit_t *c);
+
+/*
  * Read-only access to the wire table (for QuickSilver and evaluation).
  * Returns pointer to the internal array of wire_count entries.
  * Valid until the next modification of the circuit.

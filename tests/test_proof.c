@@ -637,6 +637,39 @@ test_params_validate(void)
     p = voleith_params_em_128f;
     p.T_open = 0;
     CHECK(voleith_params_validate(&p) != 0, "X-7: T_open=0 rejected");
+
+    /* C-N1: bound k = (lambda - w_grind) / tau + 1 at VOLEITH_MAX_K.
+     * Without this check, custom params with tau small relative to
+     * lambda drive k past the v_ptrs[VOLEITH_MAX_K] stack array and
+     * the (int)1 << k UB cliff in vole/convert.c.  All six predefined
+     * em_* sets satisfy k <= 12 with margin (regression-covered by
+     * the accept-checks at the top of this function). */
+    p = voleith_params_em_128f;
+    p.lambda = 128;
+    p.w_grind = 4;
+    p.tau = 4; /* k = (128 - 4) / 4 + 1 = 32 = VOLEITH_MAX_K */
+    p.n_leafcom = 2;
+    p.T_open = 112;
+    CHECK(voleith_params_validate(&p) == 0,
+          "C-N1: k == VOLEITH_MAX_K accepted (boundary)");
+
+    p = voleith_params_em_128f;
+    p.lambda = 128;
+    p.w_grind = 0;
+    p.tau = 4; /* k = 128 / 4 + 1 = 33 > VOLEITH_MAX_K */
+    p.n_leafcom = 2;
+    p.T_open = 112;
+    CHECK(voleith_params_validate(&p) != 0,
+          "C-N1: k == VOLEITH_MAX_K + 1 rejected");
+
+    p = voleith_params_em_128f;
+    p.lambda = 256;
+    p.w_grind = 0;
+    p.tau = 1; /* k = 256 / 1 + 1 = 257 (the original v_ptrs[32] trigger) */
+    p.n_leafcom = 2;
+    p.T_open = 234;
+    CHECK(voleith_params_validate(&p) != 0,
+          "C-N1: k far above VOLEITH_MAX_K rejected (lambda=256 tau=1)");
 }
 
 /* X-7: confirm the public prove / verify entry points surface the

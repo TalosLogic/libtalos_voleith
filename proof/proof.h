@@ -151,6 +151,20 @@ size_t voleith_proof_byte_size(const voleith_params_t *params, size_t ell);
  * fs_seed:     Fiat-Shamir seed (randomness + public data commitment).
  *              Should include all public data (message, public key, etc.)
  *              and be unique per proof (e.g. include fresh randomness).
+ *
+ *              SECURITY (M-N2): the Fiat-Shamir transcript hashes
+ *              only fs_seed, instance, and the BAVC commitment.  It
+ *              does NOT bind the circuit identity, parameter set, or
+ *              library version.  The caller MUST include all of:
+ *                - a circuit/protocol identifier (so a proof for one
+ *                  circuit cannot be replayed against a different
+ *                  one whose witness/instance layout coincides),
+ *                - a packed encoding of `params` (lambda, tau,
+ *                  w_grind, n_leafcom, T_open),
+ *                - a library/transcript version tag.
+ *              Auto-binding is planned for 1.3.0 alongside the proof
+ *              metadata header; until then this is a caller
+ *              obligation.
  * fs_seed_len: length of fs_seed in bytes
  * proof:       output - proof->data is malloc'd by this function
  *
@@ -168,7 +182,11 @@ int voleith_prove(voleith_proof_t *proof, const voleith_params_t *params,
  * params:      parameter set (must match the one used to prove)
  * circuit:     the Boolean circuit (must match the one used to prove)
  * instance:    bit-packed public input (same as used to prove)
- * fs_seed:     Fiat-Shamir seed (same as used to prove)
+ * fs_seed:     Fiat-Shamir seed (same as used to prove).  See
+ *              voleith_prove() above for the M-N2 caller-binding
+ *              requirement (circuit id + packed params + version tag
+ *              must be hashed into fs_seed by the caller until
+ *              auto-binding lands in 1.3.0).
  * fs_seed_len: length of fs_seed in bytes
  * proof:       the proof to verify
  *
@@ -189,6 +207,14 @@ void voleith_proof_free(voleith_proof_t *proof);
  * These functions split voleith_prove() and voleith_verify() at the
  * first Fiat-Shamir challenge (chall_1), so that chall_1 can be derived
  * from an external shared transcript rather than computed internally.
+ *
+ * SECURITY (M-N2): in the two-phase mode, chall_1 is produced by
+ * the caller's shared transcript, so it is the caller's
+ * responsibility to absorb a circuit identifier, packed `params`,
+ * and a library/transcript version tag into that transcript
+ * alongside the commitment blob and any classical-component
+ * commitments.  See voleith_prove() for the same caller-binding
+ * requirement on the one-shot API.
  *
  * Signal KVAC usage pattern (prove side):
  *

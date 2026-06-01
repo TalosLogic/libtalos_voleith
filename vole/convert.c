@@ -213,8 +213,10 @@ voleith_vole_reconstruct(const voleith_vc_params_t *params,
     memcpy(com, rec.com, 2 * lambda_bytes);
 
     /* Allocate working buffers */
-    uint8_t *sd = calloc((size_t)(1 << k), lambda_bytes);
+    const size_t sd_size = (size_t)(1 << k) * lambda_bytes;
     int max_depth = k;
+    const size_t qtmp_size = (size_t)max_depth * ellhat_bytes;
+    uint8_t *sd = calloc((size_t)(1 << k), lambda_bytes);
     uint8_t *qtmp = calloc((size_t)max_depth, ellhat_bytes);
     if (!sd || !qtmp) {
         free(sd);
@@ -248,7 +250,7 @@ voleith_vole_reconstruct(const voleith_vc_params_t *params,
 
         /* Run ConvertToVOLE with sd0_bot = true (hidden seed) */
         /* Use qtmp as a flat buffer for depth vectors */
-        uint8_t *v_ptrs[32]; /* max depth is k <= 32 */
+        uint8_t *v_ptrs[VOLEITH_MAX_K]; /* one slot per tree level */
         int depth = (i < params->tau1) ? k : (k - 1);
         for (int d = 0; d < depth; d++)
             v_ptrs[d] = qtmp + (size_t)d * ellhat_bytes;
@@ -256,6 +258,8 @@ voleith_vole_reconstruct(const voleith_vc_params_t *params,
         int ki = voleith_convert_to_vole(iv, sd, true, i, ellhat_bytes, NULL,
                                          v_ptrs, params);
         if (ki < 0) {
+            voleith_secure_zero(sd, sd_size);
+            voleith_secure_zero(qtmp, qtmp_size);
             free(sd);
             free(qtmp);
             voleith_bavc_reconstruct_free(&rec);
@@ -281,6 +285,15 @@ voleith_vole_reconstruct(const voleith_vc_params_t *params,
         memset(q[q_idx], 0, ellhat_bytes);
     }
 
+    /* L-N3: align discipline with the prover-side V-5 zeroing.  sd
+     * holds reconstructed leaf seeds (public, recoverable from the
+     * opening) and qtmp holds per-vector convert-to-VOLE outputs
+     * already folded into q[].  Neither is secret on the verifier
+     * side, but the prover-side counterpart zeroes the same shapes
+     * and a consistent rule is cheaper than the per-site judgement
+     * call. */
+    voleith_secure_zero(sd, sd_size);
+    voleith_secure_zero(qtmp, qtmp_size);
     free(qtmp);
     free(sd);
     voleith_bavc_reconstruct_free(&rec);

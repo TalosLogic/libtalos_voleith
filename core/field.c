@@ -6,22 +6,15 @@
  *
  * Implements multiplication in GF(2^k) for k = 8, 64, 128, 192, 256.
  *
- * Each multiplication has three possible implementations, selected by
+ * Each multiplication has two possible implementations, selected by
  * preprocessor in this order of preference:
  *
- *   1. VOLEITH_HAVE_CLMUL          - CLMUL hardware path (constant-time
- *                                    on x86_64; highest performance).
- *   2. VOLEITH_ALLOW_VARIABLE_TIME_FIELD
- *                                  - variable-time shift-and-reduce
- *                                    (Russian peasant).  Compiled in
- *                                    only when explicitly opted into.
- *                                    Reference code; not constant-time;
- *                                    NOT for production.  See
- *                                    docs/SECURITY_REVIEW.md C-2.
- *   3. (default)                   - constant-time mask-based software
- *                                    fallback.  Used when CLMUL is
- *                                    unavailable and the variable-time
- *                                    path has not been opted into.
+ *   1. VOLEITH_HAVE_CLMUL / VOLEITH_HAVE_PMULL - hardware carry-less
+ *                                    multiply (constant-time by ISA;
+ *                                    highest performance).
+ *   2. (default)                   - constant-time mask-based software
+ *                                    fallback.  Used when no hardware
+ *                                    backend is selected.
  *
  * Clean-room implementation from the FAEST v2.0 specification.
  */
@@ -50,18 +43,12 @@ pmull64(uint64_t a, uint64_t b, uint64_t *hi, uint64_t *lo)
 }
 #endif
 
-#ifdef VOLEITH_ALLOW_VARIABLE_TIME_FIELD
-#pragma message("voleith: field.c built with variable-time software path "     \
-                "(VOLEITH_ALLOW_VARIABLE_TIME_FIELD).  TEST/DEBUG only.")
-#endif
-
 /* ========================================================================
  * Constant-time helpers
  *
  * Used by the constant-time software arms (the default when CLMUL is
- * unavailable).  Not referenced when VOLEITH_HAVE_CLMUL or
- * VOLEITH_ALLOW_VARIABLE_TIME_FIELD is defined; gated to avoid
- * unused-function warnings under those configurations.
+ * unavailable).  Not referenced when VOLEITH_HAVE_CLMUL is defined;
+ * gated to avoid unused-function warnings under that configuration.
  *
  * The optimizer-barrier idiom (`__asm__ volatile ("" : "+r"(x))`) is
  * the standard cryptographic-library technique for preventing a
@@ -70,14 +57,9 @@ pmull64(uint64_t a, uint64_t b, uint64_t *hi, uint64_t *lo)
  * the compiler the value is opaque after this point.
  * ======================================================================== */
 
-#if !defined(VOLEITH_ALLOW_VARIABLE_TIME_FIELD)
-
 #if !(defined(__GNUC__) || defined(__clang__))
 #error "Constant-time field path currently requires gcc or clang " \
-         "(inline-asm optimizer barrier).  If you need a different " \
-         "toolchain, set -DVOLEITH_ALLOW_VARIABLE_TIME_FIELD=ON as a " \
-         "temporary measure - but note that path is variable-time and " \
-         "NOT for production.  See docs/SECURITY_REVIEW.md C-2."
+         "(inline-asm optimizer barrier)."
 #endif
 
 static inline uint64_t
@@ -104,47 +86,16 @@ limbs_get_bit_mask(const uint64_t *v, int pos)
 }
 #endif /* !VOLEITH_HAVE_CLMUL */
 
-#endif /* !VOLEITH_ALLOW_VARIABLE_TIME_FIELD */
-
 /* ========================================================================
  * GF(2^8) - AES field
  * P_8 = x^8 + x^4 + x^3 + x + 1, reduction constant 0x1B
  * ======================================================================== */
 
-#ifdef VOLEITH_ALLOW_VARIABLE_TIME_FIELD
-
-/*
- * Variable-time reference implementation.  Branches on bits of the
- * multiplier and on the high bit of the running shifted value; both
- * become cache/timing side channels when either operand is secret.
- * Compiled in only when explicitly opted into; see
- * docs/SECURITY_REVIEW.md finding C-2.
- */
-voleith_gf8_t
-voleith_gf8_mul(voleith_gf8_t a, voleith_gf8_t b)
-{
-    voleith_gf8_t result = 0;
-    for (int i = 0; i < 8; i++) {
-        if (b & 1)
-            result ^= a;
-        uint8_t hi = a & 0x80;
-        a <<= 1;
-        if (hi)
-            a ^= VOLEITH_GF8_REDUCE;
-        b >>= 1;
-    }
-    return result;
-}
-
-#else /* Constant-time default */
-
 /*
  * Constant-time mask-based implementation.  Each conditional XOR is
  * replaced by an AND with a {0, ~0} mask derived from the relevant
  * bit; the mask passes through ct_barrier_u64 to block the optimizer
- * from re-deriving a branch.  Performs the same Russian-peasant
- * algorithm; output identical to the variable-time form for every
- * input.
+ * from re-deriving a branch.  Performs the Russian-peasant algorithm.
  */
 voleith_gf8_t
 voleith_gf8_mul(voleith_gf8_t a, voleith_gf8_t b)
@@ -162,8 +113,6 @@ voleith_gf8_mul(voleith_gf8_t a, voleith_gf8_t b)
     }
     return (voleith_gf8_t)result;
 }
-
-#endif /* VOLEITH_ALLOW_VARIABLE_TIME_FIELD */
 
 /*
  * Constant-time GF(2^8) inverse via Fermat's little theorem.
@@ -250,31 +199,7 @@ voleith_gf64_mul(voleith_gf64_t a, voleith_gf64_t b)
     return lo;
 }
 
-#else /* Software path - variable-time or constant-time arm below */
-
-#ifdef VOLEITH_ALLOW_VARIABLE_TIME_FIELD
-
-/*
- * Variable-time software carry-less multiply.  Branches on bits of b;
- * the secondary `if (i > 0)` branch is on the loop counter only and
- * is therefore safe - it exists to avoid the undefined `a >> 64`.
- */
-static void
-clmul64_soft(uint64_t a, uint64_t b, uint64_t *hi, uint64_t *lo)
-{
-    uint64_t rlo = 0, rhi = 0;
-    for (int i = 0; i < 64; i++) {
-        if ((b >> i) & 1) {
-            rlo ^= a << i;
-            if (i > 0)
-                rhi ^= a >> (64 - i);
-        }
-    }
-    *lo = rlo;
-    *hi = rhi;
-}
-
-#else /* Constant-time default */
+#else /* Constant-time software path */
 
 /*
  * Constant-time software carry-less multiply.  The conditional XOR on
@@ -294,8 +219,6 @@ clmul64_soft(uint64_t a, uint64_t b, uint64_t *hi, uint64_t *lo)
     *lo = rlo;
     *hi = rhi;
 }
-
-#endif /* VOLEITH_ALLOW_VARIABLE_TIME_FIELD */
 
 voleith_gf64_t
 voleith_gf64_mul(voleith_gf64_t a, voleith_gf64_t b)
@@ -335,21 +258,6 @@ limbs_shl1(uint64_t *v, int n)
         carry = next_carry;
     }
     return carry;
-}
-
-/* XOR src into dst, n limbs. */
-static inline void
-limbs_xor(uint64_t *dst, const uint64_t *src, int n)
-{
-    for (int i = 0; i < n; i++)
-        dst[i] ^= src[i];
-}
-
-/* Test bit at position pos in a multi-limb value. */
-static inline int
-limbs_test_bit(const uint64_t *v, int pos)
-{
-    return (int)((v[pos / 64] >> (pos % 64)) & 1);
 }
 
 /* ========================================================================
@@ -441,38 +349,12 @@ voleith_gf128_mul(voleith_gf128_t *c, const voleith_gf128_t *a,
     c->v[1] = c1;
 }
 
-#elif defined(VOLEITH_ALLOW_VARIABLE_TIME_FIELD)
-
-/*
- * Variable-time software GF(2^128) multiplication.  Branches on bits
- * of b via limbs_test_bit() and on the shift-overflow bit.  Reference
- * code only; see docs/SECURITY_REVIEW.md C-2.
- */
-void
-voleith_gf128_mul(voleith_gf128_t *c, const voleith_gf128_t *a,
-                  const voleith_gf128_t *b)
-{
-    uint64_t result[2] = {0, 0};
-    uint64_t shifted[2] = {a->v[0], a->v[1]};
-
-    for (int i = 0; i < 128; i++) {
-        if (limbs_test_bit(b->v, i))
-            limbs_xor(result, shifted, 2);
-        uint64_t overflow = limbs_shl1(shifted, 2);
-        if (overflow)
-            shifted[0] ^= VOLEITH_GF128_REDUCE;
-    }
-    c->v[0] = result[0];
-    c->v[1] = result[1];
-}
-
-#else /* Constant-time default */
+#else /* Constant-time software path */
 
 /*
  * Constant-time software GF(2^128) multiplication.  Each conditional
  * XOR is replaced by AND with a {0, ~0} mask routed through
- * ct_barrier_u64.  Output is bit-for-bit identical to the
- * variable-time form for every input.
+ * ct_barrier_u64.
  */
 void
 voleith_gf128_mul(voleith_gf128_t *c, const voleith_gf128_t *a,
@@ -622,31 +504,7 @@ voleith_gf192_mul(voleith_gf192_t *c, const voleith_gf192_t *a,
     c->v[2] = d[2];
 }
 
-#elif defined(VOLEITH_ALLOW_VARIABLE_TIME_FIELD)
-
-/*
- * Variable-time software GF(2^192) multiplication.  See C-2.
- */
-void
-voleith_gf192_mul(voleith_gf192_t *c, const voleith_gf192_t *a,
-                  const voleith_gf192_t *b)
-{
-    uint64_t result[3] = {0, 0, 0};
-    uint64_t shifted[3] = {a->v[0], a->v[1], a->v[2]};
-
-    for (int i = 0; i < 192; i++) {
-        if (limbs_test_bit(b->v, i))
-            limbs_xor(result, shifted, 3);
-        uint64_t overflow = limbs_shl1(shifted, 3);
-        if (overflow)
-            shifted[0] ^= VOLEITH_GF192_REDUCE;
-    }
-    c->v[0] = result[0];
-    c->v[1] = result[1];
-    c->v[2] = result[2];
-}
-
-#else /* Constant-time default */
+#else /* Constant-time software path */
 
 void
 voleith_gf192_mul(voleith_gf192_t *c, const voleith_gf192_t *a,
@@ -768,32 +626,7 @@ voleith_gf256_mul(voleith_gf256_t *c, const voleith_gf256_t *a,
     c->v[3] = d[3];
 }
 
-#elif defined(VOLEITH_ALLOW_VARIABLE_TIME_FIELD)
-
-/*
- * Variable-time software GF(2^256) multiplication.  See C-2.
- */
-void
-voleith_gf256_mul(voleith_gf256_t *c, const voleith_gf256_t *a,
-                  const voleith_gf256_t *b)
-{
-    uint64_t result[4] = {0, 0, 0, 0};
-    uint64_t shifted[4] = {a->v[0], a->v[1], a->v[2], a->v[3]};
-
-    for (int i = 0; i < 256; i++) {
-        if (limbs_test_bit(b->v, i))
-            limbs_xor(result, shifted, 4);
-        uint64_t overflow = limbs_shl1(shifted, 4);
-        if (overflow)
-            shifted[0] ^= VOLEITH_GF256_REDUCE;
-    }
-    c->v[0] = result[0];
-    c->v[1] = result[1];
-    c->v[2] = result[2];
-    c->v[3] = result[3];
-}
-
-#else /* Constant-time default */
+#else /* Constant-time software path */
 
 void
 voleith_gf256_mul(voleith_gf256_t *c, const voleith_gf256_t *a,
@@ -881,57 +714,6 @@ static const voleith_gf256_t gf256_alpha[7] = {
       UINT64_C(0x2f652b2af4e81545), UINT64_C(0x133eea09d26b7bb8)}},
 };
 
-#ifdef VOLEITH_ALLOW_VARIABLE_TIME_FIELD
-
-/*
- * Variable-time reference implementation.  Branches on bits of x[],
- * which carry secrets in the prover's call graph (embed of witness
- * bits into the working field).  Reference code only; see
- * docs/SECURITY_REVIEW.md finding C-3.
- */
-int
-voleith_byte_combine(uint8_t *out, const uint8_t x[8], int lambda)
-{
-    if (lambda == 128) {
-        voleith_gf128_t result = voleith_gf128_zero();
-        /* x[0] * alpha^0 = x[0] * 1, embedded as a bit in the low position */
-        if (x[0] & 1)
-            result.v[0] ^= 1;
-        for (int i = 1; i < 8; i++) {
-            if (x[i] & 1) {
-                voleith_gf128_add(&result, &result, &gf128_alpha[i - 1]);
-            }
-        }
-        voleith_gf128_to_bytes(out, &result);
-    } else if (lambda == 192) {
-        voleith_gf192_t result = voleith_gf192_zero();
-        if (x[0] & 1)
-            result.v[0] ^= 1;
-        for (int i = 1; i < 8; i++) {
-            if (x[i] & 1) {
-                voleith_gf192_add(&result, &result, &gf192_alpha[i - 1]);
-            }
-        }
-        voleith_gf192_to_bytes(out, &result);
-    } else if (lambda == 256) {
-        voleith_gf256_t result = voleith_gf256_zero();
-        if (x[0] & 1)
-            result.v[0] ^= 1;
-        for (int i = 1; i < 8; i++) {
-            if (x[i] & 1) {
-                voleith_gf256_add(&result, &result, &gf256_alpha[i - 1]);
-            }
-        }
-        voleith_gf256_to_bytes(out, &result);
-    } else {
-        return -1;
-    }
-
-    return 0;
-}
-
-#else /* Constant-time default */
-
 /*
  * Constant-time mask-based implementation.  Each `if (x[i] & 1) ...`
  * is replaced by AND with a {0, ~0} mask derived from the bit and
@@ -991,5 +773,3 @@ voleith_byte_combine(uint8_t *out, const uint8_t x[8], int lambda)
 
     return 0;
 }
-
-#endif /* VOLEITH_ALLOW_VARIABLE_TIME_FIELD */

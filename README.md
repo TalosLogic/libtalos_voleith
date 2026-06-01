@@ -53,6 +53,7 @@ milliseconds.
 | NIST SP 800-108r1 | KDF in Counter Mode (KDF-CTR) using AES-CMAC as PRF |
 | RFC 4493 | AES-CMAC subkey derivation, padding, and CBC-MAC chaining |
 | Grøstl (SHA-3 finalist) | Grøstl-256 / Grøstl-512 hash, as standard-eval primitive and as a wide-node Merkle hash circuit |
+| Hirose double-block-length (FSE 2006) | AES-256-keyed Hirose iteration, as a 32-byte / 2¹²⁸-CR Merkle node hash |
 | RFC 6962 | Leaf / internal-node domain-separation prefix for the Grøstl Merkle circuit |
 
 All protocol code is a clean-room implementation from the FAEST v2.0
@@ -83,47 +84,25 @@ oracle for known-answer cross-validation.
 The library offers two views of the same underlying protocol, suited to
 different circuit styles.
 
-### Bit-level: GF(2) QuickSilver  (`include/voleith.h`)
+- **Bit-level GF(2) QuickSilver** (`include/voleith.h`).  Each wire carries
+  one bit; gates are XOR / AND / NOT.  XOR and NOT are free (linear in the
+  VOLE correlation); AND gates determine proof cost.  Natural representation
+  for circuits that are inherently bitwise (bitfield manipulation, comparison
+  logic, custom Boolean functions).  See `examples/example_aes.c` for a
+  minimal usage example.
+- **Element-level GF(2⁸) QuickSilver** (`include/voleith_gf8.h`).  Each wire
+  carries one byte; gates are XOR / affine linear map / squaring (all free)
+  and GF(2⁸) multiply (one VOLE slot).  Byte-oriented computations (AES,
+  CMAC, KDF, Merkle hashing) are about 8× more compact here than in the
+  bit-level variant because witness and multiplication-gate counts shrink by
+  a factor of 8.
 
-Each wire carries one bit.  Gates are XOR, AND, and NOT.  XOR and NOT gates
-are free (linear in the VOLE correlation); AND gates determine proof cost.
-This is the natural representation for bit-manipulation circuits.
+**Use the GF(2⁸) variant for any circuit built from AES, CMAC, KDF, or
+Merkle hashing.**  The bit-level variant is appropriate when the
+computation is inherently bitwise and does not compose with the
+byte-oriented building blocks.
 
-```c
-#include "voleith.h"
-
-voleith_circuit_t *c = voleith_circuit_new();
-
-wire_id key_bit  = voleith_circuit_add_witness(c);  // private
-wire_id pub_bit  = voleith_circuit_add_instance(c); // public
-
-wire_id a = voleith_circuit_add_and(c, key_bit, pub_bit); // costs 1 AND slot
-wire_id x = voleith_circuit_add_xor(c, a, key_bit);       // free
-voleith_circuit_assert_zero(c, x);
-
-voleith_proof_t proof;
-voleith_prove(&proof, &voleith_params_em_128f,
-              c, witness_bits, instance_bits, fs_seed, fs_seed_len);
-
-voleith_verify(&proof, &voleith_params_em_128f,
-               c, instance_bits, fs_seed, fs_seed_len);
-
-voleith_proof_free(&proof);
-voleith_circuit_free(c);
-```
-
-### Element-level: GF(2^8) QuickSilver  (`include/voleith_gf8.h`)
-
-Each wire carries one byte (an element of GF(2^8)).  Gates are XOR (free),
-affine linear maps (free), squaring (free), and GF(2^8) multiplication (costs
-one VOLE slot).  Byte-oriented computations -- AES, CMAC, KDF, Merkle hashing
--- are approximately 8x more compact here than in the bit-level variant because
-witness and multiplication-gate counts shrink by a factor of 8.
-
-**Use the GF(2^8) variant for any circuit built from AES, CMAC, KDF, or Merkle
-hashing.**  The bit-level variant is appropriate for circuits that are
-inherently bitwise (bitfield manipulation, comparison logic, custom Boolean
-functions) and do not compose with the byte-oriented building blocks.
+A minimal GF(2⁸) usage sketch:
 
 ```c
 #include "voleith_gf8.h"
@@ -145,6 +124,11 @@ voleith_gf8_verify(&proof, &voleith_params_em_128f,
                    c, instance_bytes, fs_seed, fs_seed_len);
 ```
 
+For the parallel bit-level form (`voleith_circuit_*`,
+`voleith_prove` / `voleith_verify`) and runnable side-by-side examples
+exercising both variants over the same statement (AES-128 key knowledge),
+see `examples/example_aes.c` and `examples/example_aes_gf8.c`.
+
 ---
 
 ## Circuit gate types and costs
@@ -165,195 +149,67 @@ the VOLE linear homomorphism at no cost.
 
 ## Pre-built circuit building blocks
 
-Both variants include ready-to-compose sub-circuits for the following
-operations.  Each appends gates to a caller-supplied circuit and returns wire
-IDs for further composition.
+Both variants ship ready-to-compose sub-circuits for the common building
+blocks.  Each appends gates to a caller-supplied circuit and returns wire IDs
+for further composition.
 
-### AES encryption
+| Building block | Functions | Notes |
+|----------------|-----------|-------|
+| AES-128 / AES-256 encryption | `aes128_circuit` / `aes256_circuit` (bit-level), `aes128_gf8_circuit` / `aes256_gf8_circuit` (GF(2⁸)) | Canright (2005) tower-field S-box. |
+| AES-CMAC (RFC 4493) | `aes_cmac_circuit` / `aes_cmac_gf8_circuit` | 128- or 256-bit key. |
+| KDF-CTR (NIST SP 800-108r1 §4.1) | `kdf_ctr_cmac_circuit` / `kdf_ctr_cmac_gf8_circuit` | AES-CMAC as PRF; 32-bit BE counter wired as circuit constants. |
+| Merkle path (Davies-Meyer / CMAC nodes, 16-byte, 2⁶⁴ CR) | `merkle_circuit` / `merkle_gf8_circuit` | Public-dir and secret-dir variants. |
+| Merkle path (Grøstl wide nodes) | `merkle_grostl_gf8_circuit` | Four node variants (`GROSTL_{256, 256_T27, 512, 512_T59}`) covering 2¹⁰⁸ to 2²⁵⁶ CR.  Public-dir and secret-dir. |
+| Merkle path (any hash, hash-agnostic) | `merkle_vt_gf8_path_circuit` (+ `_secret_dir`) | Generic body parameterised by `voleith_node_hash_vt`; ships with vts for AES-DM, AES-128-CMAC, the four Grøstl variants, and Hirose-AES-256. |
+| Indexed Merkle non-membership | `indexed_merkle_circuit` / `indexed_merkle_gf8_nonmember_circuit` / `indexed_merkle_grostl_gf8_nonmember_circuit` | DM/CMAC or Grøstl-node; public-dir and secret-dir. |
+| Indexed Merkle non-membership (any hash, hash-agnostic) | `merkle_vt_gf8_indexed_nonmember_circuit` (+ `_secret_dir`) | Same vt coverage as the generic Merkle path. |
 
-| Function | Key | Output | Bit-level AND gates | GF(2^8) mul slots |
-|----------|-----|--------|---------------------|-------------------|
-| `aes128_circuit` / `aes128_gf8_circuit` | 128 bits | 128 bits | 7,200 | 200 |
-| `aes256_circuit` / `aes256_gf8_circuit` | 256 bits | 128 bits | 9,936 | 276 |
+For each building block, see [`docs/DESIGN.md`](docs/DESIGN.md): concrete
+AND-gate / mul-slot cost formulas, the public-dir-vs-secret-dir choice,
+the Grøstl `_T27` / `_T59` truncation rationale, the Hirose-AES-256
+construction, the `voleith_node_hash_vt` interface, the indexed-Merkle
+non-membership trust assumption, and worked gate-count examples.
 
-The S-box is implemented using the Canright (2005) tower-field decomposition
-over GF(((2^2)^2)^2), giving 36 AND gates per S-box in the bit-level variant
-and one inversion witness per S-box in the GF(2^8) variant.  Key schedule S-box
-calls are included in the counts above (160 + 40 for AES-128; 224 + 52 for
-AES-256).
-
-### AES-CMAC (RFC 4493)
-
-| Function | Key |
-|----------|-----|
-| `aes_cmac_circuit` / `aes_cmac_gf8_circuit` | 128 or 256 bits |
-
-Cost: `(n_cbc_blocks + 1) * AES_cost` AND/mul gates.  Subkey derivation uses a
-linear shift and conditional XOR at zero gate cost; only the CBC-MAC AES
-encrypt calls contribute to proof cost.  Both K1 (complete final block) and K2
-(padded final block, or empty message) paths are supported.
-
-### NIST SP 800-108 KDF in Counter Mode
-
-| Function | Key |
-|----------|-----|
-| `kdf_ctr_cmac_circuit` / `kdf_ctr_cmac_gf8_circuit` | 128 or 256 bits |
-
-Implements KDF-CTR(AES-CMAC) per NIST SP 800-108r1-upd1 Section 4.1.  The
-32-bit big-endian counter is wired as circuit constants (zero proof cost).
-`fixed_input` is the caller-defined FixedInputData; appending `[L]_r` is the
-caller's responsibility if required by the application.
-
-### Merkle path verification
-
-Two internal hash constructions are available, selectable per circuit:
-
-- **Davies-Meyer (DM):** leaf hash uses a Merkle-Damgard chain with a
-  domain-separated IV; internal node hash is `AES_L(R XOR C) XOR (R XOR C)`.
-- **CMAC:** leaf hash is `CMAC(K_leaf, data)`; internal node hash is
-  `CMAC(K_node, L || R)`.  Fixed keys are domain-separated at circuit-build time.
-
-Both variants domain-separate leaf and internal node hashes to prevent
-second-preimage attacks.
-
-| Variant | Bit-level AND gates | GF(2^8) mul slots |
-|---------|---------------------|-------------------|
-| DM,       depth d | 7,200 leaf + d * 7,328 path | 200 leaf + d * 216 path |
-| CMAC-128, depth d | 14,400 leaf + d * 21,728 path | 400 leaf + d * 616 path |
-| CMAC-256, depth d | 19,872 leaf + d * 29,936 path | 552 leaf + d * 844 path |
-
-Path direction bits come in two forms.  Public-dir (`merkle_gf8_path_circuit`)
-supplies them as public instance values, so the left/right swap is resolved at
-circuit-build time with zero additional gates, correct when the leaf index is
-public.  Secret-dir (`merkle_gf8_path_circuit_secret_dir`) takes them as witness
-wires and muxes each node byte (one `add_mul` per byte per level), hiding the
-leaf index.  Signal KVAC uses the secret-dir variant: it is an anonymous
-credential, so the member's position must stay private (only the root is
-public).  See [`docs/DESIGN.md`](docs/DESIGN.md) for the rationale and current coverage.
-
-#### Wide-node Grøstl hashing (high collision resistance)
-
-DM and CMAC nodes are 128 bits wide, so their collision resistance is only the
-birthday bound of 2⁶⁴ regardless of the security level.  That is fine when the
-tree is built by a trusted party, but too low whenever an adversary can grind
-leaf values to forge membership, the threat model of an anonymous-credential or
-ring-signature tree.  `merkle_grostl_gf8_circuit` (GF(2⁸) only) raises the node
-hash to Grøstl, the SHA-3 finalist whose S-box *is* the AES S-box, so it reuses
-the existing inversion gadget and adds no new costly gate type.  Three variants
-trade collision resistance against proof size:
-
-| Variant | Node width | Collision resistance | GF(2⁸) mul slots / internal node |
-|---------|-----------|----------------------|----------------------------------|
-| `VOLEITH_MERKLE_GROSTL_256`     | 32 B (256-bit) | 2¹²⁸ | 3,200 |
-| `VOLEITH_MERKLE_GROSTL_256_T27` | 27 B (216-bit) | 2¹⁰⁸ | 1,920 |
-| `VOLEITH_MERKLE_GROSTL_512`     | 64 B (512-bit) | 2²⁵⁶ | 8,960 |
-| `VOLEITH_MERKLE_GROSTL_512_T59` | 59 B (472-bit) | 2²³⁶ | 5,376 |
-
-The `_T27` variant truncates Grøstl-256 to 27 bytes (the largest node size whose
-internal-node input still fits a single Grøstl compression), cutting per-level
-cost by ~40% versus the full 32-byte node, at 2¹⁰⁸ instead of 2¹²⁸ collision
-resistance (a standard SHA-512/t-style truncation).  `_T59` is the same
-single-block trick one tier up, for the >2¹²⁸ regime that only Grøstl-512
-reaches: 59-byte nodes, 2²³⁶ CR, one compression (5,376 S-boxes) instead of the
-full Grøstl-512's two (8,960).  Leaf and internal nodes are
-domain-separated with an RFC 6962 prefix byte (`0x00` / `0x01`).  Both a
-public-dir (`merkle_grostl_gf8_path_circuit`) and a secret-dir
-(`merkle_grostl_gf8_path_circuit_secret_dir`, hidden leaf index) form are
-provided; the secret-dir form is what ring-signature and anonymous-credential
-trees need.  See
-[`docs/DESIGN.md`](docs/DESIGN.md#grøstl-wide-node-merkle-hashing-and-why-a-27-byte-truncation)
-for the full collision-resistance and `_T27` cost analysis.
-
-### Indexed Merkle non-membership
-
-`indexed_merkle_nonmember_circuit` / `indexed_merkle_gf8_nonmember_circuit`
-proves that a target value is absent from an indexed Merkle tree by
-demonstrating an adjacent leaf `(value, next_value, next_index)` such that
-`value < target < next_value`, along with a valid Merkle path for that leaf.
-
-Additional gate cost beyond the Merkle path: `2 * 3 * 8 * target_bytes`
-GF(2^8) mul gates for the two byte-wise less-than comparisons.
-
-A wide-node Grøstl variant, `indexed_merkle_grostl_gf8_nonmember_circuit`
-(plus a secret-dir form, `..._secret_dir`, for a hidden leaf index), is also
-provided.  Use it when an adversary can choose leaf values: non-membership
-soundness then rests on the node hash's collision resistance, and the 16-byte
-AES-DM/CMAC node's 2⁶⁴ bound is too low, and the Grøstl nodes restore it to the
-security level.  The range comparison is identical (shared with the DM/CMAC
-circuit); only the node hash changes.
-
-**Trust assumption (important for integrators):** the non-membership statement
-is sound *only* if the tree builder maintains the adjacency invariant, namely
-that each leaf's `next_value` / `next_index` correctly identifies the
-next-larger leaf actually present in the tree.  The circuit cannot verify this; it binds
-the prover to a real leaf record and enforces `value < target < next_value`,
-but the linked-list invariant is an external assumption on the protocol that
-produces the signed tree root.  See [`docs/DESIGN.md`](docs/DESIGN.md#indexed-merkle-non-membership-trust-assumption-on-the-tree-builder)
-for the full threat-model analysis.
+Each building block has at least one runnable example in `examples/` (see
+the Examples table below).
 
 ---
 
 ## Fiat-Shamir transform
-
-### Single-phase (standard)
 
 `voleith_prove` / `voleith_verify` and `voleith_gf8_prove` /
 `voleith_gf8_verify` run the complete Fiat-Shamir non-interactive protocol in
 one call.  The `fs_seed` parameter is a caller-supplied domain separator that
 binds the proof to its application context.
 
-### Two-phase (shared transcript)
-
-For hybrid protocols that interleave a VOLEitH proof with a classical
-credential scheme on a shared Fiat-Shamir transcript, the GF(2^8) API exposes
-split commit/respond phases:
-
-```
-Prover:
-  voleith_gf8_prove_commit()    ->  commitment blob
-  <incorporate blob into shared transcript, derive chall_1>
-  voleith_gf8_prove_respond()   ->  complete proof
-
-Verifier:
-  voleith_gf8_verify_reconstruct()  ->  reconstructed blob
-  <incorporate blob into shared transcript, derive chall_1>
-  voleith_gf8_verify_respond()      ->  accept / reject
-```
-
-The split point is at `chall_1`, the first Fiat-Shamir challenge derived from
-the BAVC (GGM tree) commitment.  This allows the challenge to incorporate
-elements from an outer protocol -- for example, a Pedersen commitment in an
-anonymous credential scheme -- before the proof responds to it.
+A **two-phase (shared-transcript) API** is also exposed in the GF(2⁸) variant
+(`voleith_gf8_prove_commit` / `_respond`, `voleith_gf8_verify_reconstruct` /
+`_respond`) for hybrid protocols that interleave a VOLEitH proof with a
+classical credential scheme on a shared Fiat-Shamir transcript. The split
+point is at `chall_1`, the first FS challenge derived from the BAVC (GGM
+tree) commitment, so the challenge can incorporate elements from an outer
+protocol (e.g. a Pedersen commitment) before the proof responds to it.  See
+[`docs/DESIGN.md` → "Two-Phase Fiat-Shamir"](docs/DESIGN.md#two-phase-fiat-shamir-shared-transcript-composition)
+for the rationale and protocol-level pseudocode.
 
 ---
 
 ## Parameter sets
 
-Six parameter sets are provided, matching the FAEST security levels.  The `f`
-(fast) variants use a shallower GGM tree and are optimized for prover speed;
-the `s` (small) variants optimize proof size at some prover cost.
+Six FAEST-EM parameter sets at three security levels (128 / 192 / 256-bit)
+with two GGM-tree depth choices each: `f` ("fast", shallower tree, optimised
+for prover speed) and `s` ("small", deeper tree, ~25% smaller proof at
+roughly 7× more PRG work during GGM expansion).  `voleith_params_em_128f`
+through `voleith_params_em_256s`.
 
-| Parameter | Security | Proof size (GF(2⁸) AES-128 circuit) |
-|-----------|----------|-------------------------------------|
-| `voleith_params_em_128f` | 128-bit | 6,596 B |
-| `voleith_params_em_128s` | 128-bit | 4,962 B |
-| `voleith_params_em_192f` | 192-bit | 12,380 B |
-| `voleith_params_em_192s` | 192-bit | 9,340 B |
-| `voleith_params_em_256f` | 256-bit | 19,636 B |
-| `voleith_params_em_256s` | 256-bit | 15,344 B |
+The `f` variants are strongly recommended for most applications; pick `s`
+only when proof bytes on the wire are the binding constraint.
 
-Proof size scales with mul-gate (S-box) count; the figures above are for the
-GF(2⁸) AES-128 circuit (ℓ = 216). Note "EM" names the leaf-commitment
-parameter family (`n_leafcom = 2`), not the circuit: the AES-128 example
-proves *standard* AES-128 (secret key, 200 S-boxes), the FAEST-128f
-statement, not the Even-Mansour OWF. See `docs/DESIGN.md` for the full
-breakdown.
-
-The `f` variants are strongly recommended for most applications.  The `s`
-variants reduce proof size by roughly 25% but use a much deeper GGM tree: for
-128-bit security, `em_128s` (τ=11) expands ~22,528 total GGM leaves versus
-~3,072 for `em_128f` (τ=16), roughly 7× more PRG work during GGM expansion,
-with no other benefit.
+Concrete proof sizes by parameter set (GF(2⁸) AES-128 circuit, ℓ = 216),
+the `f`-vs-`s` trade-off in detail, and what "EM" names (the
+leaf-commitment parameter family, not an Even-Mansour OWF; the AES-128
+example proves *standard* AES-128, the FAEST-128f statement): see
+[`docs/DESIGN.md` → "Parameter Sets"](docs/DESIGN.md#parameter-sets).
 
 ---
 
@@ -481,7 +337,7 @@ witness construction with `aes_gf8_build_witness`.
 
 ## Examples
 
-Eighteen runnable example programs in `examples/` exercise every circuit
+Twenty-one runnable example programs in `examples/` exercise every circuit
 building block in both proof-system variants:
 
 | Example | What it proves |
@@ -491,12 +347,16 @@ building block in both proof-system variants:
 | `example_kdf.c` / `example_kdf_gf8.c`             | Correct KDF-CTR(AES-CMAC) derivation from a secret key |
 | `example_merkle.c` / `example_merkle_gf8.c`       | Membership of a secret leaf at a public position in a Merkle tree (AES-DM / CMAC node hash) |
 | `example_merkle_grostl_gf8.c`                     | The same, with a wide-node Grøstl hash, plus prove/verify timing |
+| `example_merkle_hirose_gf8.c`                     | The same at 2¹²⁸ CR via Hirose-AES-256 fixed-32 leaf through the vt-driven `merkle_vt_gf8_path_circuit`, plus prove/verify timing - direct apples-to-apples cost comparison against the AES-DM and Grøstl Merkle examples |
 | `example_indexed_merkle.c` / `example_indexed_merkle_gf8.c` | Non-membership of a value in an indexed Merkle tree |
 | `example_indexed_merkle_grostl_gf8.c`             | Non-membership with wide-node Grøstl-256 T27 nodes (2¹⁰⁸ collision resistance) |
 | `example_kvac_pq.c` / `example_kvac_pq_gf8.c`     | Signal-style anonymous group membership credential (AES-DM trees) |
 | `example_kvac_pq_gf8_depth12.c`                   | The above at depth 12 (4,096 group members) |
 | `example_kvac_pq_grostl_gf8.c`                    | The same KVAC statement over Grøstl-256 T27 trees with a hidden leaf index (secret-dir) |
 | `example_kvac_pq_grostl_gf8_depth12.c`            | The Grøstl KVAC at depth 12, with prove/verify timing |
+| `example_hirose_gf8.c`                            | Knowledge of (G, H, M) producing a given Hirose-AES-256 iteration output (the bare iteration primitive) |
+| `example_hirose_leaf_gf8.c`                       | Knowledge of a 32-byte preimage under the Hirose-AES-256 fixed-32 leaf hash (the leaf side of the Hirose Merkle node vt) |
+| `example_hirose_inode_gf8.c`                      | Knowledge of children (L, R) under the Hirose-AES-256 inode hash (the inode side of the Hirose Merkle node vt) |
 
 Each example builds the circuit, generates a valid witness, produces a proof,
 verifies it, and prints circuit statistics (AND-gate count, ell, proof size)
@@ -507,58 +367,46 @@ plus PASS/FAIL.  After building, run them from the build directory:
 ./build/examples/example_kvac_pq_gf8_depth12
 ```
 
+### Prove / verify benchmarking
+
+Three examples (`example_merkle_gf8`, `example_merkle_hirose_gf8`, and
+`example_merkle_grostl_gf8`) include a small wall-clock benchmark in addition
+to the correctness check.  They run a few warmup iterations, then time 25
+prove and 100 verify calls, and report min / median / mean / max in
+milliseconds.  All three use the same depth, leaf index, and benchmark
+methodology, so running all three on the same host gives a direct
+apples-to-apples cost comparison across the three node-hash families.
+To minimise scheduler noise, pin the run to a single core with `taskset(1)`:
+
+```sh
+taskset -c 0 ./build/examples/example_merkle_gf8
+taskset -c 0 ./build/examples/example_merkle_hirose_gf8
+taskset -c 0 ./build/examples/example_merkle_grostl_gf8
+```
+
+The minimum is the cleanest estimate of intrinsic cost (timing noise on a
+loaded OS is one-sided slow); the median is the typical run.  Quiesce other
+CPU-heavy processes first.  Disabling CPU frequency scaling
+(`cpupower frequency-set -g performance` on Linux) and SMT/Hyper-Threading
+sibling load further reduces variance if you need it.
+
+See [docs/DESIGN.md → Performance Benchmarking](docs/DESIGN.md#performance-benchmarking)
+for the methodology and for the pattern to instrument your own circuits the
+same way.
+
 ---
 
 ## References
 
-### Primary specification
+Protocol specification (FAEST v2.0), academic papers (VOLEitH, QuickSilver,
+half-tree, Hirose, Grøstl), standards documents (FIPS 197, FIPS 202, NIST SP
+800-38A / 800-108r1, RFC 4493, RFC 6962), and reference implementations
+(`faest-ref`, used as a test oracle only): see
+[`docs/DESIGN.md` → References](docs/DESIGN.md#references).
 
-- [FAEST v2.0](https://faest.info/): NIST PQC Round 2 additional signatures
-  submission.  The complete protocol specification including VOLEitH, GGM
-  vector commitments, ConvertToVOLE, QuickSilver, and Fiat-Shamir transform.
-  Local copy: [`docs/specs/`](docs/specs/) if vendored.
-
-### Academic papers
-
-- Baum, Braun, de Saint Guilhem, Klooß, Orsini, Roy, Scholl.
-  [Publicly Verifiable Zero-Knowledge and Post-Quantum Signatures from
-  VOLE-in-the-Head](https://eprint.iacr.org/2023/996) (CRYPTO 2023).
-  The VOLEitH construction.
-- Yang, Sarkar, Weng, Wang.
-  [QuickSilver: Efficient and Affordable Zero-Knowledge Proofs for Circuits
-  and Polynomials over Any Field](https://eprint.iacr.org/2021/076)
-  (CCS 2021).  The line-point zero-knowledge proof system used over the
-  VOLEitH-committed correlation.
-- Baum, Beck, Delpech de Saint Guilhem, Klooß, Orsini, Roy, Scholl.
-  [Faster VOLEitH Signatures from All-but-One Vector Commitments and Half
-  Trees](https://eprint.iacr.org/2024/097) (2024).  The half-tree GGM
-  optimization referenced in the future work section.
-- Gauravaram, Knudsen, Matusiewicz, Mendel, Rechberger, Schläffer, Thomsen.
-  [Grøstl – a SHA-3 candidate](https://www.groestl.info/) (SHA-3 competition
-  finalist).  The wide-pipe AES-S-box-based hash used for high-collision-resistance
-  Merkle nodes.
-
-### Standards documents
-
-- [FIPS 197](https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.197-upd1.pdf):
-  Advanced Encryption Standard (AES).
-- [FIPS 202](https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.202.pdf):
-  SHA-3 Standard: Permutation-Based Hash and Extendable-Output Functions.
-- [NIST SP 800-38A](https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-38a.pdf):
-  Recommendation for Block Cipher Modes of Operation: Methods and Techniques.
-- [NIST SP 800-108r1-upd1](https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-108r1-upd1.pdf):
-  Recommendation for Key Derivation Using Pseudorandom Functions.
-- [RFC 4493](https://www.rfc-editor.org/rfc/rfc4493): The AES-CMAC
-  Algorithm.
-- [RFC 6962](https://www.rfc-editor.org/rfc/rfc6962): Certificate Transparency
-  (source of the `0x00` / `0x01` leaf / internal-node domain-separation prefix
-  used by the Grøstl Merkle circuit).
-
-### Reference implementations (test oracles only)
-
-- [faest-ref](https://github.com/faest-sign/faest-ref): the reference FAEST
-  implementation (MIT licensed).  Used as a test oracle to generate
-  known-answer vectors for cross-validation; no source code was copied.
+The "Standards and specifications implemented" table near the top of this
+README lists every standard the library implements, with a one-line role
+description per standard.
 
 ---
 

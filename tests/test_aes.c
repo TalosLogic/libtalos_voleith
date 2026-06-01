@@ -70,13 +70,13 @@ voleith_aes_kat_adapter(int key_bits, const uint8_t *key, uint8_t out[16],
  * catch a class of key-schedule bug where the first and last bytes
  * land correctly but middle bytes are wrong.  Backend-specific
  * because they peek at the ctx.rk byte layout - only the AES-NI
- * and variable-time backends carry round keys in that layout; the
- * bitsliced backend uses a bit-plane representation that this test
- * cannot inspect directly.  Bitsliced correctness for key schedule
- * is established by the KAT runner.
+ * and ARMv8 backends carry round keys in that layout; the bitsliced
+ * backend uses a bit-plane representation that this test cannot
+ * inspect directly.  Bitsliced correctness for key schedule is
+ * established by the KAT runner.
  * ================================================================ */
 
-#if defined(VOLEITH_HAVE_AES_NI) || defined(VOLEITH_ALLOW_VARIABLE_TIME_AES)
+#if defined(VOLEITH_HAVE_AES_NI) || defined(VOLEITH_HAVE_ARMV8_AES)
 
 static void
 test_aes128_key_expansion(void)
@@ -130,7 +130,7 @@ test_aes256_key_expansion(void)
     PASS();
 }
 
-#endif /* VOLEITH_HAVE_AES_NI || VOLEITH_ALLOW_VARIABLE_TIME_AES */
+#endif /* VOLEITH_HAVE_AES_NI || VOLEITH_HAVE_ARMV8_AES */
 
 /* ================================================================
  * In-place (aliased in == out) encrypt.
@@ -262,7 +262,7 @@ main(void)
 
     /* Backend-specific tests. */
     printf("\n  Backend-specific\n");
-#if defined(VOLEITH_HAVE_AES_NI) || defined(VOLEITH_ALLOW_VARIABLE_TIME_AES)
+#if defined(VOLEITH_HAVE_AES_NI) || defined(VOLEITH_HAVE_ARMV8_AES)
     test_aes128_key_expansion();
     test_aes256_key_expansion();
 #endif

@@ -11,13 +11,11 @@
  * Backend selection happens at compile time, in this priority:
  *   1. AES-NI         (x86_64; VOLEITH_HAVE_AES_NI defined).
  *   2. ARMv8 Crypto   (aarch64; VOLEITH_HAVE_ARMV8_AES defined).
- *   3. Variable-time  (test/debug only; VOLEITH_ALLOW_VARIABLE_TIME_AES).
- *   4. Bitsliced      (portable constant-time; default fallback).
+ *   3. Bitsliced      (portable constant-time; default fallback).
  *
- * The bitsliced backend (core/aes_ct64.c) is the universal fallback
- * and is always compiled in.  The variable-time path is gated off
- * by default because it has a cache-timing side channel and is
- * unsafe on any host with secret-bearing AES keys.
+ * All three backends are constant-time.  The bitsliced backend
+ * (core/aes_ct64.c) is the universal fallback and is always compiled
+ * in when no hardware backend is selected.
  */
 
 #ifndef VOLEITH_AES_H
@@ -32,15 +30,14 @@
  * AES key context.
  *
  * Layout depends on the selected backend:
- *   - AES-NI / variable-time: 240-byte expanded round-key table.
+ *   - AES-NI / ARMv8: 240-byte expanded round-key table.
  *   - Bitsliced: bit-plane round keys (uint64_t[15][8]).
  *
  * The two layouts are deliberately not interchangeable; downstream
  * code that peeks at ctx.rk[] (e.g., FIPS 197 Appendix A round-key
  * inspection in test_aes.c) only applies to the byte-rep backends.
  */
-#if defined(VOLEITH_HAVE_AES_NI) || defined(VOLEITH_HAVE_ARMV8_AES) ||         \
-    defined(VOLEITH_ALLOW_VARIABLE_TIME_AES)
+#if defined(VOLEITH_HAVE_AES_NI) || defined(VOLEITH_HAVE_ARMV8_AES)
 
 /*
  * The AES-NI key-expand and encrypt paths cast ctx->rk to (__m128i *)
@@ -89,9 +86,8 @@ void voleith_aes_encrypt(const voleith_aes_ctx_t *ctx, uint8_t out[16],
  * occupies bytes 16*b .. 16*b+15).  out and in may alias.
  *
  * The bitsliced backend services this with a single 4-block engine
- * call (4x faster than four single-block encrypts); the AES-NI and
- * variable-time backends fall back to four chained single-block
- * encrypts.
+ * call (4x faster than four single-block encrypts); the AES-NI
+ * backend falls back to four chained single-block encrypts.
  */
 void voleith_aes_encrypt_x4(const voleith_aes_ctx_t *ctx, uint8_t out[64],
                             const uint8_t in[64]);
@@ -113,7 +109,6 @@ typedef enum {
     VOLEITH_AES_BACKEND_AESNI = 1,
     VOLEITH_AES_BACKEND_ARMV8 = 2,
     VOLEITH_AES_BACKEND_BITSLICED = 3,
-    VOLEITH_AES_BACKEND_VARIABLE_TIME = 4,
 } voleith_aes_backend_t;
 
 voleith_aes_backend_t voleith_aes_backend(void);

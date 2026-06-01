@@ -210,6 +210,15 @@ voleith_gf8_prove_commit(voleith_gf8_prover_commit_t **ctx_out,
     /* X-7: full parameter validation at the public API boundary. */
     if (voleith_params_validate(params) != 0)
         return -1;
+    /* H-N2: reject circuits whose construction silently dropped
+     * wires or constraints under OOM. */
+    if (!voleith_gf8_circuit_ok(circuit))
+        return -1;
+    /* L-N2: validate every wire-id reference at the public boundary so
+     * a malformed circuit fails fast instead of OOB-reading wire / tag
+     * buffers in the QS hot loop. */
+    if (voleith_gf8_circuit_validate(circuit) != 0)
+        return -1;
 
     unsigned int lambda = params->lambda;
     unsigned int nb = lambda / 8;
@@ -439,6 +448,15 @@ voleith_gf8_verify_reconstruct(voleith_gf8_verifier_reconstruct_t **ctx_out,
         return -1;
     /* X-7: full parameter validation at the public API boundary. */
     if (voleith_params_validate(params) != 0)
+        return -1;
+    /* H-N2: reject circuits whose construction silently dropped
+     * wires or constraints under OOM. */
+    if (!voleith_gf8_circuit_ok(circuit))
+        return -1;
+    /* L-N2: validate every wire-id reference at the public boundary so
+     * a malformed circuit fails fast instead of OOB-reading wire / tag
+     * buffers in the QS hot loop. */
+    if (voleith_gf8_circuit_validate(circuit) != 0)
         return -1;
 
     unsigned int lambda = params->lambda;

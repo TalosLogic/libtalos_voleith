@@ -25,6 +25,7 @@ struct voleith_circuit {
     size_t n_witness;
     size_t n_instance;
     size_t n_and;
+    int alloc_ok; /* 0 if any append failed */
 };
 
 /* ================================================================
@@ -38,8 +39,10 @@ append_wire(voleith_circuit_t *c, wire_entry_t entry)
     if (c->n_wires == c->cap_wires) {
         size_t new_cap = c->cap_wires * 2;
         wire_entry_t *p = realloc(c->wires, new_cap * sizeof(wire_entry_t));
-        if (!p)
+        if (!p) {
+            c->alloc_ok = 0;
             return WIRE_ID_INVALID;
+        }
         c->wires = p;
         c->cap_wires = new_cap;
     }
@@ -56,8 +59,10 @@ append_constraint(voleith_circuit_t *c, constraint_entry_t entry)
         size_t new_cap = c->cap_constraints * 2;
         constraint_entry_t *p =
             realloc(c->constraints, new_cap * sizeof(constraint_entry_t));
-        if (!p)
+        if (!p) {
+            c->alloc_ok = 0;
             return -1;
+        }
         c->constraints = p;
         c->cap_constraints = new_cap;
     }
@@ -107,6 +112,7 @@ voleith_circuit_new(void)
         return NULL;
     }
     c->cap_constraints = INITIAL_CONSTRAINT_CAP;
+    c->alloc_ok = 1;
 
     return c;
 }
@@ -258,6 +264,52 @@ size_t
 voleith_circuit_constraint_count(const voleith_circuit_t *c)
 {
     return c->n_constraints;
+}
+
+int
+voleith_circuit_ok(const voleith_circuit_t *c)
+{
+    return c->alloc_ok;
+}
+
+int
+voleith_circuit_validate(const voleith_circuit_t *c)
+{
+    if (!c)
+        return -1;
+    size_t n = c->n_wires;
+    for (size_t i = 0; i < n; i++) {
+        const wire_entry_t *w = &c->wires[i];
+        switch (w->kind) {
+        case WIRE_KIND_WITNESS:
+        case WIRE_KIND_INSTANCE:
+        case WIRE_KIND_CONST:
+            break;
+        case WIRE_KIND_XOR:
+        case WIRE_KIND_AND:
+            if (w->a >= i || w->b >= i)
+                return -1;
+            break;
+        case WIRE_KIND_NOT:
+            if (w->a >= i)
+                return -1;
+            break;
+        }
+    }
+    for (size_t i = 0; i < c->n_constraints; i++) {
+        const constraint_entry_t *con = &c->constraints[i];
+        switch (con->kind) {
+        case CONSTRAINT_ZERO:
+            if (con->a >= n)
+                return -1;
+            break;
+        case CONSTRAINT_EQUAL:
+            if (con->a >= n || con->b >= n)
+                return -1;
+            break;
+        }
+    }
+    return 0;
 }
 
 const wire_entry_t *

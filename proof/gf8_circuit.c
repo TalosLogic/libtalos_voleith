@@ -559,6 +559,52 @@ voleith_gf8_circuit_ok(const voleith_gf8_circuit_t *c)
     return c->alloc_ok;
 }
 
+int
+voleith_gf8_circuit_validate(const voleith_gf8_circuit_t *c)
+{
+    if (!c)
+        return -1;
+    size_t n = c->n_wires;
+    for (size_t i = 0; i < n; i++) {
+        const gf8_wire_entry_t *w = &c->wires[i];
+        switch (w->kind) {
+        case GF8_WIRE_WITNESS:
+        case GF8_WIRE_INSTANCE:
+        case GF8_WIRE_CONST:
+            break;
+        case GF8_WIRE_XOR:
+        case GF8_WIRE_MUL:
+            if (w->a >= i || w->b >= i)
+                return -1;
+            break;
+        case GF8_WIRE_XOR_CONST:
+        case GF8_WIRE_LINEAR_MAP:
+        case GF8_WIRE_SQUARE:
+            if (w->a >= i)
+                return -1;
+            break;
+        }
+    }
+    for (size_t i = 0; i < c->n_constraints; i++) {
+        const gf8_constraint_entry_t *con = &c->constraints[i];
+        switch (con->kind) {
+        case GF8_CONSTRAINT_ZERO:
+            if (con->a >= n)
+                return -1;
+            break;
+        case GF8_CONSTRAINT_EQUAL:
+            if (con->a >= n || con->b >= n)
+                return -1;
+            break;
+        case GF8_CONSTRAINT_PRODUCT:
+            if (con->a >= n || con->b >= n || con->c >= n)
+                return -1;
+            break;
+        }
+    }
+    return 0;
+}
+
 const gf8_wire_entry_t *
 voleith_gf8_circuit_wires(const voleith_gf8_circuit_t *c)
 {

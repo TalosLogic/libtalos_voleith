@@ -92,9 +92,9 @@
 
 /* Library version */
 #define VOLEITH_VERSION_MAJOR 1
-#define VOLEITH_VERSION_MINOR 1
+#define VOLEITH_VERSION_MINOR 2
 #define VOLEITH_VERSION_PATCH 0
-#define VOLEITH_VERSION_STRING "1.1.0"
+#define VOLEITH_VERSION_STRING "1.2.0"
 
 /* Proof system: circuit builder and prove/verify API */
 #include "circuit.h"
