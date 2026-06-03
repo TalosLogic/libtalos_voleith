@@ -790,6 +790,132 @@ test_aes128_gf8_roundtrip(void)
 }
 
 /* ================================================================
+ * Test: M-N3 length-validated entry points (GF(2^8) variant).
+ *
+ * GF(2^8) uses one byte per witness / instance wire (no bit-packing),
+ * so the expected length is the wire count directly.
+ * ================================================================ */
+static void
+test_v2_length_validation(void)
+{
+    printf("\n[v2 length validation (M-N3, GF8)]\n");
+
+    const voleith_params_t *params = &voleith_params_em_128f;
+    voleith_gf8_circuit_t *c = build_mul_circuit();
+    if (!c) {
+        printf("  SKIP: circuit alloc failed\n");
+        return;
+    }
+
+    /* build_mul_circuit: 2 witness bytes, 1 instance byte. */
+    size_t expected_w = voleith_gf8_circuit_witness_count(c);
+    size_t expected_i = voleith_gf8_circuit_instance_count(c);
+
+    uint8_t witness[2] = {0x03, 0x05};
+    uint8_t instance[1] = {0x0F};
+    uint8_t fs_seed[16];
+    memset(fs_seed, 0x5C, sizeof(fs_seed));
+
+    /* Happy path. */
+    voleith_proof_t proof;
+    memset(&proof, 0, sizeof(proof));
+    CHECK(voleith_gf8_prove_v2(&proof, params, c, witness, expected_w, instance,
+                               expected_i, fs_seed, sizeof(fs_seed)) == 0,
+          "gf8_prove_v2 with correct lengths succeeds");
+    CHECK(voleith_gf8_verify_v2(&proof, params, c, instance, expected_i,
+                                fs_seed, sizeof(fs_seed)) == 0,
+          "gf8_verify_v2 with correct length succeeds");
+
+    /* prove_v2: wrong witness_len. */
+    voleith_proof_t bad_proof;
+    memset(&bad_proof, 0, sizeof(bad_proof));
+    CHECK(voleith_gf8_prove_v2(&bad_proof, params, c, witness, expected_w - 1,
+                               instance, expected_i, fs_seed,
+                               sizeof(fs_seed)) != 0,
+          "gf8_prove_v2 rejects witness_len too small");
+    CHECK(voleith_gf8_prove_v2(&bad_proof, params, c, witness, expected_w + 1,
+                               instance, expected_i, fs_seed,
+                               sizeof(fs_seed)) != 0,
+          "gf8_prove_v2 rejects witness_len too large");
+
+    /* prove_v2: wrong instance_len. */
+    CHECK(voleith_gf8_prove_v2(&bad_proof, params, c, witness, expected_w,
+                               instance, expected_i + 1, fs_seed,
+                               sizeof(fs_seed)) != 0,
+          "gf8_prove_v2 rejects instance_len too large");
+
+    /* verify_v2: wrong instance_len. */
+    CHECK(voleith_gf8_verify_v2(&proof, params, c, instance, expected_i + 1,
+                                fs_seed, sizeof(fs_seed)) != 0,
+          "gf8_verify_v2 rejects instance_len too large");
+    CHECK(voleith_gf8_verify_v2(&proof, params, c, instance, 0, fs_seed,
+                                sizeof(fs_seed)) != 0,
+          "gf8_verify_v2 rejects instance_len = 0 when n_instance > 0");
+
+    /* NULL circuit. */
+    CHECK(voleith_gf8_prove_v2(&bad_proof, params, NULL, witness, 0, instance,
+                               0, fs_seed, sizeof(fs_seed)) != 0,
+          "gf8_prove_v2 rejects NULL circuit");
+    CHECK(voleith_gf8_verify_v2(&proof, params, NULL, instance, 0, fs_seed,
+                                sizeof(fs_seed)) != 0,
+          "gf8_verify_v2 rejects NULL circuit");
+
+    voleith_proof_free(&proof);
+    voleith_gf8_circuit_free(c);
+}
+
+/* ================================================================
+ * Test: GF(2⁸) byte-len helpers.
+ *
+ * GF(2⁸) circuits use one byte per witness / instance wire, so the
+ * helpers return the wire count directly with no bit-packing math.
+ * Exercises NULL, empty, and a handful of nonzero counts.
+ * ================================================================ */
+static void
+test_byte_len_helpers(void)
+{
+    printf("\n[byte-len helpers (GF(2^8))]\n");
+
+    CHECK(voleith_gf8_circuit_witness_byte_len(NULL) == 0,
+          "gf8 witness_byte_len(NULL) == 0");
+    CHECK(voleith_gf8_circuit_instance_byte_len(NULL) == 0,
+          "gf8 instance_byte_len(NULL) == 0");
+
+    {
+        voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+        CHECK(voleith_gf8_circuit_witness_byte_len(c) == 0,
+              "gf8 empty circuit → 0 witness bytes");
+        CHECK(voleith_gf8_circuit_instance_byte_len(c) == 0,
+              "gf8 empty circuit → 0 instance bytes");
+        voleith_gf8_circuit_free(c);
+    }
+
+    {
+        int counts[] = {1, 7, 8, 9, 16, 100};
+        for (size_t k = 0; k < sizeof(counts) / sizeof(counts[0]); k++) {
+            voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+            for (int i = 0; i < counts[k]; i++)
+                (void)voleith_gf8_add_witness(c);
+            char msg[64];
+            snprintf(msg, sizeof(msg), "gf8: %d witness wires → %d bytes",
+                     counts[k], counts[k]);
+            CHECK(voleith_gf8_circuit_witness_byte_len(c) == (size_t)counts[k],
+                  msg);
+            voleith_gf8_circuit_free(c);
+        }
+    }
+
+    {
+        voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+        for (int i = 0; i < 9; i++)
+            (void)voleith_gf8_add_instance(c);
+        CHECK(voleith_gf8_circuit_instance_byte_len(c) == 9,
+              "gf8: 9 instance wires → 9 bytes");
+        voleith_gf8_circuit_free(c);
+    }
+}
+
+/* ================================================================
  * Main
  * ================================================================ */
 
@@ -809,6 +935,8 @@ main(void)
     test_two_phase_wrong_chall1();
     test_wrong_instance_rejected();
     test_aes128_gf8_roundtrip();
+    test_v2_length_validation();
+    test_byte_len_helpers();
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return (g_fail > 0) ? 1 : 0;

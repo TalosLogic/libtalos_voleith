@@ -86,6 +86,51 @@ int voleith_gf8_prove(voleith_proof_t *proof, const voleith_params_t *params,
                       const uint8_t *fs_seed, size_t fs_seed_len);
 
 /*
+ * Expected byte length of the witness / instance buffer for the
+ * GF(2⁸) prove/verify API.  GF(2⁸) circuits use one byte per
+ * witness/instance wire, so the buffer size is the wire count
+ * directly (no bit-packing).
+ *
+ * Use these to feed the _v2 entry points without duplicating the
+ * encoding convention at every call site:
+ *
+ *     voleith_gf8_prove_v2(&p, params, c, witness,
+ *                          voleith_gf8_circuit_witness_byte_len(c),
+ *                          instance,
+ *                          voleith_gf8_circuit_instance_byte_len(c),
+ *                          fs_seed, fs_seed_len);
+ *
+ * Returns 0 if circuit is NULL (no read of the witness/instance
+ * buffer is safe in that case anyway; voleith_gf8_prove_v2 will
+ * reject).
+ */
+size_t
+voleith_gf8_circuit_witness_byte_len(const voleith_gf8_circuit_t *circuit);
+size_t
+voleith_gf8_circuit_instance_byte_len(const voleith_gf8_circuit_t *circuit);
+
+/*
+ * Length-validated GF(2⁸) prove (M-N3, 1.3.0).
+ *
+ * Use voleith_gf8_circuit_witness_byte_len() and
+ * voleith_gf8_circuit_instance_byte_len() to compute the expected
+ * lengths from the circuit:
+ *   witness_len  == voleith_gf8_circuit_witness_byte_len(circuit)
+ *   instance_len == voleith_gf8_circuit_instance_byte_len(circuit)
+ *
+ * voleith_gf8_prove is preserved for source-compatibility and will be
+ * removed in 2.0.0; new code should use voleith_gf8_prove_v2.
+ *
+ * Returns 0 on success, -1 on length mismatch or any condition that
+ * would cause voleith_gf8_prove to fail.
+ */
+int voleith_gf8_prove_v2(voleith_proof_t *proof, const voleith_params_t *params,
+                         const voleith_gf8_circuit_t *circuit,
+                         const uint8_t *witness, size_t witness_len,
+                         const uint8_t *instance, size_t instance_len,
+                         const uint8_t *fs_seed, size_t fs_seed_len);
+
+/*
  * Verify a non-interactive proof for a GF(2⁸) element-level circuit.
  *
  * See voleith_gf8_prove() above for the M-N2 caller-binding
@@ -98,6 +143,20 @@ int voleith_gf8_verify(const voleith_proof_t *proof,
                        const voleith_gf8_circuit_t *circuit,
                        const uint8_t *instance, const uint8_t *fs_seed,
                        size_t fs_seed_len);
+
+/*
+ * Length-validated GF(2⁸) verify (M-N3, 1.3.0).  See
+ * voleith_gf8_prove_v2 for the rationale and the deprecation timeline
+ * of voleith_gf8_verify.
+ *
+ * Required:
+ *   instance_len == voleith_gf8_circuit_instance_byte_len(circuit)
+ */
+int voleith_gf8_verify_v2(const voleith_proof_t *proof,
+                          const voleith_params_t *params,
+                          const voleith_gf8_circuit_t *circuit,
+                          const uint8_t *instance, size_t instance_len,
+                          const uint8_t *fs_seed, size_t fs_seed_len);
 
 /* ================================================================
  * Two-phase prove/verify API (for hybrid proof systems)

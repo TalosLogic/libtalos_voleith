@@ -19,9 +19,12 @@
 
 #include "gf8_proof.h"
 #include "fiat_shamir.h"
-#include "vole_hash.h"
+#include "gf8_circuit_fingerprint.h"
 #include "gf8_prover.h"
 #include "gf8_verifier.h"
+#include "params_fingerprint.h"
+#include "proof_header.h"
+#include "vole_hash.h"
 #include "../vole/voleith.h"
 #include "../vole/convert.h"
 #include "../vole/vc.h"
@@ -161,11 +164,17 @@ proof_layout_w(uint8_t *base, const voleith_params_t *params,
 }
 
 /* ================================================================
- * Proof size
+ * Proof size and header construction
  * ================================================================ */
 
-size_t
-voleith_gf8_proof_byte_size(const voleith_params_t *params, size_t ell)
+/*
+ * Body-only size: GF(2^8) proof layout from c through ctr.  The public
+ * voleith_gf8_proof_byte_size wraps this and adds the 48-byte v1
+ * metadata header.  Body size is used internally everywhere offsets
+ * matter (allocation, body-only verify size check).
+ */
+static size_t
+gf8_proof_body_byte_size(const voleith_params_t *params, size_t ell)
 {
     unsigned int nb = params->lambda / 8;
     /* ellhat_bytes = ell + ceil((3*lambda + 16) / 8) */
@@ -182,6 +191,57 @@ voleith_gf8_proof_byte_size(const voleith_params_t *params, size_t ell)
            + IV_SIZE + 4u;   /* ctr */
 }
 
+size_t
+voleith_gf8_proof_byte_size(const voleith_params_t *params, size_t ell)
+{
+    return VOLEITH_PROOF_HEADER_BYTES + gf8_proof_body_byte_size(params, ell);
+}
+
+/*
+ * Map a voleith_params_t to a param_set_id byte for the metadata
+ * header.  Same logic as the bit-level mapper in proof.c; the byte is
+ * informational, with the real binding via PARAMS_FP.
+ */
+static voleith_param_set_id_t
+gf8_params_to_id(const voleith_params_t *p)
+{
+    if (p->lambda == 128)
+        return (p->tau == 11) ? VOLEITH_PARAM_EM_128S : VOLEITH_PARAM_EM_128F;
+    if (p->lambda == 192)
+        return (p->tau == 16) ? VOLEITH_PARAM_EM_192S : VOLEITH_PARAM_EM_192F;
+    return (p->tau == 22) ? VOLEITH_PARAM_EM_256S : VOLEITH_PARAM_EM_256F;
+}
+
+/*
+ * Build the 48-byte v1 proof header for the GF(2^8) variant.  Differs
+ * from the bit-level builder only in the circuit_fp source.
+ */
+static int
+gf8_build_header_bytes(uint8_t out[VOLEITH_PROOF_HEADER_BYTES],
+                       const voleith_gf8_circuit_t *circuit,
+                       const voleith_params_t *params)
+{
+    voleith_proof_header_t h;
+    size_t len = VOLEITH_PROOF_HEADER_BYTES;
+
+    memset(&h, 0, sizeof(h));
+    h.magic[0] = VOLEITH_PROOF_MAGIC_0;
+    h.magic[1] = VOLEITH_PROOF_MAGIC_1;
+    h.magic[2] = VOLEITH_PROOF_MAGIC_2;
+    h.magic[3] = VOLEITH_PROOF_MAGIC_3;
+    h.format_version = VOLEITH_PROOF_FORMAT_VERSION;
+    h.fs_kind = (uint8_t)params->fs_kind;
+    h.bavc_kind = (uint8_t)params->bavc_kind;
+    h.param_set_id = (uint8_t)gf8_params_to_id(params);
+
+    if (voleith_gf8_circuit_fingerprint(circuit, h.circuit_fp) != 0)
+        return -1;
+    if (voleith_params_fingerprint(params, h.params_fp) != 0)
+        return -1;
+
+    return voleith_proof_header_serialize(out, &len, &h);
+}
+
 /* ================================================================
  * Two-phase API: implementation
  * ================================================================ */
@@ -193,7 +253,17 @@ voleith_gf8_commit_blob_size(const voleith_params_t *params,
     unsigned int nb = params->lambda / 8;
     /* voleith_gf8_qs_ellhat already returns bytes */
     size_t ellhat_bytes = voleith_gf8_qs_ellhat(circuit, params->lambda);
-    return 2u * nb + (params->tau - 1u) * ellhat_bytes + IV_SIZE;
+    /*
+     * Blob layout for the v1 metadata header design:
+     *   header (48 bytes) || hcom (2*nb) || c ((tau-1)*ellhat_bytes) || iv
+     *
+     * Putting the header inside the blob means a caller-driven
+     * derive_chall_1(... blob ...) absorbs the header transitively;
+     * shared-transcript users (two-phase API) need no header-specific
+     * knowledge.
+     */
+    return VOLEITH_PROOF_HEADER_BYTES + 2u * nb +
+           (params->tau - 1u) * ellhat_bytes + IV_SIZE;
 }
 
 int
@@ -256,21 +326,38 @@ voleith_gf8_prove_commit(voleith_gf8_prover_commit_t **ctx_out,
         return -1;
     }
 
+    /* Step 0: build and write the v1 metadata header into pbuf[0..47].
+     * The body follows at pbuf + VOLEITH_PROOF_HEADER_BYTES.  Header
+     * bytes are also mixed into the Fiat-Shamir transcript (root_seed
+     * derivation below and chall_1 derivation in voleith_gf8_prove). */
+    if (gf8_build_header_bytes(ctx->pbuf, circuit, params) != 0) {
+        voleith_gf8_prover_commit_free(ctx);
+        return -1;
+    }
+    const uint8_t *header_bytes = ctx->pbuf;
+    uint8_t *body_base = ctx->pbuf + VOLEITH_PROOF_HEADER_BYTES;
+
     uint8_t *c_ptr, *u_tilde_ptr, *d_ptr, *a1_ptr, *a2_ptr;
     uint8_t *decom_ptr, *chall3_ptr, *iv_ptr, *ctr_ptr;
-    proof_layout_w(ctx->pbuf, params, ellhat_bytes, ell_bytes, ctx->decom_size,
+    proof_layout_w(body_base, params, ellhat_bytes, ell_bytes, ctx->decom_size,
                    &c_ptr, &u_tilde_ptr, &d_ptr, &a1_ptr, &a2_ptr, &decom_ptr,
                    &chall3_ptr, &iv_ptr, &ctr_ptr);
 
-    /* Step 1: Derive root_seed || iv via H_3(fs_seed).
+    /* Step 1: Derive root_seed || iv via H_3(fs_seed' = header ‖ fs_seed).
      *
      * G-2 (same as P-1 for the GF(2⁸) prover): root_seed is the master
-     * secret; zero it and the wrapping buf on every exit. */
+     * secret; zero it and the wrapping buf on every exit.  Header
+     * bytes mixed in first matches the bit-level proof.c convention so
+     * v1 prover and v1 verifier derive the same fs_seed'. */
     uint8_t root_seed[32];
     {
         uint8_t buf[48];
-        voleith_fs_hash(lambda, VOLEITH_FS_H3, fs_seed, fs_seed_len, buf,
-                        nb + IV_SIZE);
+        voleith_transcript_t t;
+        voleith_transcript_init(&t, lambda, VOLEITH_FS_H3);
+        voleith_transcript_absorb(&t, header_bytes, VOLEITH_PROOF_HEADER_BYTES);
+        voleith_transcript_absorb(&t, fs_seed, fs_seed_len);
+        voleith_transcript_squeeze(&t, buf, nb + IV_SIZE);
+        voleith_transcript_clear(&t);
         memcpy(root_seed, buf, nb);
         memcpy(iv_ptr, buf + nb, IV_SIZE);
         voleith_secure_zero(buf, sizeof(buf));
@@ -290,10 +377,20 @@ voleith_gf8_prove_commit(voleith_gf8_prover_commit_t **ctx_out,
     /* Copy c[0..tau-2] into proof buffer */
     memcpy(c_ptr, ctx->com.c, (tau - 1) * ellhat_bytes);
 
-    /* Fill commitment blob: hcom || c || iv */
-    memcpy(commitment_out, ctx->com.hcom, 2 * nb);
-    memcpy(commitment_out + 2 * nb, c_ptr, (tau - 1) * ellhat_bytes);
-    memcpy(commitment_out + 2 * nb + (tau - 1) * ellhat_bytes, iv_ptr, IV_SIZE);
+    /*
+     * Fill commitment blob: header (48 bytes) || hcom || c || iv.
+     * Header bytes come straight from pbuf[0..47] (written above by
+     * gf8_build_header_bytes), so absorbing the blob in
+     * derive_chall_1 binds the proof to the variant choice and
+     * circuit / params identity.
+     */
+    memcpy(commitment_out, header_bytes, VOLEITH_PROOF_HEADER_BYTES);
+    memcpy(commitment_out + VOLEITH_PROOF_HEADER_BYTES, ctx->com.hcom, 2 * nb);
+    memcpy(commitment_out + VOLEITH_PROOF_HEADER_BYTES + 2 * nb, c_ptr,
+           (tau - 1) * ellhat_bytes);
+    memcpy(commitment_out + VOLEITH_PROOF_HEADER_BYTES + 2 * nb +
+               (tau - 1) * ellhat_bytes,
+           iv_ptr, IV_SIZE);
 
     *ctx_out = ctx;
     return 0;
@@ -318,11 +415,13 @@ voleith_gf8_prove_respond(voleith_proof_t *proof_out,
     size_t utilde_bytes = ctx->utilde_bytes;
     const uint8_t *inst = instance ? instance : (const uint8_t *)"";
 
+    /* Body starts after the 48-byte v1 header written by
+     * voleith_gf8_prove_commit. */
     uint8_t *c, *u_tilde, *d, *a1_tilde, *a2_tilde, *decom_i, *chall_3, *iv,
         *ctr;
-    proof_layout_w(ctx->pbuf, params, ellhat_bytes, ell_bytes, ctx->decom_size,
-                   &c, &u_tilde, &d, &a1_tilde, &a2_tilde, &decom_i, &chall_3,
-                   &iv, &ctr);
+    proof_layout_w(ctx->pbuf + VOLEITH_PROOF_HEADER_BYTES, params, ellhat_bytes,
+                   ell_bytes, ctx->decom_size, &c, &u_tilde, &d, &a1_tilde,
+                   &a2_tilde, &decom_i, &chall_3, &iv, &ctr);
 
     /* Step 4: u_tilde = VOLEHash(chall_1, u, ell) */
     voleith_vole_hash(u_tilde, chall_1, ctx->com.u, ell, lambda);
@@ -436,15 +535,30 @@ voleith_gf8_prover_commit_free(voleith_gf8_prover_commit_t *ctx)
     free(ctx);
 }
 
-int
-voleith_gf8_verify_reconstruct(voleith_gf8_verifier_reconstruct_t **ctx_out,
-                               const voleith_proof_t *proof,
-                               const voleith_params_t *params,
-                               const voleith_gf8_circuit_t *circuit,
-                               uint8_t *commitment_out)
+/*
+ * Body-only reconstruction core.  Takes a body-view proof (no v1 header
+ * at the front), processes it, and writes hcom_rec || c || iv (no
+ * header) to body_blob_out.  Used as the worker for both:
+ *
+ *   - voleith_gf8_verify_reconstruct (the v1 public entry point), which
+ *     strips the header itself and routes the body view here.
+ *   - voleith_gf8_verify's legacy fallback path, which calls this
+ *     directly with the original (header-less) proof bytes.
+ *
+ * body_blob_out is sized to 2*nb + (tau-1)*ellhat_bytes + IV_SIZE; the
+ * caller of voleith_gf8_verify_reconstruct provides a larger blob with
+ * the header already written to the first 48 bytes, so we write to the
+ * tail starting at + VOLEITH_PROOF_HEADER_BYTES.
+ */
+static int
+gf8_verify_reconstruct_body(voleith_gf8_verifier_reconstruct_t **ctx_out,
+                            const voleith_proof_t *body_proof,
+                            const voleith_params_t *params,
+                            const voleith_gf8_circuit_t *circuit,
+                            uint8_t *body_blob_out)
 {
-    if (!ctx_out || !proof || !proof->data || !params || !circuit ||
-        !commitment_out)
+    if (!ctx_out || !body_proof || !body_proof->data || !params || !circuit ||
+        !body_blob_out)
         return -1;
     /* X-7: full parameter validation at the public API boundary. */
     if (voleith_params_validate(params) != 0)
@@ -474,10 +588,17 @@ voleith_gf8_verify_reconstruct(voleith_gf8_verifier_reconstruct_t **ctx_out,
         return -1;
 
     size_t decom_size = voleith_bavc_opening_size(&vcp);
-    size_t expected_size = voleith_gf8_proof_byte_size(params, ell);
+    /* Body-only size; the body view from the caller must match this. */
+    size_t expected_body_size = gf8_proof_body_byte_size(params, ell);
 
-    if (proof->len != expected_size)
+    if (body_proof->len != expected_body_size)
         return -1;
+
+    /* Rebind to the parameter name used by the original function body
+     * (proof / commitment_out) so the rest of the function reads
+     * naturally without further edits below. */
+    const voleith_proof_t *proof = body_proof;
+    uint8_t *commitment_out = body_blob_out;
 
     const uint8_t *c, *u_tilde, *d, *a1_tilde, *a2_tilde, *decom_i_ptr,
         *chall_3_ptr, *iv, *ctr_ptr;
@@ -551,6 +672,47 @@ voleith_gf8_verify_reconstruct(voleith_gf8_verifier_reconstruct_t **ctx_out,
 
     *ctx_out = ctx;
     return 0;
+}
+
+/*
+ * Public verify_reconstruct: requires a v1 proof (header at start).
+ * Parses + validates the header, copies the header bytes verbatim into
+ * the first 48 bytes of commitment_out, then defers to the body helper
+ * for the actual reconstruction work.  Returns -1 on any header
+ * malformation, identity mismatch, or downstream reconstruction
+ * failure.
+ *
+ * Legacy (pre-header) proofs are NOT accepted through this entry
+ * point.  The one-phase voleith_gf8_verify handles legacy proofs
+ * internally via gf8_verify_reconstruct_body.
+ */
+int
+voleith_gf8_verify_reconstruct(voleith_gf8_verifier_reconstruct_t **ctx_out,
+                               const voleith_proof_t *proof,
+                               const voleith_params_t *params,
+                               const voleith_gf8_circuit_t *circuit,
+                               uint8_t *commitment_out)
+{
+    voleith_proof_header_t h;
+    voleith_proof_t body_view;
+
+    if (!ctx_out || !proof || !proof->data || !params || !circuit ||
+        !commitment_out)
+        return -1;
+
+    if (voleith_proof_header_parse(&h, proof->data, proof->len) != 0)
+        return -1;
+    if (voleith_proof_header_check_identity_gf8(&h, circuit, params) != 0)
+        return -1;
+
+    memcpy(commitment_out, proof->data, VOLEITH_PROOF_HEADER_BYTES);
+
+    body_view.data = proof->data + VOLEITH_PROOF_HEADER_BYTES;
+    body_view.len = proof->len - VOLEITH_PROOF_HEADER_BYTES;
+
+    return gf8_verify_reconstruct_body(ctx_out, &body_view, params, circuit,
+                                       commitment_out +
+                                           VOLEITH_PROOF_HEADER_BYTES);
 }
 
 int
@@ -681,6 +843,16 @@ voleith_gf8_prove(voleith_proof_t *proof, const voleith_params_t *params,
         return -1;
     }
 
+    /*
+     * chall_1 = H_2^1(fs_seed ‖ instance ‖ blob).
+     *
+     * blob = header ‖ hcom ‖ c ‖ iv (the v1 blob layout written by
+     * voleith_gf8_prove_commit).  The header bytes ride along inside
+     * the blob, so absorbing the blob binds the proof to the variant
+     * choice and circuit / params identity carried in the header
+     * without needing a separate absorb call here.  This is the same
+     * format used by two-phase shared-transcript callers.
+     */
     uint8_t chall_1[5 * 32 + 8];
     {
         voleith_transcript_t t;
@@ -718,18 +890,56 @@ voleith_gf8_verify(const voleith_proof_t *proof, const voleith_params_t *params,
     size_t n_instance = voleith_gf8_circuit_instance_count(circuit);
     const uint8_t *inst = instance ? instance : (const uint8_t *)"";
 
-    size_t blob_size = voleith_gf8_commit_blob_size(params, circuit);
-    uint8_t *blob = malloc(blob_size);
-    if (!blob)
-        return -1;
+    /*
+     * Full-parse-as-dispatch.  v1 path uses the public
+     * verify_reconstruct (which validates the header and writes it to
+     * the blob).  Legacy path goes through gf8_verify_reconstruct_body
+     * directly with a smaller, header-less blob.  Either way the
+     * downstream chall_1 derivation absorbs blob verbatim, so the
+     * absorbed bytes match what the corresponding prover produced.
+     */
+    voleith_proof_header_t h_unused;
+    int has_header =
+        (voleith_proof_header_parse(&h_unused, proof->data, proof->len) == 0);
 
+    size_t blob_size;
+    uint8_t *blob;
     voleith_gf8_verifier_reconstruct_t *ctx = NULL;
-    if (voleith_gf8_verify_reconstruct(&ctx, proof, params, circuit, blob) !=
-        0) {
+    int rec_rc;
+
+    if (has_header) {
+        blob_size = voleith_gf8_commit_blob_size(params, circuit);
+        blob = malloc(blob_size);
+        if (!blob)
+            return -1;
+        rec_rc =
+            voleith_gf8_verify_reconstruct(&ctx, proof, params, circuit, blob);
+    } else {
+#ifdef VOLEITH_LEGACY_VERIFY
+        /* Legacy blob: hcom_rec || c || iv, no header prefix. */
+        size_t ellhat_bytes = voleith_gf8_qs_ellhat(circuit, lambda);
+        blob_size =
+            2u * nb + (params->tau - 1u) * ellhat_bytes + (size_t)IV_SIZE;
+        blob = malloc(blob_size);
+        if (!blob)
+            return -1;
+        rec_rc =
+            gf8_verify_reconstruct_body(&ctx, proof, params, circuit, blob);
+#else
+        return -1;
+#endif
+    }
+
+    if (rec_rc != 0) {
         free(blob);
         return -1;
     }
 
+    /*
+     * chall_1 = H_2^1(fs_seed ‖ instance ‖ blob).  For v1 the blob
+     * starts with the metadata header; for legacy the blob is the
+     * pre-header format.  Either way absorption matches the prover.
+     */
     uint8_t chall_1[5 * 32 + 8];
     {
         voleith_transcript_t t;
@@ -746,4 +956,59 @@ voleith_gf8_verify(const voleith_proof_t *proof, const voleith_params_t *params,
     int ret = voleith_gf8_verify_respond(ctx, circuit, instance, chall_1);
     voleith_gf8_verifier_reconstruct_free(ctx);
     return ret;
+}
+
+/* ================================================================
+ * Length-validated entry points (M-N3, 1.3.0)
+ * ================================================================ */
+
+size_t
+voleith_gf8_circuit_witness_byte_len(const voleith_gf8_circuit_t *circuit)
+{
+    if (circuit == NULL)
+        return 0;
+    /* GF(2⁸) layout: one byte per witness wire, no bit-packing. */
+    return voleith_gf8_circuit_witness_count(circuit);
+}
+
+size_t
+voleith_gf8_circuit_instance_byte_len(const voleith_gf8_circuit_t *circuit)
+{
+    if (circuit == NULL)
+        return 0;
+    return voleith_gf8_circuit_instance_count(circuit);
+}
+
+int
+voleith_gf8_prove_v2(voleith_proof_t *proof, const voleith_params_t *params,
+                     const voleith_gf8_circuit_t *circuit,
+                     const uint8_t *witness, size_t witness_len,
+                     const uint8_t *instance, size_t instance_len,
+                     const uint8_t *fs_seed, size_t fs_seed_len)
+{
+    if (circuit == NULL)
+        return -1;
+    if (witness_len != voleith_gf8_circuit_witness_byte_len(circuit))
+        return -1;
+    if (instance_len != voleith_gf8_circuit_instance_byte_len(circuit))
+        return -1;
+
+    return voleith_gf8_prove(proof, params, circuit, witness, instance, fs_seed,
+                             fs_seed_len);
+}
+
+int
+voleith_gf8_verify_v2(const voleith_proof_t *proof,
+                      const voleith_params_t *params,
+                      const voleith_gf8_circuit_t *circuit,
+                      const uint8_t *instance, size_t instance_len,
+                      const uint8_t *fs_seed, size_t fs_seed_len)
+{
+    if (circuit == NULL)
+        return -1;
+    if (instance_len != voleith_gf8_circuit_instance_byte_len(circuit))
+        return -1;
+
+    return voleith_gf8_verify(proof, params, circuit, instance, fs_seed,
+                              fs_seed_len);
 }

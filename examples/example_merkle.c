@@ -199,11 +199,13 @@ main(void)
      * Prove
      * ================================================================ */
     voleith_proof_t proof = {0};
-    int rc = voleith_prove(&proof, params, c, witness, instance,
-                           "example_merkle:depth3-DM-leaf5",
-                           sizeof("example_merkle:depth3-DM-leaf5") - 1);
+    int rc = voleith_prove_v2(&proof, params, c, witness,
+                              voleith_circuit_witness_byte_len(c), instance,
+                              voleith_circuit_instance_byte_len(c),
+                              "example_merkle:depth3-DM-leaf5",
+                              sizeof("example_merkle:depth3-DM-leaf5") - 1);
     if (rc != 0) {
-        fprintf(stderr, "voleith_prove failed\n");
+        fprintf(stderr, "voleith_prove_v2 failed\n");
         voleith_circuit_free(c);
         return 1;
     }
@@ -212,9 +214,10 @@ main(void)
     /* ================================================================
      * Verify
      * ================================================================ */
-    rc = voleith_verify(&proof, params, c, instance,
-                        "example_merkle:depth3-DM-leaf5",
-                        sizeof("example_merkle:depth3-DM-leaf5") - 1);
+    rc = voleith_verify_v2(&proof, params, c, instance,
+                           voleith_circuit_instance_byte_len(c),
+                           "example_merkle:depth3-DM-leaf5",
+                           sizeof("example_merkle:depth3-DM-leaf5") - 1);
     printf("Verification: %s\n", (rc == 0) ? "PASS" : "FAIL");
 
     voleith_proof_free(&proof);

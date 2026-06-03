@@ -232,23 +232,28 @@ main(void)
     /* Warmup: fill caches, settle frequency scaling; times discarded. */
     for (int w = 0; w < BENCH_WARMUP; w++) {
         voleith_proof_t p = {0};
-        if (voleith_gf8_prove(&p, params, c, witness, instance, ds,
-                              strlen(ds)) != 0) {
-            fprintf(stderr, "voleith_gf8_prove failed (warmup)\n");
+        if (voleith_gf8_prove_v2(
+                &p, params, c, witness, voleith_gf8_circuit_witness_byte_len(c),
+                instance, voleith_gf8_circuit_instance_byte_len(c), ds,
+                strlen(ds)) != 0) {
+            fprintf(stderr, "voleith_gf8_prove_v2 failed (warmup)\n");
             return 1;
         }
-        voleith_gf8_verify(&p, params, c, instance, ds, strlen(ds));
+        voleith_gf8_verify_v2(&p, params, c, instance,
+                              voleith_gf8_circuit_instance_byte_len(c), ds,
+                              strlen(ds));
         voleith_proof_free(&p);
     }
 
     for (int i = 0; i < BENCH_PROVE_ITERS; i++) {
         voleith_proof_t p = {0};
         uint64_t t0 = bench_now_ns();
-        int rc =
-            voleith_gf8_prove(&p, params, c, witness, instance, ds, strlen(ds));
+        int rc = voleith_gf8_prove_v2(
+            &p, params, c, witness, voleith_gf8_circuit_witness_byte_len(c),
+            instance, voleith_gf8_circuit_instance_byte_len(c), ds, strlen(ds));
         uint64_t t1 = bench_now_ns();
         if (rc != 0) {
-            fprintf(stderr, "voleith_gf8_prove failed\n");
+            fprintf(stderr, "voleith_gf8_prove_v2 failed\n");
             return 1;
         }
         prove_ms[i] = (double)(t1 - t0) / 1e6;
@@ -261,7 +266,9 @@ main(void)
     int verify_ok = 1;
     for (int i = 0; i < BENCH_VERIFY_ITERS; i++) {
         uint64_t t0 = bench_now_ns();
-        int rc = voleith_gf8_verify(&kept, params, c, instance, ds, strlen(ds));
+        int rc = voleith_gf8_verify_v2(&kept, params, c, instance,
+                                       voleith_gf8_circuit_instance_byte_len(c),
+                                       ds, strlen(ds));
         uint64_t t1 = bench_now_ns();
         if (rc != 0)
             verify_ok = 0;

@@ -9,10 +9,13 @@
  */
 
 #include "proof.h"
+#include "circuit_fingerprint.h"
 #include "fiat_shamir.h"
-#include "vole_hash.h"
+#include "params_fingerprint.h"
+#include "proof_header.h"
 #include "prover.h"
 #include "verifier.h"
+#include "vole_hash.h"
 #include "../vole/voleith.h"
 #include "../vole/convert.h"
 #include "../vole/vc.h"
@@ -26,12 +29,124 @@
  * Parameter sets (from FAEST v2.0 spec / faest-ref meson.build)
  * ================================================================ */
 
-const voleith_params_t voleith_params_em_128s = {128, 11, 7, 103, 2};
-const voleith_params_t voleith_params_em_128f = {128, 16, 8, 112, 2};
-const voleith_params_t voleith_params_em_192s = {192, 16, 8, 162, 2};
-const voleith_params_t voleith_params_em_192f = {192, 24, 8, 176, 2};
-const voleith_params_t voleith_params_em_256s = {256, 22, 6, 218, 2};
-const voleith_params_t voleith_params_em_256f = {256, 32, 8, 234, 2};
+/*
+ * Numeric fields per FAEST v2.0 spec (faest-ref meson.build).
+ * fs_kind / bavc_kind are explicit at SHAKE / STANDARD - the only
+ * combination the library currently supports.  Listing them
+ * explicitly rather than relying on zero-init from trailing-field
+ * elision makes the wire-format binding obvious and breaks loudly if
+ * the enum numbering ever changes.
+ *
+ * Layout matches voleith_params_t: {lambda, tau, w_grind, T_open,
+ * n_leafcom, fs_kind, bavc_kind}.
+ */
+const voleith_params_t voleith_params_em_128s = {
+    128, 11, 7, 103, 2, VOLEITH_FS_SHAKE, VOLEITH_BAVC_STANDARD};
+const voleith_params_t voleith_params_em_128f = {
+    128, 16, 8, 112, 2, VOLEITH_FS_SHAKE, VOLEITH_BAVC_STANDARD};
+const voleith_params_t voleith_params_em_192s = {
+    192, 16, 8, 162, 2, VOLEITH_FS_SHAKE, VOLEITH_BAVC_STANDARD};
+const voleith_params_t voleith_params_em_192f = {
+    192, 24, 8, 176, 2, VOLEITH_FS_SHAKE, VOLEITH_BAVC_STANDARD};
+const voleith_params_t voleith_params_em_256s = {
+    256, 22, 6, 218, 2, VOLEITH_FS_SHAKE, VOLEITH_BAVC_STANDARD};
+const voleith_params_t voleith_params_em_256f = {
+    256, 32, 8, 234, 2, VOLEITH_FS_SHAKE, VOLEITH_BAVC_STANDARD};
+
+/*
+ * Lookup table backing voleith_params_build().  Index by
+ * voleith_param_set_id_t.  Holds only the numeric fields; fs_kind and
+ * bavc_kind come from the caller's arguments.
+ */
+struct voleith_params_numeric {
+    unsigned int lambda;
+    unsigned int tau;
+    unsigned int w_grind;
+    unsigned int T_open;
+    unsigned int n_leafcom;
+};
+static const struct voleith_params_numeric voleith_params_table[] = {
+    [VOLEITH_PARAM_EM_128F] = {128, 16, 8, 112, 2},
+    [VOLEITH_PARAM_EM_128S] = {128, 11, 7, 103, 2},
+    [VOLEITH_PARAM_EM_192F] = {192, 24, 8, 176, 2},
+    [VOLEITH_PARAM_EM_192S] = {192, 16, 8, 162, 2},
+    [VOLEITH_PARAM_EM_256F] = {256, 32, 8, 234, 2},
+    [VOLEITH_PARAM_EM_256S] = {256, 22, 6, 218, 2},
+};
+#define VOLEITH_PARAMS_TABLE_LEN                                               \
+    (sizeof(voleith_params_table) / sizeof(voleith_params_table[0]))
+
+voleith_params_t
+voleith_params_build(voleith_param_set_id_t set, voleith_fs_kind_t fs,
+                     voleith_bavc_kind_t bavc)
+{
+    voleith_params_t p = {0};
+    const struct voleith_params_numeric *row;
+
+    if ((unsigned int)set >= VOLEITH_PARAMS_TABLE_LEN)
+        return p; /* zero-initialized; validate() will reject. */
+
+    row = &voleith_params_table[set];
+    p.lambda = row->lambda;
+    p.tau = row->tau;
+    p.w_grind = row->w_grind;
+    p.T_open = row->T_open;
+    p.n_leafcom = row->n_leafcom;
+    p.fs_kind = fs;
+    p.bavc_kind = bavc;
+    return p;
+}
+
+/*
+ * Map a voleith_params_t to a param_set_id for the metadata header byte.
+ * Matches on (lambda, tau) against the six named EM-* sets; for custom
+ * params returns the closest same-lambda default.  The header's
+ * param_set_id byte is informational only - the real params binding is
+ * via the 16-byte PARAMS_FP that follows it - so this just needs to
+ * return a value in the legal range 0..5.
+ */
+static voleith_param_set_id_t
+params_to_id(const voleith_params_t *p)
+{
+    if (p->lambda == 128)
+        return (p->tau == 11) ? VOLEITH_PARAM_EM_128S : VOLEITH_PARAM_EM_128F;
+    if (p->lambda == 192)
+        return (p->tau == 16) ? VOLEITH_PARAM_EM_192S : VOLEITH_PARAM_EM_192F;
+    /* lambda == 256 (validate() rejects anything else) */
+    return (p->tau == 22) ? VOLEITH_PARAM_EM_256S : VOLEITH_PARAM_EM_256F;
+}
+
+/*
+ * Build the 48-byte v1 proof header into `out`.  Computes circuit and
+ * params fingerprints, fills magic/version/variant bytes, and zeros
+ * flags + reserved.  Returns 0 on success, -1 if any fingerprint or
+ * serialize step fails.
+ */
+static int
+build_header_bytes(uint8_t out[VOLEITH_PROOF_HEADER_BYTES],
+                   const voleith_circuit_t *circuit,
+                   const voleith_params_t *params)
+{
+    voleith_proof_header_t h;
+    size_t len = VOLEITH_PROOF_HEADER_BYTES;
+
+    memset(&h, 0, sizeof(h));
+    h.magic[0] = VOLEITH_PROOF_MAGIC_0;
+    h.magic[1] = VOLEITH_PROOF_MAGIC_1;
+    h.magic[2] = VOLEITH_PROOF_MAGIC_2;
+    h.magic[3] = VOLEITH_PROOF_MAGIC_3;
+    h.format_version = VOLEITH_PROOF_FORMAT_VERSION;
+    h.fs_kind = (uint8_t)params->fs_kind;
+    h.bavc_kind = (uint8_t)params->bavc_kind;
+    h.param_set_id = (uint8_t)params_to_id(params);
+
+    if (voleith_circuit_fingerprint(circuit, h.circuit_fp) != 0)
+        return -1;
+    if (voleith_params_fingerprint(params, h.params_fp) != 0)
+        return -1;
+
+    return voleith_proof_header_serialize(out, &len, &h);
+}
 
 /* ================================================================
  * Two-phase API: opaque context structs
@@ -124,6 +239,16 @@ voleith_params_validate(const voleith_params_t *params)
         return -1;
     if (params->T_open == 0)
         return -1;
+    /*
+     * Range-check the variant enums.  An out-of-range value here
+     * indicates the struct was either uninitialized or constructed
+     * outside voleith_params_build, both of which should be rejected
+     * at the API boundary.
+     */
+    if ((unsigned int)params->fs_kind > (unsigned int)VOLEITH_FS_GROSTL)
+        return -1;
+    if ((unsigned int)params->bavc_kind > (unsigned int)VOLEITH_BAVC_HALF_TREE)
+        return -1;
     /* C-N1: bound the per-vector depth k = (lambda - w_grind) / tau + 1.
      * vole/convert.c sizes a `v_ptrs[VOLEITH_MAX_K]` stack array and
      * computes `(int)1 << k` (UB at k >= 32) on the verifier-side
@@ -215,8 +340,14 @@ proof_layout_w(uint8_t *base, const voleith_params_t *params,
  * Proof size
  * ================================================================ */
 
-size_t
-voleith_proof_byte_size(const voleith_params_t *params, size_t ell)
+/*
+ * Body-only size: the layout sections from c through ctr.  Used
+ * internally everywhere the body offset matters (allocation strides,
+ * verify expected-size check).  The public voleith_proof_byte_size
+ * wraps this and adds VOLEITH_PROOF_HEADER_BYTES.
+ */
+static size_t
+proof_body_byte_size(const voleith_params_t *params, size_t ell)
 {
     unsigned int nb = params->lambda / 8;
     size_t ellhat_bits = ell + 3u * params->lambda + 16u;
@@ -239,6 +370,12 @@ voleith_proof_byte_size(const voleith_params_t *params, size_t ell)
            + 4u;                             /* ctr */
 }
 
+size_t
+voleith_proof_byte_size(const voleith_params_t *params, size_t ell)
+{
+    return VOLEITH_PROOF_HEADER_BYTES + proof_body_byte_size(params, ell);
+}
+
 /* ================================================================
  * Two-phase API: implementation
  * ================================================================ */
@@ -250,7 +387,14 @@ voleith_commit_blob_size(const voleith_params_t *params,
     unsigned int nb = params->lambda / 8;
     size_t ellhat = voleith_qs_ellhat(circuit, params->lambda);
     size_t ellhat_bytes = (ellhat + 7) / 8;
-    return 2u * nb + (params->tau - 1u) * ellhat_bytes + IV_SIZE;
+    /*
+     * Blob layout for the v1 metadata header design:
+     *   header (48 bytes) || hcom (2*nb) || c ((tau-1)*ellhat_bytes) || iv
+     * Header rides inside the blob so two-phase callers' derive_chall_1
+     * absorbs it transitively without needing header-specific code.
+     */
+    return VOLEITH_PROOF_HEADER_BYTES + 2u * nb +
+           (params->tau - 1u) * ellhat_bytes + IV_SIZE;
 }
 
 int
@@ -312,14 +456,33 @@ voleith_prove_commit(voleith_prover_commit_t **ctx_out,
         return -1;
     }
 
-    /* Map proof component pointers into the buffer */
+    /* Step 0: build and write the v1 metadata header into pbuf[0..47].
+     * The body follows at pbuf + VOLEITH_PROOF_HEADER_BYTES, so every
+     * subsequent offset is biased by HEADER_BYTES.  The header bytes
+     * also get mixed into the Fiat-Shamir transcript (root_seed
+     * derivation below and chall_1 derivation in voleith_prove) so
+     * that any change to the header invalidates the chall_3 check.
+     */
+    if (build_header_bytes(ctx->pbuf, circuit, params) != 0) {
+        voleith_prover_commit_free(ctx);
+        return -1;
+    }
+    const uint8_t *header_bytes = ctx->pbuf;
+    uint8_t *body_base = ctx->pbuf + VOLEITH_PROOF_HEADER_BYTES;
+
+    /* Map proof component pointers into the body region */
     uint8_t *c_ptr, *u_tilde_ptr, *d_ptr, *a1_ptr, *a2_ptr;
     uint8_t *decom_ptr, *chall3_ptr, *iv_ptr, *ctr_ptr;
-    proof_layout_w(ctx->pbuf, params, ellhat_bytes, ell_bytes, ctx->decom_size,
+    proof_layout_w(body_base, params, ellhat_bytes, ell_bytes, ctx->decom_size,
                    &c_ptr, &u_tilde_ptr, &d_ptr, &a1_ptr, &a2_ptr, &decom_ptr,
                    &chall3_ptr, &iv_ptr, &ctr_ptr);
 
-    /* Step 1: Derive root_seed || iv via H_3(fs_seed).
+    /* Step 1: Derive root_seed || iv via H_3(fs_seed' = header ‖ fs_seed).
+     *
+     * Header bytes are mixed in first so the prover and verifier
+     * derive matching seeds only when the verifier reconstructs the
+     * same fs_seed' (the v1 verify path does, the legacy path does
+     * not).
      *
      * P-1: `root_seed` is the most secret value in the protocol -
      * recovery reveals every leaf seed, the VOLE mask, and (through
@@ -329,8 +492,12 @@ voleith_prove_commit(voleith_prover_commit_t **ctx_out,
     uint8_t root_seed[32];
     {
         uint8_t buf[48]; /* max nb + IV_SIZE = 32 + 16 */
-        voleith_fs_hash(lambda, VOLEITH_FS_H3, fs_seed, fs_seed_len, buf,
-                        nb + IV_SIZE);
+        voleith_transcript_t t;
+        voleith_transcript_init(&t, lambda, VOLEITH_FS_H3);
+        voleith_transcript_absorb(&t, header_bytes, VOLEITH_PROOF_HEADER_BYTES);
+        voleith_transcript_absorb(&t, fs_seed, fs_seed_len);
+        voleith_transcript_squeeze(&t, buf, nb + IV_SIZE);
+        voleith_transcript_clear(&t);
         memcpy(root_seed, buf, nb);
         memcpy(iv_ptr, buf + nb, IV_SIZE);
         voleith_secure_zero(buf, sizeof(buf));
@@ -348,10 +515,20 @@ voleith_prove_commit(voleith_prover_commit_t **ctx_out,
     /* Copy c[0..tau-2] into proof buffer */
     memcpy(c_ptr, ctx->com.c, (tau - 1) * ellhat_bytes);
 
-    /* Fill commitment blob: hcom || c || iv */
-    memcpy(commitment_out, ctx->com.hcom, 2 * nb);
-    memcpy(commitment_out + 2 * nb, c_ptr, (tau - 1) * ellhat_bytes);
-    memcpy(commitment_out + 2 * nb + (tau - 1) * ellhat_bytes, iv_ptr, IV_SIZE);
+    /*
+     * Fill commitment blob: header (48 bytes) || hcom || c || iv.
+     * Header bytes come from pbuf[0..47] (written above by
+     * build_header_bytes), so absorbing the blob in derive_chall_1
+     * binds the proof to the variant choice and circuit / params
+     * identity.
+     */
+    memcpy(commitment_out, header_bytes, VOLEITH_PROOF_HEADER_BYTES);
+    memcpy(commitment_out + VOLEITH_PROOF_HEADER_BYTES, ctx->com.hcom, 2 * nb);
+    memcpy(commitment_out + VOLEITH_PROOF_HEADER_BYTES + 2 * nb, c_ptr,
+           (tau - 1) * ellhat_bytes);
+    memcpy(commitment_out + VOLEITH_PROOF_HEADER_BYTES + 2 * nb +
+               (tau - 1) * ellhat_bytes,
+           iv_ptr, IV_SIZE);
 
     *ctx_out = ctx;
     return 0;
@@ -374,12 +551,15 @@ voleith_prove_respond(voleith_proof_t *proof_out, voleith_prover_commit_t *ctx,
     size_t utilde_bytes = ctx->utilde_bytes;
     const uint8_t *inst = instance ? instance : (const uint8_t *)"";
 
-    /* Map proof component pointers (c and iv already filled by commit) */
+    /* Map proof component pointers (c and iv already filled by commit).
+     * The body starts at pbuf + VOLEITH_PROOF_HEADER_BYTES; the
+     * preceding 48 bytes hold the v1 metadata header written by
+     * voleith_prove_commit. */
     uint8_t *c, *u_tilde, *d, *a1_tilde, *a2_tilde, *decom_i, *chall_3, *iv,
         *ctr;
-    proof_layout_w(ctx->pbuf, params, ellhat_bytes, ell_bytes, ctx->decom_size,
-                   &c, &u_tilde, &d, &a1_tilde, &a2_tilde, &decom_i, &chall_3,
-                   &iv, &ctr);
+    proof_layout_w(ctx->pbuf + VOLEITH_PROOF_HEADER_BYTES, params, ellhat_bytes,
+                   ell_bytes, ctx->decom_size, &c, &u_tilde, &d, &a1_tilde,
+                   &a2_tilde, &decom_i, &chall_3, &iv, &ctr);
 
     /* Step 4: u_tilde = VOLEHash(chall_1, u, ell) */
     voleith_vole_hash(u_tilde, chall_1, ctx->com.u, ell, lambda);
@@ -492,26 +672,26 @@ voleith_prover_commit_free(voleith_prover_commit_t *ctx)
     free(ctx);
 }
 
-int
-voleith_verify_reconstruct(voleith_verifier_reconstruct_t **ctx_out,
-                           const voleith_proof_t *proof,
-                           const voleith_params_t *params,
-                           const voleith_circuit_t *circuit,
-                           uint8_t *commitment_out)
+/*
+ * Body-only reconstruction core.  Takes a body-view proof (no v1 header
+ * at the front), processes it, and writes hcom_rec || c || iv (no
+ * header) to body_blob_out.  See gf8_proof.c's gf8_verify_reconstruct_body
+ * for the analogous helper on the GF(2^8) side.
+ */
+static int
+verify_reconstruct_body(voleith_verifier_reconstruct_t **ctx_out,
+                        const voleith_proof_t *body_proof,
+                        const voleith_params_t *params,
+                        const voleith_circuit_t *circuit,
+                        uint8_t *body_blob_out)
 {
-    if (!ctx_out || !proof || !proof->data || !params || !circuit ||
-        !commitment_out)
+    if (!ctx_out || !body_proof || !body_proof->data || !params || !circuit ||
+        !body_blob_out)
         return -1;
-    /* X-7: full parameter validation at the public API boundary. */
     if (voleith_params_validate(params) != 0)
         return -1;
-    /* H-N1 / M-N1: reject circuits whose construction silently dropped
-     * wires or constraints under OOM. */
     if (!voleith_circuit_ok(circuit))
         return -1;
-    /* L-N2: validate every wire-id reference at the public boundary so
-     * a malformed circuit fails fast instead of OOB-reading wire / tag
-     * buffers in the QS hot loop. */
     if (voleith_circuit_validate(circuit) != 0)
         return -1;
 
@@ -531,10 +711,15 @@ voleith_verify_reconstruct(voleith_verifier_reconstruct_t **ctx_out,
         return -1;
 
     size_t decom_size = voleith_bavc_opening_size(&vcp);
-    size_t expected_size = voleith_proof_byte_size(params, ell);
+    size_t expected_body_size = proof_body_byte_size(params, ell);
 
-    if (proof->len != expected_size)
+    if (body_proof->len != expected_body_size)
         return -1;
+
+    /* Rebind parameter names for the rest of the function body, which
+     * was the original voleith_verify_reconstruct logic. */
+    const voleith_proof_t *proof = body_proof;
+    uint8_t *commitment_out = body_blob_out;
 
     /* Parse proof components */
     const uint8_t *c, *u_tilde, *d, *a1_tilde, *a2_tilde, *decom_i_ptr,
@@ -617,6 +802,43 @@ voleith_verify_reconstruct(voleith_verifier_reconstruct_t **ctx_out,
 
     *ctx_out = ctx;
     return 0;
+}
+
+/*
+ * Public verify_reconstruct: requires a v1 proof (header at start).
+ * Validates the header, copies it to commitment_out[0..47], and routes
+ * the body to verify_reconstruct_body for the actual reconstruction.
+ * Returns -1 on header malformation, identity mismatch, or downstream
+ * reconstruction failure.  Legacy proofs are NOT accepted through this
+ * entry point; the one-phase voleith_verify handles legacy via the
+ * body helper directly.
+ */
+int
+voleith_verify_reconstruct(voleith_verifier_reconstruct_t **ctx_out,
+                           const voleith_proof_t *proof,
+                           const voleith_params_t *params,
+                           const voleith_circuit_t *circuit,
+                           uint8_t *commitment_out)
+{
+    voleith_proof_header_t h;
+    voleith_proof_t body_view;
+
+    if (!ctx_out || !proof || !proof->data || !params || !circuit ||
+        !commitment_out)
+        return -1;
+
+    if (voleith_proof_header_parse(&h, proof->data, proof->len) != 0)
+        return -1;
+    if (voleith_proof_header_check_identity(&h, circuit, params) != 0)
+        return -1;
+
+    memcpy(commitment_out, proof->data, VOLEITH_PROOF_HEADER_BYTES);
+
+    body_view.data = proof->data + VOLEITH_PROOF_HEADER_BYTES;
+    body_view.len = proof->len - VOLEITH_PROOF_HEADER_BYTES;
+
+    return verify_reconstruct_body(ctx_out, &body_view, params, circuit,
+                                   commitment_out + VOLEITH_PROOF_HEADER_BYTES);
 }
 
 int
@@ -749,8 +971,16 @@ voleith_prove(voleith_proof_t *proof, const voleith_params_t *params,
         return -1;
     }
 
-    /* Standard chall_1 derivation: H_2^1(fs_seed || instance || hcom || c || iv)
-     * blob = hcom || c || iv, so one absorb is equivalent to three separate absorbs. */
+    /*
+     * chall_1 = H_2^1(fs_seed ‖ instance ‖ blob).
+     *
+     * blob = header ‖ hcom ‖ c ‖ iv (the v1 blob layout written by
+     * voleith_prove_commit).  The header bytes ride along inside the
+     * blob, so absorbing the blob binds the proof to the variant
+     * choice and circuit / params identity carried in the header
+     * without needing a separate absorb call here.  This is the same
+     * format used by two-phase shared-transcript callers.
+     */
     uint8_t chall_1[5 * 32 + 8];
     {
         voleith_transcript_t t;
@@ -788,19 +1018,56 @@ voleith_verify(const voleith_proof_t *proof, const voleith_params_t *params,
     size_t instance_bytes = (n_instance + 7) / 8;
     const uint8_t *inst = instance ? instance : (const uint8_t *)"";
 
-    size_t blob_size = voleith_commit_blob_size(params, circuit);
-    uint8_t *blob = malloc(blob_size);
-    if (!blob)
-        return -1;
+    /*
+     * Full-parse-as-dispatch.  v1 path uses the public
+     * verify_reconstruct (which validates the header and writes it
+     * verbatim to the front of the blob).  Legacy path goes through
+     * verify_reconstruct_body directly with a smaller, header-less
+     * blob.  Either way the downstream chall_1 derivation absorbs
+     * blob verbatim, so the absorbed bytes match what the
+     * corresponding prover produced.
+     */
+    voleith_proof_header_t h_unused;
+    int has_header =
+        (voleith_proof_header_parse(&h_unused, proof->data, proof->len) == 0);
 
+    size_t blob_size;
+    uint8_t *blob;
     voleith_verifier_reconstruct_t *ctx = NULL;
-    if (voleith_verify_reconstruct(&ctx, proof, params, circuit, blob) != 0) {
+    int rec_rc;
+
+    if (has_header) {
+        blob_size = voleith_commit_blob_size(params, circuit);
+        blob = malloc(blob_size);
+        if (!blob)
+            return -1;
+        rec_rc = voleith_verify_reconstruct(&ctx, proof, params, circuit, blob);
+    } else {
+#ifdef VOLEITH_LEGACY_VERIFY
+        /* Legacy blob: hcom_rec || c || iv, no header prefix. */
+        size_t ellhat = voleith_qs_ellhat(circuit, lambda);
+        size_t ellhat_bytes = (ellhat + 7) / 8;
+        blob_size =
+            2u * nb + (params->tau - 1u) * ellhat_bytes + (size_t)IV_SIZE;
+        blob = malloc(blob_size);
+        if (!blob)
+            return -1;
+        rec_rc = verify_reconstruct_body(&ctx, proof, params, circuit, blob);
+#else
+        return -1;
+#endif
+    }
+
+    if (rec_rc != 0) {
         free(blob);
         return -1;
     }
 
-    /* Standard chall_1 derivation: H_2^1(fs_seed || instance || hcom || c || iv)
-     * blob = hcom_rec || c || iv. */
+    /*
+     * chall_1 = H_2^1(fs_seed ‖ instance ‖ blob).  For v1 the blob
+     * starts with the metadata header; for legacy the blob is the
+     * pre-header format.  Either way absorption matches the prover.
+     */
     uint8_t chall_1[5 * 32 + 8];
     {
         voleith_transcript_t t;
@@ -817,6 +1084,65 @@ voleith_verify(const voleith_proof_t *proof, const voleith_params_t *params,
     int ret = voleith_verify_respond(ctx, circuit, instance, chall_1);
     voleith_verifier_reconstruct_free(ctx);
     return ret;
+}
+
+/* ================================================================
+ * Length-validated entry points (M-N3, 1.3.0)
+ * ================================================================ */
+
+size_t
+voleith_circuit_witness_byte_len(const voleith_circuit_t *circuit)
+{
+    if (circuit == NULL)
+        return 0;
+    return (voleith_circuit_witness_count(circuit) + 7u) / 8u;
+}
+
+size_t
+voleith_circuit_instance_byte_len(const voleith_circuit_t *circuit)
+{
+    if (circuit == NULL)
+        return 0;
+    return (voleith_circuit_instance_count(circuit) + 7u) / 8u;
+}
+
+int
+voleith_prove_v2(voleith_proof_t *proof, const voleith_params_t *params,
+                 const voleith_circuit_t *circuit, const uint8_t *witness,
+                 size_t witness_len, const uint8_t *instance,
+                 size_t instance_len, const uint8_t *fs_seed,
+                 size_t fs_seed_len)
+{
+    /*
+     * Validate lengths at the public boundary before any reads.
+     * voleith_prove rejects NULL params/circuit/witness/fs_seed itself;
+     * we duplicate the circuit check here because we dereference it
+     * for the byte-len helpers.
+     */
+    if (circuit == NULL)
+        return -1;
+    if (witness_len != voleith_circuit_witness_byte_len(circuit))
+        return -1;
+    if (instance_len != voleith_circuit_instance_byte_len(circuit))
+        return -1;
+
+    return voleith_prove(proof, params, circuit, witness, instance, fs_seed,
+                         fs_seed_len);
+}
+
+int
+voleith_verify_v2(const voleith_proof_t *proof, const voleith_params_t *params,
+                  const voleith_circuit_t *circuit, const uint8_t *instance,
+                  size_t instance_len, const uint8_t *fs_seed,
+                  size_t fs_seed_len)
+{
+    if (circuit == NULL)
+        return -1;
+    if (instance_len != voleith_circuit_instance_byte_len(circuit))
+        return -1;
+
+    return voleith_verify(proof, params, circuit, instance, fs_seed,
+                          fs_seed_len);
 }
 
 /* ================================================================

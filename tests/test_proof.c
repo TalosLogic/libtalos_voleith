@@ -15,6 +15,7 @@
  */
 
 #include "proof.h"
+#include "proof_header.h"
 #include "vole_hash.h"
 #include "prover.h"
 #include "circuit.h"
@@ -708,6 +709,214 @@ test_params_validate_at_api_boundary(void)
     voleith_circuit_free(c);
 }
 
+/* ================================================================
+ * Test: voleith_proof_inspect round-trip on a freshly-minted proof.
+ *
+ * Confirms the public inspection helper returns a header whose
+ * variant fields match the params used to mint, and whose fingerprint
+ * bytes match what voleith_proof_header_check_identity expects.
+ * ================================================================ */
+static void
+test_proof_inspect_roundtrip(void)
+{
+    printf("\n[proof inspect roundtrip]\n");
+
+    const voleith_params_t *params = &voleith_params_em_128f;
+    voleith_circuit_t *c = build_and_circuit();
+    if (!c) {
+        printf("  SKIP: circuit alloc failed\n");
+        return;
+    }
+
+    uint8_t witness[1] = {0x03};
+    uint8_t instance[1] = {0x01};
+    uint8_t fs_seed[16];
+    memset(fs_seed, 0xEE, sizeof(fs_seed));
+
+    voleith_proof_t proof;
+    memset(&proof, 0, sizeof(proof));
+    int pret = voleith_prove(&proof, params, c, witness, instance, fs_seed,
+                             sizeof(fs_seed));
+    if (pret != 0) {
+        printf("  SKIP: prove failed\n");
+        voleith_circuit_free(c);
+        return;
+    }
+
+    /* inspect with header_out: succeeds and populates fields. */
+    voleith_proof_header_t h;
+    CHECK(voleith_proof_inspect(&proof, &h) == 0,
+          "inspect: real v1 proof returns 0");
+    CHECK(h.magic[0] == VOLEITH_PROOF_MAGIC_0 &&
+              h.magic[1] == VOLEITH_PROOF_MAGIC_1 &&
+              h.magic[2] == VOLEITH_PROOF_MAGIC_2 &&
+              h.magic[3] == VOLEITH_PROOF_MAGIC_3,
+          "inspect: magic bytes correct");
+    CHECK(h.format_version == VOLEITH_PROOF_FORMAT_VERSION,
+          "inspect: format_version == 0x01");
+    CHECK(h.fs_kind == VOLEITH_FS_SHAKE, "inspect: fs_kind reads as SHAKE");
+    CHECK(h.bavc_kind == VOLEITH_BAVC_STANDARD,
+          "inspect: bavc_kind reads as STANDARD");
+    CHECK(h.param_set_id == VOLEITH_PARAM_EM_128F,
+          "inspect: param_set_id reads as EM_128F");
+
+    /* NULL header_out: still succeeds. */
+    CHECK(voleith_proof_inspect(&proof, NULL) == 0,
+          "inspect: NULL header_out also returns 0 on real v1 proof");
+
+    /* The inspected header binds to the same (circuit, params) used to
+     * mint - confirms the fingerprints flow through correctly. */
+    CHECK(voleith_proof_header_check_identity(&h, c, params) == 0,
+          "inspect: returned header matches check_identity for "
+          "(mint circuit, mint params)");
+
+    voleith_proof_free(&proof);
+    voleith_circuit_free(c);
+}
+
+/* ================================================================
+ * Test: M-N3 length-validated entry points (voleith_prove_v2 /
+ * voleith_verify_v2).
+ *
+ * Confirms the new entry points succeed on matching lengths, mint
+ * proofs that voleith_verify_v2 verifies, and reject every length
+ * mismatch (witness too short / too long, instance too short / too
+ * long).
+ * ================================================================ */
+static void
+test_v2_length_validation(void)
+{
+    printf("\n[v2 length validation (M-N3)]\n");
+
+    const voleith_params_t *params = &voleith_params_em_128f;
+    voleith_circuit_t *c = build_and_circuit();
+    if (!c) {
+        printf("  SKIP: circuit alloc failed\n");
+        return;
+    }
+
+    /* build_and_circuit: 2 witness bits -> 1 byte; 1 instance bit -> 1 byte. */
+    size_t n_witness = voleith_circuit_witness_count(c);
+    size_t n_instance = voleith_circuit_instance_count(c);
+    size_t expected_w_bytes = (n_witness + 7) / 8;
+    size_t expected_i_bytes = (n_instance + 7) / 8;
+
+    uint8_t witness[1] = {0x03};
+    uint8_t instance[1] = {0x01};
+    uint8_t fs_seed[16];
+    memset(fs_seed, 0x5C, sizeof(fs_seed));
+
+    /* Happy path: correct lengths, prove + verify both succeed. */
+    voleith_proof_t proof;
+    memset(&proof, 0, sizeof(proof));
+    CHECK(voleith_prove_v2(&proof, params, c, witness, expected_w_bytes,
+                           instance, expected_i_bytes, fs_seed,
+                           sizeof(fs_seed)) == 0,
+          "prove_v2 with correct lengths succeeds");
+    CHECK(voleith_verify_v2(&proof, params, c, instance, expected_i_bytes,
+                            fs_seed, sizeof(fs_seed)) == 0,
+          "verify_v2 with correct length succeeds");
+
+    /* prove_v2 rejects wrong witness_len. */
+    voleith_proof_t bad_proof;
+    memset(&bad_proof, 0, sizeof(bad_proof));
+    CHECK(voleith_prove_v2(&bad_proof, params, c, witness, expected_w_bytes - 1,
+                           instance, expected_i_bytes, fs_seed,
+                           sizeof(fs_seed)) != 0,
+          "prove_v2 rejects witness_len too small");
+    CHECK(voleith_prove_v2(&bad_proof, params, c, witness, expected_w_bytes + 1,
+                           instance, expected_i_bytes, fs_seed,
+                           sizeof(fs_seed)) != 0,
+          "prove_v2 rejects witness_len too large");
+
+    /* prove_v2 rejects wrong instance_len. */
+    CHECK(voleith_prove_v2(&bad_proof, params, c, witness, expected_w_bytes,
+                           instance, expected_i_bytes + 1, fs_seed,
+                           sizeof(fs_seed)) != 0,
+          "prove_v2 rejects instance_len too large");
+
+    /* verify_v2 rejects wrong instance_len. */
+    CHECK(voleith_verify_v2(&proof, params, c, instance, expected_i_bytes + 1,
+                            fs_seed, sizeof(fs_seed)) != 0,
+          "verify_v2 rejects instance_len too large");
+    CHECK(voleith_verify_v2(&proof, params, c, instance, 0, fs_seed,
+                            sizeof(fs_seed)) != 0,
+          "verify_v2 rejects instance_len = 0 when n_instance > 0");
+
+    /* prove_v2 rejects NULL circuit. */
+    CHECK(voleith_prove_v2(&bad_proof, params, NULL, witness, 0, instance, 0,
+                           fs_seed, sizeof(fs_seed)) != 0,
+          "prove_v2 rejects NULL circuit");
+    CHECK(voleith_verify_v2(&proof, params, NULL, instance, 0, fs_seed,
+                            sizeof(fs_seed)) != 0,
+          "verify_v2 rejects NULL circuit");
+
+    voleith_proof_free(&proof);
+    voleith_circuit_free(c);
+}
+
+/* ================================================================
+ * Test: bit-level byte-len helpers.
+ *
+ * Verifies the formula `ceil(wire_count / 8)` is applied correctly
+ * across the bit-packing boundaries (1, 7, 8, 9 wires), zero-wire
+ * edge cases, and NULL.  These helpers underpin every _v2 call site,
+ * so documenting the contract directly avoids implicit regressions.
+ * ================================================================ */
+static void
+test_byte_len_helpers(void)
+{
+    printf("\n[byte-len helpers (bit-level)]\n");
+
+    /* NULL circuit returns 0 for both helpers. */
+    CHECK(voleith_circuit_witness_byte_len(NULL) == 0,
+          "witness_byte_len(NULL) == 0");
+    CHECK(voleith_circuit_instance_byte_len(NULL) == 0,
+          "instance_byte_len(NULL) == 0");
+
+    /* Empty circuit: 0 witness, 0 instance → both helpers return 0. */
+    {
+        voleith_circuit_t *c = voleith_circuit_new();
+        CHECK(voleith_circuit_witness_byte_len(c) == 0,
+              "0 witnesses → 0 bytes");
+        CHECK(voleith_circuit_instance_byte_len(c) == 0,
+              "0 instances → 0 bytes");
+        voleith_circuit_free(c);
+    }
+
+    /*
+     * Exercise the (n+7)/8 boundary at every relevant transition:
+     * 1, 7, 8, 9 wires → 1, 1, 1, 2 bytes.
+     */
+    {
+        struct {
+            int n;
+            size_t expected;
+        } cases[] = {{1, 1}, {7, 1}, {8, 1}, {9, 2}, {16, 2}, {17, 3}};
+        for (size_t k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+            voleith_circuit_t *c = voleith_circuit_new();
+            for (int i = 0; i < cases[k].n; i++)
+                (void)voleith_circuit_add_witness(c);
+            char msg[64];
+            snprintf(msg, sizeof(msg), "%d witness wires → %zu bytes",
+                     cases[k].n, cases[k].expected);
+            CHECK(voleith_circuit_witness_byte_len(c) == cases[k].expected,
+                  msg);
+            voleith_circuit_free(c);
+        }
+    }
+
+    /* Same boundary check on the instance side. */
+    {
+        voleith_circuit_t *c = voleith_circuit_new();
+        for (int i = 0; i < 9; i++)
+            (void)voleith_circuit_add_instance(c);
+        CHECK(voleith_circuit_instance_byte_len(c) == 2,
+              "9 instance wires → 2 bytes");
+        voleith_circuit_free(c);
+    }
+}
+
 int
 main(void)
 {
@@ -723,6 +932,9 @@ main(void)
     test_chain_circuit();
     test_params_validate();
     test_params_validate_at_api_boundary();
+    test_proof_inspect_roundtrip();
+    test_v2_length_validation();
+    test_byte_len_helpers();
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return (g_fail > 0) ? 1 : 0;

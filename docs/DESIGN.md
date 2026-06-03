@@ -204,6 +204,137 @@ The bit-level API does not currently expose the two-phase variant because the us
 
 ---
 
+## Proof Metadata Header
+
+Every serialized proof produced from 1.3.0 onward begins with a fixed 48-byte
+metadata header that binds the proof cryptographically to the variant choices,
+parameter set, circuit, and params struct it was minted under. The header is
+identical in shape across the bit-level and GF(2⁸) proof systems.
+
+### Layout
+
+```
+offset  size  field
+------  ----  -----
+   0     4    MAGIC          = 'T','L','O','S'
+   4     1    FORMAT_VERSION = 0x01
+   5     1    FS_KIND        VOLEITH_FS_SHAKE | VOLEITH_FS_GROSTL
+   6     1    BAVC_KIND      VOLEITH_BAVC_STANDARD | VOLEITH_BAVC_HALF_TREE
+   7     1    PARAM_SET_ID   VOLEITH_PARAM_EM_* (0..5)
+   8     2    FLAGS          must be 0
+  10     6    RESERVED       must be 0
+  16    16    CIRCUIT_FP     SHAKE-128 of canonical circuit bytes
+  32    16    PARAMS_FP      SHAKE-128 of canonical params bytes
+  48   ...    proof body (existing c | u_tilde | d | ... | iv | ctr layout)
+```
+
+The first 16 bytes are statically constrained: every legal value is known up
+front, giving the parser ~123 bits of disambiguation against random byte
+strings. The trailing 32 bytes are caller-constrained: their validity depends
+on a runtime comparison against fingerprints the verifier computes over its
+own circuit and params.
+
+### What the fingerprints bind
+
+- **`CIRCUIT_FP`** = `SHAKE-128(canonical_circuit_bytes)` truncated to 16
+  bytes. The canonical serialization writes wire kinds, operand wire-ids, and
+  constraint operands in declaration order under a versioned domain tag
+  (`voleith-circuit-cf-v1` for bit-level, `voleith-gf8-circuit-cf-v1` for the
+  GF(2⁸) variant). Reordering wires, swapping operands, or changing a
+  constant changes the fingerprint.
+
+- **`PARAMS_FP`** = `SHAKE-128(canonical_params_bytes)` truncated to 16 bytes,
+  domain tag `voleith-params-cf-v1`. Covers `lambda`, `tau`, `w_grind`,
+  `n_leafcom`, `T_open`, plus `fs_kind`, `bavc_kind`, and a 6-byte
+  zero-padded reserved region.
+
+Both fingerprints are deterministic and order-sensitive: the same logical
+circuit built in a different declaration order produces a different
+fingerprint, by design. This forces an exact-structural match between the
+prover's and verifier's circuits, not a semantic-equivalence-class match.
+
+### How the header enters the transcript
+
+The 48 header bytes are prepended to the commitment blob the
+prover/verifier both produce:
+
+```
+blob = header || hcom || c || iv     (was: hcom || c || iv)
+```
+
+The Fiat-Shamir derivation absorbs the blob:
+
+```
+chall_1 = H_2^1(fs_seed ‖ instance ‖ blob)
+```
+
+so absorbing the blob automatically incorporates the header. Any change to a
+header byte (variant downgrade, swapped param-set-id, tampered fingerprint)
+propagates through `chall_1`, then `chall_2`, then `chall_3`, and the final
+`chall_3` equality check fails. No caller-side header awareness is required,
+which is what makes the two-phase shared-transcript API work without test
+changes.
+
+### Verifier dispatch and identity check
+
+`voleith_verify` and `voleith_gf8_verify` dispatch statically on the leading
+48 bytes:
+
+1. If they parse as a well-formed v1 header (magic match, valid version,
+   valid enums, zero reserved/flags), the verifier runs
+   `voleith_proof_header_check_identity[_gf8]`: re-computes
+   `CIRCUIT_FP` and `PARAMS_FP` over its own circuit and params and compares
+   constant-time against the header. Mismatch returns -1 *before any
+   crypto runs*, eliminating wasted work on cross-circuit / cross-params
+   attacks.
+2. Otherwise (parse fails) the proof is treated as a pre-v1 legacy proof and
+   verified via a body-only fallback path. The fallback is gated by the
+   `VOLEITH_LEGACY_VERIFY` CMake option (default `ON`); when `OFF`,
+   non-v1 proofs are rejected immediately.
+
+Both paths share the same body-reconstruction code; only the blob layout and
+header absorption differ. Accidental dispatch (random legacy bytes parsing
+as a v1 header) is ~2⁻¹²³, well below the construction's 128-bit floor.
+
+### `voleith_proof_inspect`
+
+Callers that need to route a proof to the right verifier configuration
+(picking a `voleith_params_t` based on `param_set_id`, or rejecting variants
+the build doesn't support) can use the public inspection helper:
+
+```c
+voleith_proof_header_t h;
+if (voleith_proof_inspect(&proof, &h) == 0) {
+    /* v1 proof: h.fs_kind, h.bavc_kind, h.param_set_id all readable */
+} else {
+    /* legacy or malformed - route accordingly */
+}
+```
+
+Passing `NULL` for `header_out` does a validate-only check, useful as a
+fast "is this v1?" detector.
+
+### Variant identifier reserved space
+
+`FS_KIND`, `BAVC_KIND`, and `PARAM_SET_ID` each carry single-byte enum
+values. Currently only `(SHAKE, STANDARD)` is supported across the six
+param sets; `GROSTL` (1) and `HALF_TREE` (1) reserve namespace for future
+backends, namely the Grøstl Fiat-Shamir transform and the half-tree BAVC
+construction. The verifier currently rejects out-of-range values via
+`voleith_params_validate`; full dispatch will be wired when those backends
+land.
+
+### Length-validated entry points
+
+Alongside the header, 1.3.0 introduces `voleith_prove_v2` /
+`voleith_verify_v2` (and the GF(2⁸) equivalents) which take explicit
+`witness_len` and `instance_len` parameters and reject mismatches at the
+public API boundary before any reads. The original entry points are
+preserved for source-compatibility and documented as deprecated for
+removal in 2.0.0. New code should prefer the `_v2` forms.
+
+---
+
 ## Parameter Sets
 
 Six parameter sets are provided. They use the FAEST-EM leaf-commitment
@@ -211,17 +342,19 @@ parameter line (`n_leafcom = 2`); see "What 'EM' refers to" below.
 
 | Parameter | λ | τ | Leaves/instance | w_grind | T_open | Proof size¹ |
 |-----------|---|---|-----------------|---------|--------|-------------|
-| `em_128f` | 128 | 16 | 128-256 | 8 | 112 | 6,596 B |
-| `em_128s` | 128 | 11 | 2,048 | 7 | 103 | 4,962 B |
-| `em_192f` | 192 | 24 | 128-256 | 8 | 176 | 12,380 B |
-| `em_192s` | 192 | 16 | 2,048-4,096 | 8 | 162 | 9,340 B |
-| `em_256f` | 256 | 32 | 128-256 | 8 | 234 | 19,636 B |
-| `em_256s` | 256 | 22 | 2,048-4,096 | 6 | 218 | 15,344 B |
+| `em_128f` | 128 | 16 | 128-256 | 8 | 112 | 6,644 B |
+| `em_128s` | 128 | 11 | 2,048 | 7 | 103 | 5,010 B |
+| `em_192f` | 192 | 24 | 128-256 | 8 | 176 | 12,428 B |
+| `em_192s` | 192 | 16 | 2,048-4,096 | 8 | 162 | 9,388 B |
+| `em_256f` | 256 | 32 | 128-256 | 8 | 234 | 19,684 B |
+| `em_256s` | 256 | 22 | 2,048-4,096 | 6 | 218 | 15,392 B |
 
 ¹ GF(2⁸) AES-128 circuit (ℓ = 216 elements: 16 key bytes + 200 S-box
-inverses), computed from `voleith_gf8_proof_byte_size`. The `em_128f` row is
-cross-checked against the measured proof. The bit-level GF(2) variant of the
-same circuit is ~2.7× larger (`em_128f`: 17,796 B) because each S-box costs
+inverses), computed from `voleith_gf8_proof_byte_size`, which includes the
+48-byte v1 metadata header at the start of every proof (see "Proof Metadata
+Header" above). The `em_128f` row is cross-checked against the measured
+proof. The bit-level GF(2) variant of the same circuit is ~2.7× larger
+(`em_128f`: 17,844 B) because each S-box costs
 36 AND-gate slots instead of a single mul slot.
 
 The τ, w_grind, and T_open values are the parameter-set definitions in
@@ -230,6 +363,37 @@ implementation. Leaves/instance is the per-instance GGM leaf count from
 `voleith_vc_N`: each vector commitment splits into τ₁ instances of 2^k leaves
 and τ₀ of 2^(k-1) (FAEST spec Table 5.1), so the count is a range, not a
 single power of two.
+
+### Constructing a params struct
+
+The recommended forward API is `voleith_params_build`:
+
+```c
+voleith_params_t p = voleith_params_build(VOLEITH_PARAM_EM_128F,
+                                          VOLEITH_FS_SHAKE,
+                                          VOLEITH_BAVC_STANDARD);
+```
+
+The three enum arguments select the named parameter set (table above),
+the Fiat-Shamir transform, and the BAVC construction. The returned struct
+has `lambda`, `tau`, `w_grind`, `T_open`, and `n_leafcom` drawn from the
+named set, plus the `fs_kind` and `bavc_kind` fields added in 1.3.0 set
+to the caller's choices. Both new fields are covered by the params
+fingerprint, so two params structs that differ only in `fs_kind` or
+`bavc_kind` produce different `PARAMS_FP` values and therefore
+non-interoperable proofs.
+
+Currently only `(VOLEITH_FS_SHAKE, VOLEITH_BAVC_STANDARD)` is supported.
+`VOLEITH_FS_GROSTL` and `VOLEITH_BAVC_HALF_TREE` reserve namespace for
+future backends and are rejected by `voleith_params_validate` until
+those backends land.
+
+The existing `voleith_params_em_128f`, `voleith_params_em_128s`, etc.
+named symbols continue to work for source compatibility. Each is now an
+explicit-init copy of `voleith_params_build(set, VOLEITH_FS_SHAKE,
+VOLEITH_BAVC_STANDARD)` for the corresponding set. New code should
+prefer `voleith_params_build` since the variant choices are visible at
+the call site rather than implicit in the named symbol.
 
 ### What "EM" refers to
 

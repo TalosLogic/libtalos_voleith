@@ -64,6 +64,14 @@ void voleith_shake128_squeeze(voleith_hash_ctx_t *ctx, uint8_t *out,
                               size_t len);
 
 /*
+ * Absorb a 32-bit value into a SHAKE-128 context as four little-endian
+ * bytes.  Convenience wrapper used by canonical serialization paths
+ * (proof header fingerprints, etc.) where every length / operand /
+ * counter is encoded in u32_le and absorbed individually.
+ */
+void voleith_shake128_absorb_u32_le(voleith_hash_ctx_t *ctx, uint32_t v);
+
+/*
  * SHAKE-256: incremental interface
  *
  * Same usage pattern as SHAKE-128.

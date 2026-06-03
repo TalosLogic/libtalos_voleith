@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 cmake_minimum_required(VERSION 3.16)
-project(libvoleith VERSION 1.2.0 LANGUAGES C)
+project(libvoleith VERSION 1.3.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -17,6 +17,19 @@ option(VOLEITH_BUILD_TESTS "Build test suite" ON)
 option(VOLEITH_BUILD_EXAMPLES "Build example programs" ON)
 option(VOLEITH_BUILD_SHARED "Build shared library (libvoleith.so/.dylib) in addition to static" OFF)
 option(VOLEITH_BUILD_DUDECT "Build dudect timing-validation harness (tools/dudect)" OFF)
+option(VOLEITH_BUILD_BENCH "Build FS-hash microbenchmarks (tools/bench_fs_hash)" OFF)
+option(VOLEITH_LEGACY_VERIFY "Accept pre-header proofs in voleith_verify (legacy fallback)" ON)
+
+# Propagate VOLEITH_LEGACY_VERIFY as a compile definition for every
+# target defined below.  The macro gates the dual-path verifier
+# fallback in proof/proof.c and proof/gf8_proof.c.  See
+# docs/PROOF_METADATA_HEADER_DESIGN.md.
+if(VOLEITH_LEGACY_VERIFY)
+    add_compile_definitions(VOLEITH_LEGACY_VERIFY=1)
+    message(STATUS "voleith: legacy (pre-header) proof verification = ENABLED")
+else()
+    message(STATUS "voleith: legacy (pre-header) proof verification = DISABLED")
+endif()
 
 # Report which AES backend will be active.  Done after the AES-NI
 # detection probe (below) populates HAVE_AES_NI, so the report
@@ -169,6 +182,10 @@ set(VOLEITH_CORE_SOURCES
     proof/gf8_prover.c
     proof/gf8_verifier.c
     proof/fiat_shamir.c
+    proof/proof_header.c
+    proof/circuit_fingerprint.c
+    proof/gf8_circuit_fingerprint.c
+    proof/params_fingerprint.c
     proof/vole_hash.c
     proof/proof.c
     proof/gf8_proof.c
@@ -341,4 +358,8 @@ endif()
 
 if(VOLEITH_BUILD_DUDECT)
     add_subdirectory(tools/dudect)
+endif()
+
+if(VOLEITH_BUILD_BENCH)
+    add_subdirectory(tools/bench_fs_hash)
 endif()

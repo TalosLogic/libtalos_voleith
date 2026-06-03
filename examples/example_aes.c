@@ -106,10 +106,12 @@ main(void)
     /* 3. Prove                                                             */
     /* ------------------------------------------------------------------ */
     voleith_proof_t proof = {0};
-    int rc = voleith_prove(&proof, params, c, witness, instance, FS_SEED,
-                           sizeof(FS_SEED) - 1);
+    int rc = voleith_prove_v2(&proof, params, c, witness,
+                              voleith_circuit_witness_byte_len(c), instance,
+                              voleith_circuit_instance_byte_len(c), FS_SEED,
+                              sizeof(FS_SEED) - 1);
     if (rc != 0) {
-        fprintf(stderr, "voleith_prove failed\n");
+        fprintf(stderr, "voleith_prove_v2 failed\n");
         voleith_circuit_free(c);
         return 1;
     }
@@ -118,8 +120,9 @@ main(void)
     /* ------------------------------------------------------------------ */
     /* 4. Verify                                                            */
     /* ------------------------------------------------------------------ */
-    rc = voleith_verify(&proof, params, c, instance, FS_SEED,
-                        sizeof(FS_SEED) - 1);
+    rc = voleith_verify_v2(&proof, params, c, instance,
+                           voleith_circuit_instance_byte_len(c), FS_SEED,
+                           sizeof(FS_SEED) - 1);
     if (rc == 0) {
         printf("Verification: PASS\n");
     } else {

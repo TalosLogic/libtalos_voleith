@@ -124,14 +124,15 @@
 /* Library version */
 #ifndef VOLEITH_VERSION_MAJOR
 #define VOLEITH_VERSION_MAJOR 1
-#define VOLEITH_VERSION_MINOR 2
+#define VOLEITH_VERSION_MINOR 3
 #define VOLEITH_VERSION_PATCH 0
-#define VOLEITH_VERSION_STRING "1.2.0"
+#define VOLEITH_VERSION_STRING "1.3.0"
 #endif
 
 /* GF(2⁸) proof system: circuit builder and prove/verify API */
 #include "gf8_circuit.h"
 #include "gf8_proof.h"
+#include "proof_header.h"
 
 /* Circuit building blocks */
 #include "aes_gf8_circuit.h"

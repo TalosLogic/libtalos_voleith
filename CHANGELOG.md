@@ -5,6 +5,70 @@ All notable changes to libtalos_voleith are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] 2026-06-03
+
+Adds a 48-byte v1 metadata header at the start of every proof, binding
+each proof to the variant choice (FS backend, BAVC construction, param
+set) and to the specific circuit and params via two 16-byte SHAKE-128
+fingerprints.  The header is mixed into the Fiat-Shamir transcript so
+any tampering breaks the final chall_3 check.  Pre-header proofs are
+still accepted via a compile-time-gated legacy fallback in the
+verifier.  Resolves the circuit/params identity-binding half of the
+security review.
+
+See `docs/PROOF_METADATA_HEADER_DESIGN.md` for the full specification.
+
+### Added
+
+- `proof/proof_header.{c,h}`: 48-byte header (4-byte `"TLOS"` magic +
+  version + fs_kind + bavc_kind + param_set_id + flags + reserved +
+  16-byte circuit_fp + 16-byte params_fp).  Parse, serialize
+  (size-query API), and constant-time identity check.
+- `proof/circuit_fingerprint.{c,h}` and
+  `proof/gf8_circuit_fingerprint.{c,h}`: canonical SHAKE-128
+  fingerprint over the bit-level and GF(2⁸) circuit structures.
+  Domain tags `voleith-{,gf8-}circuit-cf-v1` pin the encoding.
+- `proof/params_fingerprint.{c,h}`: canonical SHAKE-128 fingerprint
+  over `voleith_params_t` (domain tag `voleith-params-cf-v1`).
+- `voleith_params_build(set, fs, bavc)`: unified params constructor;
+  the existing `voleith_params_em_*` named symbols are explicit-init
+  copies of the corresponding `(set, SHAKE, STANDARD)` row.
+- `voleith_proof_inspect(proof, header_out)`: public helper for
+  routing proofs to the right verifier configuration before
+  invocation.  Supports `header_out == NULL` for a fast "is this v1?"
+  check.
+- `VOLEITH_LEGACY_VERIFY` CMake option (default `ON`): gates the
+  legacy fallback verifier.  Disabling shrinks attack surface for
+  deployments that have re-minted all proofs.
+- `voleith_fs_kind_t`, `voleith_bavc_kind_t`, `voleith_param_set_id_t`
+  enums (currently `SHAKE`/`STANDARD` only; `GROSTL` and `HALF_TREE`
+  reserved for future backend work).
+- `voleith_shake128_absorb_u32_le`: small SHAKE absorb helper used by
+  the canonical serializers.
+- `tests/test_legacy_verify.c`: header-strip, fingerprint-corruption,
+  and fixed-prefix tampering coverage of the dual-path verifier.
+- `voleith_{,gf8_}prove_v2` and `voleith_{,gf8_}verify_v2`:
+  length-validated entry points that reject `witness_len` /
+  `instance_len` mismatches at the public API boundary. Existing
+  entry points stay source-compatible and are documented as
+  deprecated for removal in 2.0.0.
+
+### Changed
+
+- Proof wire format adds 48 bytes at the start of every proof; the
+  body layout is unchanged.  `voleith_proof_byte_size` and
+  `voleith_gf8_proof_byte_size` reflect the new total.
+- `voleith_{,gf8_}commit_blob_size` grows by 48 bytes; the
+  commitment blob is now `header ‖ hcom ‖ c ‖ iv` so a caller-driven
+  `chall_1` absorption naturally binds the header without
+  header-specific code in the caller (shared-transcript / two-phase
+  consumers gain the binding for free).
+- `voleith_params_t` gains `fs_kind` and `bavc_kind` fields;
+  `voleith_params_validate` range-checks them.
+- `voleith_{,gf8_}verify` now dispatches statically: leading 48 bytes
+  parse as v1 header → v1 path with identity check; otherwise → legacy
+  path (when `VOLEITH_LEGACY_VERIFY=ON`) or rejection.
+
 ## [1.2.0] 2026-06-01
 
 Adds Hirose-AES-256 as a hash primitive and GF(2⁸) circuit, the

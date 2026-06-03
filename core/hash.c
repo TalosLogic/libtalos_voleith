@@ -262,6 +262,18 @@ voleith_shake128_absorb(voleith_hash_ctx_t *ctx, const uint8_t *data,
 }
 
 void
+voleith_shake128_absorb_u32_le(voleith_hash_ctx_t *ctx, uint32_t v)
+{
+    uint8_t buf[4];
+
+    buf[0] = (uint8_t)(v & 0xff);
+    buf[1] = (uint8_t)((v >> 8) & 0xff);
+    buf[2] = (uint8_t)((v >> 16) & 0xff);
+    buf[3] = (uint8_t)((v >> 24) & 0xff);
+    sponge_absorb(ctx, buf, sizeof(buf));
+}
+
+void
 voleith_shake128_squeeze(voleith_hash_ctx_t *ctx, uint8_t *out, size_t len)
 {
     sponge_squeeze(ctx, out, len);

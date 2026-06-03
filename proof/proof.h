@@ -46,13 +46,49 @@
 #include "circuit.h"
 
 /* ================================================================
+ * Variant identifiers
+ *
+ * These enums describe the public variant choices that may be
+ * persisted in a proof's metadata header.  They live in proof.h so
+ * the params struct below can carry them directly without dragging
+ * the proof_header.h dependency back through every translation unit.
+ * The proof_header.h symbols of the same names are re-exported from
+ * here.
+ * ================================================================ */
+
+typedef enum {
+    VOLEITH_FS_SHAKE = 0, /* default; FAEST v2.0 spec-conformant */
+    VOLEITH_FS_GROSTL =
+        1, /* Grostl-256 / Grostl-512 (FS_TRANSFORM_SWITCHING_DESIGN.md) */
+} voleith_fs_kind_t;
+
+typedef enum {
+    VOLEITH_BAVC_STANDARD = 0,  /* default; FAEST v2.0 GGM tree */
+    VOLEITH_BAVC_HALF_TREE = 1, /* correlated GGM (HALF_TREE_IMPL_PLAN.md) */
+} voleith_bavc_kind_t;
+
+typedef enum {
+    VOLEITH_PARAM_EM_128F = 0,
+    VOLEITH_PARAM_EM_128S = 1,
+    VOLEITH_PARAM_EM_192F = 2,
+    VOLEITH_PARAM_EM_192S = 3,
+    VOLEITH_PARAM_EM_256F = 4,
+    VOLEITH_PARAM_EM_256S = 5,
+} voleith_param_set_id_t;
+
+/* ================================================================
  * Parameter sets
  * ================================================================ */
 
 /*
  * VOLEitH parameter set.
  *
- * All fields are derived from the FAEST v2.0 spec (meson.build).
+ * Numeric fields are derived from the FAEST v2.0 spec (meson.build);
+ * fs_kind and bavc_kind select the Fiat-Shamir backend and BAVC
+ * construction respectively.  The two new fields default to
+ * VOLEITH_FS_SHAKE / VOLEITH_BAVC_STANDARD (both value 0), so any
+ * pre-existing positional initializer that omits them remains
+ * spec-conformant - though new code should set them explicitly.
  */
 typedef struct {
     unsigned int lambda; /* security parameter: 128, 192, or 256 */
@@ -62,6 +98,8 @@ typedef struct {
     unsigned int T_open; /* max revealed seeds in BAVC opening */
     unsigned int
         n_leafcom; /* lambda-bit blocks per leaf commitment (2=EM, 3=FAEST) */
+    voleith_fs_kind_t fs_kind;     /* Fiat-Shamir backend */
+    voleith_bavc_kind_t bavc_kind; /* BAVC construction */
 } voleith_params_t;
 
 /* FAEST-EM-128s: λ=128, τ=11, w_grind=7, T_open=103, n_leafcom=2 */
@@ -81,6 +119,27 @@ extern const voleith_params_t voleith_params_em_256s;
 
 /* FAEST-EM-256f: λ=256, τ=32, w_grind=8, T_open=234, n_leafcom=2 */
 extern const voleith_params_t voleith_params_em_256f;
+
+/*
+ * Construct a voleith_params_t from variant choices.
+ *
+ * set:  named parameter set (see voleith_param_set_id_t).
+ * fs:   Fiat-Shamir backend selection.
+ * bavc: BAVC construction selection.
+ *
+ * Returns a fully-populated params struct by value.  The returned
+ * struct has fs_kind and bavc_kind set to the caller's choices and
+ * lambda/tau/w_grind/T_open/n_leafcom drawn from the named set.
+ *
+ * On an out-of-range `set`, the returned struct is zero-initialized
+ * (lambda == 0) and should be rejected by voleith_params_validate.
+ * Cross-field validity (e.g. lambda=192 with fs=GROSTL, currently
+ * deferred) is not enforced here; downstream code that does not
+ * support a combination is responsible for rejecting it.
+ */
+voleith_params_t voleith_params_build(voleith_param_set_id_t set,
+                                      voleith_fs_kind_t fs,
+                                      voleith_bavc_kind_t bavc);
 
 /*
  * Validate a voleith_params_t at the public API boundary.
@@ -177,6 +236,52 @@ int voleith_prove(voleith_proof_t *proof, const voleith_params_t *params,
                   size_t fs_seed_len);
 
 /*
+ * Expected byte length of the witness / instance buffer for the
+ * bit-level prove/verify API.  Witness and instance bits are
+ * bit-packed LSB-first per byte, so the buffer size is
+ * ceil(wire_count / 8).
+ *
+ * Use these to feed the _v2 entry points without duplicating the
+ * encoding math at every call site:
+ *
+ *     voleith_prove_v2(&p, params, c, witness,
+ *                      voleith_circuit_witness_byte_len(c),
+ *                      instance,
+ *                      voleith_circuit_instance_byte_len(c),
+ *                      fs_seed, fs_seed_len);
+ *
+ * Returns 0 if circuit is NULL (no read of the witness/instance
+ * buffer is safe in that case anyway; voleith_prove_v2 will reject).
+ */
+size_t voleith_circuit_witness_byte_len(const voleith_circuit_t *circuit);
+size_t voleith_circuit_instance_byte_len(const voleith_circuit_t *circuit);
+
+/*
+ * Length-validated prove (M-N3, 1.3.0).
+ *
+ * Same protocol as voleith_prove, but accepts explicit byte lengths for
+ * witness and instance.  Rejects mismatches at the public API boundary
+ * before any reads, eliminating the OOB-read concern on caller miscount.
+ *
+ * Use voleith_circuit_witness_byte_len() and
+ * voleith_circuit_instance_byte_len() to compute the expected lengths
+ * from the circuit:
+ *   witness_len  == voleith_circuit_witness_byte_len(circuit)
+ *   instance_len == voleith_circuit_instance_byte_len(circuit)
+ *
+ * `voleith_prove` is preserved for source-compatibility and will be
+ * removed in 2.0.0; new code should use voleith_prove_v2.
+ *
+ * Returns 0 on success, -1 on length mismatch or any condition that
+ * would cause voleith_prove to fail.
+ */
+int voleith_prove_v2(voleith_proof_t *proof, const voleith_params_t *params,
+                     const voleith_circuit_t *circuit, const uint8_t *witness,
+                     size_t witness_len, const uint8_t *instance,
+                     size_t instance_len, const uint8_t *fs_seed,
+                     size_t fs_seed_len);
+
+/*
  * Verify a non-interactive proof.
  *
  * params:      parameter set (must match the one used to prove)
@@ -195,6 +300,22 @@ int voleith_prove(voleith_proof_t *proof, const voleith_params_t *params,
 int voleith_verify(const voleith_proof_t *proof, const voleith_params_t *params,
                    const voleith_circuit_t *circuit, const uint8_t *instance,
                    const uint8_t *fs_seed, size_t fs_seed_len);
+
+/*
+ * Length-validated verify (M-N3, 1.3.0).  See voleith_prove_v2 above
+ * for the rationale and the deprecation timeline of voleith_verify.
+ *
+ * Required:
+ *   instance_len == voleith_circuit_instance_byte_len(circuit)
+ *
+ * Returns 0 if the proof is valid, -1 on length mismatch or any
+ * condition that would cause voleith_verify to reject.
+ */
+int voleith_verify_v2(const voleith_proof_t *proof,
+                      const voleith_params_t *params,
+                      const voleith_circuit_t *circuit, const uint8_t *instance,
+                      size_t instance_len, const uint8_t *fs_seed,
+                      size_t fs_seed_len);
 
 /*
  * Free all heap memory in a proof.

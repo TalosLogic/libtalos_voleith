@@ -536,12 +536,14 @@ main(void)
 
     voleith_proof_t proof = {0};
     t0 = now_ms();
-    int rc = voleith_gf8_prove(&proof, params, c, witness, instance, FS_SEED,
-                               sizeof(FS_SEED) - 1);
+    int rc = voleith_gf8_prove_v2(
+        &proof, params, c, witness, voleith_gf8_circuit_witness_byte_len(c),
+        instance, voleith_gf8_circuit_instance_byte_len(c), FS_SEED,
+        sizeof(FS_SEED) - 1);
     double t_prove = now_ms() - t0;
     free(witness);
     if (rc != 0) {
-        fprintf(stderr, "voleith_gf8_prove failed\n");
+        fprintf(stderr, "voleith_gf8_prove_v2 failed\n");
         free(instance);
         voleith_gf8_circuit_free(c);
         return 1;
@@ -549,8 +551,9 @@ main(void)
     printf("PQ proof generated: %zu bytes in %.1f ms\n", proof.len, t_prove);
 
     t0 = now_ms();
-    rc = voleith_gf8_verify(&proof, params, c, instance, FS_SEED,
-                            sizeof(FS_SEED) - 1);
+    rc = voleith_gf8_verify_v2(&proof, params, c, instance,
+                               voleith_gf8_circuit_instance_byte_len(c),
+                               FS_SEED, sizeof(FS_SEED) - 1);
     double t_verify = now_ms() - t0;
     printf("PQ proof verification: %s (%.1f ms)\n", (rc == 0) ? "PASS" : "FAIL",
            t_verify);
