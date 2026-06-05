@@ -163,12 +163,16 @@ for further composition.
 | Merkle path (any hash, hash-agnostic) | `merkle_vt_gf8_path_circuit` (+ `_secret_dir`) | Generic body parameterised by `voleith_node_hash_vt`; ships with vts for AES-DM, AES-128-CMAC, the four Grøstl variants, and Hirose-AES-256. |
 | Indexed Merkle non-membership | `indexed_merkle_circuit` / `indexed_merkle_gf8_nonmember_circuit` / `indexed_merkle_grostl_gf8_nonmember_circuit` | DM/CMAC or Grøstl-node; public-dir and secret-dir. |
 | Indexed Merkle non-membership (any hash, hash-agnostic) | `merkle_vt_gf8_indexed_nonmember_circuit` (+ `_secret_dir`) | Same vt coverage as the generic Merkle path. |
+| Ring signatures (RSv1) | `voleith_rsv1_sign` / `_verify`, `voleith_rs_membership_build_circuit`, `voleith_ring_sig_pack` / `_unpack` | Anonymous-member signature over a published ring with optional revocation.  Parameterised over any `voleith_node_hash_vt`; composes the OWF leaf hash, the secret-dir Merkle path, and the secret-dir indexed-Merkle non-member branch into one circuit. |
 
 For each building block, see [`docs/DESIGN.md`](docs/DESIGN.md): concrete
 AND-gate / mul-slot cost formulas, the public-dir-vs-secret-dir choice,
 the Grøstl `_T27` / `_T59` truncation rationale, the Hirose-AES-256
 construction, the `voleith_node_hash_vt` interface, the indexed-Merkle
-non-membership trust assumption, and worked gate-count examples.
+non-membership trust assumption (and the record-array validator that
+catches the common operational foot-guns), the RSv1 protocol and
+Fiat-Shamir message-binding construction, and worked gate-count
+examples.
 
 Each building block has at least one runnable example in `examples/` (see
 the Examples table below).

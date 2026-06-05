@@ -426,6 +426,155 @@ run_case(const equiv_case_t *cs, int secret_dir)
     voleith_gf8_circuit_free(cB);
 }
 
+/* ================================================================
+ * T1 equivalence: merkle_vt_gf8_path_from_leaf_node_secret_dir.
+ *
+ * Compare two constructions of the same secret-dir Merkle path:
+ *
+ *   A: merkle_vt_gf8_path_circuit_secret_dir(leaf_data, ...)
+ *      - leaf_circuit emitted inside the entry point.
+ *   B: vt->leaf_circuit(leaf_data) -> leaf_node;
+ *      merkle_vt_gf8_path_from_leaf_node_secret_dir(leaf_node, ...)
+ *      - leaf_circuit emitted by the caller, then inode walk only.
+ *
+ * Same wire-declaration order, same witness layout, same gate stream.
+ * Counts (witness, mul, assert_product, constraint) match exactly, the
+ * same witness satisfies both, and the root wires agree byte-for-byte
+ * with each other and the software-computed root.
+ *
+ * Booleanity check: flip a dir wire byte to 0x02 and assert both
+ * circuits reject (each runs an assert_product(dir,dir,dir) at every
+ * level via the shared static helper).
+ * ================================================================ */
+
+static void
+run_case_leaf_node(const equiv_case_t *cs)
+{
+    size_t W = cs->vt->node_bytes;
+    size_t depth = DEPTH;
+    size_t target = 5;
+
+    printf("  %-15s leaf-node-secret-dir\n", cs->name);
+
+    uint8_t leaves[N_LEAVES][LEAF_DATA_BYTES];
+    for (size_t i = 0; i < N_LEAVES; i++)
+        for (size_t j = 0; j < LEAF_DATA_BYTES; j++)
+            leaves[i][j] = (uint8_t)(i * 16 + j);
+
+    uint8_t root_sw[64];
+    uint8_t *siblings = calloc(depth, W);
+    uint8_t dirs[16];
+    build_software_tree(cs->vt, depth, N_LEAVES, target, leaves, root_sw,
+                        siblings, dirs);
+
+    voleith_gf8_circuit_t *cA = voleith_gf8_circuit_new();
+    voleith_gf8_circuit_t *cB = voleith_gf8_circuit_new();
+
+    /*
+     * Declare wires in the same order across A and B so the witness
+     * layout matches:
+     *
+     *   leaf_data | path_nodes | dirs | (leaf inv_in then per-level
+     *   inode inv_in, both emitted by the circuit body / caller)
+     */
+    gf8_wire_id leaf_wires_A[LEAF_DATA_BYTES], leaf_wires_B[LEAF_DATA_BYTES];
+    for (size_t i = 0; i < LEAF_DATA_BYTES; i++) {
+        leaf_wires_A[i] = voleith_gf8_add_witness(cA);
+        leaf_wires_B[i] = voleith_gf8_add_witness(cB);
+    }
+
+    gf8_wire_id *path_wires_A = calloc(depth * W, sizeof(gf8_wire_id));
+    gf8_wire_id *path_wires_B = calloc(depth * W, sizeof(gf8_wire_id));
+    for (size_t i = 0; i < depth * W; i++) {
+        path_wires_A[i] = voleith_gf8_add_witness(cA);
+        path_wires_B[i] = voleith_gf8_add_witness(cB);
+    }
+
+    gf8_wire_id dir_wires_A[16], dir_wires_B[16];
+    for (size_t k = 0; k < depth; k++) {
+        dir_wires_A[k] = voleith_gf8_add_witness(cA);
+        dir_wires_B[k] = voleith_gf8_add_witness(cB);
+    }
+
+    gf8_wire_id root_wires_A[64], root_wires_B[64];
+
+    /* A: existing entry hashes the leaf internally. */
+    MUST_OK(merkle_vt_gf8_path_circuit_secret_dir(
+        cA, cs->vt, leaf_wires_A, LEAF_DATA_BYTES, path_wires_A, dir_wires_A,
+        depth, root_wires_A));
+
+    /* B: caller hashes the leaf, new entry walks the inode chain only. */
+    gf8_wire_id leaf_node_wires_B[MERKLE_VT_MAX_NODE_BYTES];
+    cs->vt->leaf_circuit(cB, leaf_wires_B, LEAF_DATA_BYTES, leaf_node_wires_B);
+    MUST_OK(merkle_vt_gf8_path_from_leaf_node_secret_dir(
+        cB, cs->vt, leaf_node_wires_B, path_wires_B, dir_wires_B, depth,
+        root_wires_B));
+
+    /* Counts match exactly. */
+    size_t wA = voleith_gf8_circuit_witness_count(cA);
+    size_t wB = voleith_gf8_circuit_witness_count(cB);
+    size_t mA = voleith_gf8_circuit_mul_count(cA);
+    size_t mB = voleith_gf8_circuit_mul_count(cB);
+    size_t aA = voleith_gf8_circuit_assert_product_count(cA);
+    size_t aB = voleith_gf8_circuit_assert_product_count(cB);
+    size_t kA = voleith_gf8_circuit_constraint_count(cA);
+    size_t kB = voleith_gf8_circuit_constraint_count(cB);
+
+    check("witness_count matches", wA == wB);
+    check("mul_count matches", mA == mB);
+    check("assert_product_count matches", aA == aB);
+    check("constraint_count matches", kA == kB);
+
+    /* Same witness, same eval, same root. */
+    uint8_t *witness = calloc(wA > 0 ? wA : 1, 1);
+    build_witness(cs->vt, leaves[target], depth, siblings, dirs, /*secret*/ 1,
+                  witness);
+
+    size_t nW_A = voleith_gf8_circuit_wire_count(cA);
+    size_t nW_B = voleith_gf8_circuit_wire_count(cB);
+    uint8_t *wireA = calloc(nW_A > 0 ? nW_A : 1, 1);
+    uint8_t *wireB = calloc(nW_B > 0 ? nW_B : 1, 1);
+
+    int okA = voleith_gf8_circuit_eval(cA, witness, NULL, wireA);
+    int okB = voleith_gf8_circuit_eval(cB, witness, NULL, wireB);
+    check("A satisfied", okA == 1);
+    check("B satisfied", okB == 1);
+
+    int roots_eq_AB = 1, roots_eq_sw = 1;
+    for (size_t i = 0; i < W; i++) {
+        if (wireA[root_wires_A[i]] != wireB[root_wires_B[i]])
+            roots_eq_AB = 0;
+        if (wireA[root_wires_A[i]] != root_sw[i])
+            roots_eq_sw = 0;
+    }
+    check("roots agree A vs B", roots_eq_AB);
+    check("roots match software", roots_eq_sw);
+
+    /*
+     * Booleanity: corrupt the first dir witness to a non-bit value
+     * (0x02).  Both circuits must reject via assert_product(dir, dir,
+     * dir).  Dir bytes live at offset LEAF_DATA_BYTES + depth*W in the
+     * witness vector.
+     */
+    size_t dir_off = LEAF_DATA_BYTES + depth * W;
+    uint8_t saved = witness[dir_off];
+    witness[dir_off] = 0x02;
+    int badA = voleith_gf8_circuit_eval(cA, witness, NULL, wireA);
+    int badB = voleith_gf8_circuit_eval(cB, witness, NULL, wireB);
+    check("non-bit dir rejected by A", badA == 0);
+    check("non-bit dir rejected by B", badB == 0);
+    witness[dir_off] = saved;
+
+    free(wireA);
+    free(wireB);
+    free(witness);
+    free(path_wires_A);
+    free(path_wires_B);
+    free(siblings);
+    voleith_gf8_circuit_free(cA);
+    voleith_gf8_circuit_free(cB);
+}
+
 int
 main(void)
 {
@@ -435,6 +584,10 @@ main(void)
         run_case(&CASES[i], 0); /* public-dir */
         run_case(&CASES[i], 1); /* secret-dir */
     }
+
+    printf("\n=== T1: from-leaf-node secret-dir equivalence ===\n");
+    for (size_t i = 0; i < N_CASES; i++)
+        run_case_leaf_node(&CASES[i]);
 
     printf("\n%d / %d tests passed\n", total_pass, total_tests);
     return (total_pass == total_tests) ? 0 : 1;

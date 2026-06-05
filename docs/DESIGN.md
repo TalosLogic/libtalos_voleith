@@ -492,6 +492,20 @@ If your threat model includes a fully malicious tree builder, this circuit is no
 
 The trust assumption is documented in the README's Pre-built circuit building blocks section so that integrators see it at the API surface and not only in the design document.
 
+#### Software validator at the helper boundary
+
+For the common case of an honest-but-buggy tree builder (the usual operational reality), `circuits/indexed_merkle_vt_gf8_helpers.{c,h}` ships a public `voleith_imt_vt_validate_records` that catches the soundness-critical record-array patterns at the public-API boundary. It is invoked automatically by both `voleith_imt_vt_build` and `voleith_imt_vt_lookup_nonmember`, so the malformed cases below are rejected loudly with `-1` instead of silently producing a verifying-but-false non-membership proof. Callers may also pre-validate once before a batch of lookups.
+
+The validator enforces three invariants in one O(n) lsb-first pass:
+
+1. **Sort order.** `records[i].value <= records[i+1].value`. Equality is permitted so that trailing "max sentinel" records (`value == next_value == MAX`) can be repeated to pad `n_records` to a power of two: the pattern used by `examples/example_ring_sig_v1_revocable_gf8.c`.
+2. **Well-formed intervals.** `records[i].value <= records[i].next_value`. Rules out wrap-around intervals that would otherwise let an adversarial prover `assert_lt` on a target outside the IMT's value range.
+3. **No overlap.** For every non-degenerate record (`value < next_value`), if `i < n_records - 1` then `next_value[i] <= value[i+1]`. This is the soundness-critical check: an overlap (`next_value[i] > value[i+1]`) lets an adversary use `records[i]` as their witness to `assert_lt` on `target = records[i+1].value`, forging a non-membership proof for an actual member. The most common operational foot-gun (inserting a new record without updating the predecessor's `next_value`) produces exactly this overlap and is caught here. Degenerate records (empty intervals, `value == next_value`) are exempt from this check because the circuit's strict `assert_lt(v, target, v)` can never hold for any `target`, so they cannot drive an attack.
+
+What the validator deliberately does **not** check is **completeness** at the extremes of the value range: that is the application's sentinel policy (explicit `(0, first_real)` and `(last_real, MAX)` sentinels, wrap-around, or some other convention). A target outside any record's interval simply returns `-1` from `voleith_imt_vt_lookup_nonmember`. No verifying-but-false non-membership proof can be produced for a member by any caller whose record array passes the validator.
+
+The validator does **not** lift the external trust assumption above: it cannot, since it sees only one record array, not the history of inserts / updates / deletes a tree builder ran to produce it. A fully malicious builder can still omit a leaf entirely or build a structurally well-formed but semantically wrong tree. The validator's contribution is purely defense-in-depth against the operational class of bugs (sort-order violations, broken linked-list consistency, forgotten predecessor updates) that arise from hand-maintained record arrays.
+
 ### DM vs CMAC Merkle hash trade-off
 
 `merkle_gf8_circuit` supports two internal hash constructions, selectable per circuit:
@@ -687,6 +701,209 @@ The QuickSilver multiplication check in `proof/prover.c` and `proof/gf8_prover.c
 - The Fiat-Shamir challenge derivation order and transcript composition.
 
 Performance optimisations are applied only to operations that do not affect soundness: PRG block batching, GF(2^k) CLMUL / PMULL acceleration, AES-NI and ARMv8 Crypto Extension dispatch. Anything that touches the multiplication check, the VOLEHash, or the challenge derivation is left exactly as the spec dictates.
+
+---
+
+## Ring Signatures (RSv1)
+
+RSv1 is the library's first end-user signature capability built on top of the layered proof stack. It packages the hash-agnostic Merkle path circuit, the OWF circuit, and the GF(2^8) Fiat-Shamir prover into a non-interactive, publicly verifiable ring signature with optional revocation. The public API lives under two prefixes: `voleith_rs_membership_*` for the reusable membership baseline (intended to be shared with future linkable / claimable / threshold variants) and `voleith_rsv1_*` for V1-specific wiring (the cfg fingerprint, the ring builder, sign / verify, the on-the-wire envelope).
+
+### Statement proven
+
+```
+PUBLIC inputs (instance):
+    membership_root R       (tree_hash.node_bytes bytes)
+    revocation_root V       (tree_hash.node_bytes bytes; only when depth_r > 0)
+    m                       (message bound via Fiat-Shamir, not a wire)
+
+PRIVATE inputs (witness):
+    sk                                          (sk_bytes)
+    membership path direction bits              (depth_m bytes, one per level)
+    membership sibling node values              (depth_m * node_bytes bytes)
+    OWF inv_in                                  (owf leaf circuit internals)
+    per-level inode inv_in                      (depth_m * inode_invin_bytes)
+    [iff depth_r > 0:]
+        revocation adjacent record:
+            low_value, low_next                 (node_bytes each)
+            next_index                          (8 bytes)
+        revocation path direction bits          (depth_r bytes)
+        revocation sibling node values          (depth_r * node_bytes bytes)
+        revocation IMT-leaf inv_in              (tree_hash leaf circuit)
+        per-level revocation inode inv_in       (depth_r * inode_invin_bytes)
+
+CONSTRAINTS:
+    leaf  = OWF_circuit(sk)
+    root  = secret_dir_merkle_path(leaf, siblings, dirs)
+    assert_equal(root, R)
+    [optional revocation:]
+        rec_leaf  = tree_hash.leaf_circuit(low_value || low_next || next_index)
+        rec_root  = secret_dir_merkle_path(rec_leaf, rev_siblings, rev_dirs)
+        assert_equal(rec_root, V)
+        assert_lt(low_value, leaf)
+        assert_lt(leaf,      low_next)
+```
+
+The Fiat-Shamir transcript binds `m` (see "Message binding" below). Tampering any byte of `m`, `R`, `V`, or the config struct desynchronises the verifier's challenges from the prover's commitments and `voleith_gf8_verify` returns -1.
+
+### Why VOLEitH for ring signatures
+
+The same properties that make VOLEitH attractive as a general proof system carry over to the ring-signature setting:
+
+- **Post-quantum.** Soundness relies only on symmetric-key primitives (AES and SHAKE). No discrete-log or RSA hardness assumptions.
+- **Public verifiability.** A signature is a self-contained byte sequence; verification needs only the published roots and config, not interaction with the signer.
+- **Reuses the shipped stack.** The OWF, the Merkle path, the IMT non-membership check, and the GF(2^8) prover / verifier all already ship and are pinned by their own test vectors. RSv1 is composition glue plus message binding.
+- **Anonymity by construction.** Secret-dir Merkle paths and witness-held sibling values keep the signer's leaf index private. The verifier learns "some ring member signed" and nothing about which.
+
+The trade-off versus DL-based ring signatures is signature size: RSv1 at depth 3 with the FAEST-EM-128f parameter set produces ~5 to 6 KB of proof bytes plus 41 bytes of envelope. For permissioned rings up to a few thousand members this is acceptable; for very large anonymity sets the per-signature size dominates.
+
+### Circuit shape and the membership baseline
+
+The membership branch composes three circuit primitives in order:
+
+1. `owf_vt.leaf_circuit(sk_wires, sk_bytes, leaf_node_wires)` produces the signer's leaf node from the secret. `owf_vt` is whichever node-hash vt is named as the OWF in the config; the vt's leaf circuit is preimage-resistant on its input, so it serves directly as the one-way function. There is no separate "OWF primitive": the existing leaf-hash circuit is the OWF.
+
+2. `merkle_vt_gf8_path_from_leaf_node_secret_dir(c, tree_vt, leaf_node_wires, sibling_wires, dir_wires, depth_m, computed_root_wires)` walks `depth_m` inode levels starting from `leaf_node_wires`. At each level the (left, right) inputs to `tree_vt.inode_circuit` are selected by a per-byte mux on the level's direction wire. Direction-wire booleanity is enforced inside the path body via `assert_product(dir, dir, dir)` per level (one mul gate per level), which is free in the soundness sense (the mul slot exists regardless) and is the only thing that prevents a malicious prover from picking a non-{0, 1} dir value to fold an arbitrary chain value into the root.
+
+3. `assert_equal_byte(computed_root[i], R_instance[i])` for each of the `node_bytes` bytes of the computed root vs the public R instance wires.
+
+This baseline lives behind `voleith_rs_membership_build_circuit` and is the surface intended for sharing with future variants (V2 linkable, V4 claimable, V5 traceable, V7 threshold). Variants extend the baseline by appending more witness wires, more instance wires, and more constraints; the membership shape itself does not change.
+
+### Revocation branch
+
+When `cfg->depth_r > 0`, the builder additionally declares the revocation witness section, the revocation root V as instance, and calls the hash-agnostic indexed-non-member circuit on `tree_vt`. The revocation tree stores revoked leaf-node values (the same value type the OWF emits) as IMT records, sorted by value, with each record carrying its successor's index. To prove "leaf is not revoked", the signer supplies:
+
+- An adjacent record (low_value, low_next, next_index) whose value is strictly less than the signer's leaf and whose next_value is strictly greater.
+- A secret-dir Merkle path from that record's IMT leaf to V.
+
+The circuit hashes `low_value || low_next || next_index` via `tree_vt.leaf_circuit`, walks the IMT path to recompute V, and `assert_equal`s the recomputation against the public V. Two `assert_lt` calls then constrain `low_value < leaf < low_next` byte-wise via the shared comparison routine. The comparison uses byte 0 as the LSB and adds 3 mul gates per bit of `value_bytes` per assert.
+
+The revocation `next_index` width is fixed at 8 bytes (`VOLEITH_RSV1_REV_INDEX_BYTES`), enough to address up to `2^64` records. Smaller `depth_r` values still encode `next_index` in 8 bytes with the upper bytes zero-padded; this keeps the witness layout deterministic in `(cfg, vt)` alone.
+
+### Anonymity model
+
+The signature is anonymous over the ring set, in the standard "the verifier learns *some* member signed" sense. Specifically:
+
+- The signer's leaf index is a witness, recovered from `cfg->depth_m` secret direction wires that the verifier never sees.
+- The sibling node values along the signer's path are witness, not instance, because each member's path has different siblings and publishing them would identify the signer.
+- The revocation adjacent record (low_value, low_next, next_index) is witness for the same reason: it depends on where the signer falls in the sorted revocation set.
+- Only R, V (when revocation is enabled), and `cfg_fingerprint` go through the public Fiat-Shamir absorb. Two signatures from different members over the same `m` produce distinct proof bytestreams (different witnesses give different VOLE commitments) but neither leaks `leaf_index` or any other member-distinguishing field.
+
+### Configuration surface
+
+A single config struct fixes the ring's identity:
+
+```c
+typedef struct {
+    const voleith_node_hash_vt *tree_hash;   /* Merkle path; required.  */
+    const voleith_node_hash_vt *owf_hash;    /* sk -> leaf; NULL = tree_hash. */
+    size_t                       sk_bytes;   /* secret-key byte length. */
+    size_t                       depth_m;    /* membership tree depth.  */
+    size_t                       depth_r;    /* 0 disables revocation.  */
+} voleith_rs_membership_config_t;
+```
+
+`voleith_rs_membership_validate` rejects malformed configs at the API boundary. It enforces:
+
+- `cfg != NULL` and `cfg->tree_hash != NULL`.
+- `1 <= depth_m <= VOLEITH_RS_MEMBERSHIP_MAX_DEPTH` (= 64).
+- `depth_r <= VOLEITH_RS_MEMBERSHIP_MAX_DEPTH`.
+- `sk_bytes >= 1`.
+- When `owf_hash != NULL`: `owf_hash->node_bytes == tree_hash->node_bytes` (the OWF output is the Merkle leaf node), and `owf_hash->cr_bits >= tree_hash->cr_bits` (the OWF must not be the system's weak link).
+- For fixed-leaf vts (currently only `voleith_node_hash_hirose_fixed32`, which has `fixed_leaf_bytes = 32`): `sk_bytes == fixed_leaf_bytes`. Variable-leaf vts accept any `sk_bytes >= 1`.
+
+The "OWF cr_bits >= tree cr_bits" check is intentionally conservative. The OWF's relevant attack is preimage resistance (roughly twice CR for the wrapped vts) while the tree's is collision resistance (= CR), so configs with `owf.cr_bits < tree.cr_bits` are sometimes safe in absolute terms. The conservative rule never gives false security and is the cleanest invariant to explain.
+
+### Message binding (Fiat-Shamir)
+
+This is the V1-specific work that turns a membership proof into a signature. The signer chooses `m` and binds it into the proof's Fiat-Shamir transcript via the `fs_seed` argument to `voleith_gf8_prove`. The seed is constructed as:
+
+```
+fs_seed = SHAKE256-16( FS_SEED_FMT_VERSION       (1 byte, = 0x01)
+                    || DOMAIN_TAG_RSV1           (16 bytes, "VOLEitH-RSv1\0\0\0\0")
+                    || cfg_fingerprint            (16 bytes)
+                    || membership_root R          (tree_hash.node_bytes bytes)
+                    || revocation_root V or zero  (tree_hash.node_bytes bytes)
+                    || m_len_be8                  (8 bytes, big-endian)
+                    || m                          (m_len bytes) )
+```
+
+Field roles:
+
+- **`FS_SEED_FMT_VERSION`.** Single byte `0x01`. Pins the absorb layout. If the construction ever changes in a future release (added field, reordered, etc.) the new format bumps this byte and old verifiers reject loudly. Cheap insurance against unknown-unknowns; one byte forever.
+- **`DOMAIN_TAG_RSV1`.** Fixed 16-byte ASCII tag distinct from every other domain tag in the project. The "RSv1" embedded in the tag is the protocol-level version; if a future variant supersedes V1 it gets a new tag, while in-protocol format revisions of V1 itself bump only the version byte.
+- **`cfg_fingerprint`.** A 16-byte SHAKE-256 fingerprint over the canonical encoding of the config struct. Canonical encoding: `u32_le(owf_name_len) || owf_name || u32_le(tree_name_len) || tree_name || u64_le(sk_bytes) || u64_le(depth_m) || u64_le(depth_r)`. The vt is identified by `->name` rather than pointer address so the fingerprint is portable across processes and library builds. Two configs that differ in any of these fields produce different fingerprints, distinct fs_seeds, and verify-failure across configs.
+- **`revocation_root V or zero`.** When `depth_r == 0`, `node_bytes` of zero bytes are absorbed instead. The placeholder is safe because cfg_fingerprint already pins `depth_r`; a depth_r=0 config and a depth_r>0 config can never collide on the fingerprint.
+- **`m_len_be8`.** 8-byte big-endian message length. Prevents the ambiguity between `m = "foo" || "bar"` and `m = "foobar"` that would arise if only `m` were absorbed. The 8-byte width supports messages up to 2^64 - 1 bytes; big-endian matches the length-encoding convention used elsewhere in the project (proof header lengths and the wire envelope's proof_len).
+
+Field ordering follows the convention "public / derivable bytes before caller-supplied bytes": version, domain tag, cfg fingerprint, and roots (all values the verifier reconstructs from cfg and policy) absorb first; the message length and message itself absorb last.
+
+The output is exactly 16 bytes and is what gets handed to `voleith_gf8_prove(..., fs_seed, 16)`. The existing proof machinery absorbs the metadata header, params fingerprint, circuit fingerprint, and the proof's own internal commitment blob on top of the seed; no changes to the GF(2^8) prover are needed.
+
+Once a release tags this construction, the format is a compatibility boundary: breaking changes require bumping `FS_SEED_FMT_VERSION` rather than redefining `0x01`. A byte-exact known-answer test pins the construction against silent format drift.
+
+### Enrollment and keygen
+
+Out of band (the ring authority decides):
+
+1. **Sample sk.** `cfg->sk_bytes` cryptographically uniform random per member. The library does not generate keys.
+2. **Derive leaf.** `leaf = owf_vt.leaf_hash(sk, sk_bytes, leaf_out)` where `owf_vt = cfg.owf_hash` or `cfg.tree_hash` if owf_hash is NULL. The vt's software `leaf_hash` is the out-of-circuit counterpart of the in-circuit `leaf_circuit`.
+3. **Build ring.** Authority collects N leaf-node values and walks them up via `tree_hash.inode_hash` to a balanced Merkle root. Publishes `membership_root`. The library helper `voleith_rsv1_ring_build` does this in one call.
+4. **Persist path.** Each member keeps `(sk, leaf_index)` plus the sibling nodes along their path. Direction bits are derived from `leaf_index` at sign time.
+5. **Revocation (optional).** Maintain a separate indexed Merkle tree of revoked leaves; on revocation, insert; at sign time the member uses the published IMT records to compute their adjacent-record witness via `voleith_imt_vt_lookup_nonmember`.
+
+Sub-capacity rings (fewer than `2^depth_m` members) pad unused leaf slots with an all-zero sentinel. An OWF output of all-zero bytes is vanishingly unlikely (~`2^-128` for any wrapped vt), so a sentinel slot cannot collide with a real member's leaf. The ring can therefore be built once at capacity `2^depth_m` and sub-capacity rings still yield a well-defined root; downstream verifiers see only the root and need not know the ring is sub-capacity.
+
+Ring mutation (add / remove / replace a member) is supported by re-running `voleith_rsv1_ring_build` with the updated leaf list. The root changes (new epoch), affected members get refreshed path bundles. Old-root signatures and new-root signatures are automatically distinguishable through the `cfg_fingerprint` + R binding in `fs_seed`. Incremental ring updates (patching only the siblings on the path of one inserted leaf) are deferred; for rings up to ~10K members the O(N) full rebuild finishes in milliseconds.
+
+### Signature serialization
+
+The on-the-wire envelope wraps the raw GF(2^8) proof bytes with a versioned, self-describing header:
+
+```
+offset  size  field
+------  ----  -----
+     0     4  magic = "VRS1"
+     4     1  format_version = 1
+     5    16  cfg_fingerprint        (binds the config to the proof)
+    21    16  params_fingerprint     (binds the VOLEitH params)
+    37     4  gf8_proof_len          (big-endian uint32)
+    41   ...  gf8_proof bytes
+```
+
+Header overhead is 41 bytes; total packed length is `41 + gf8_proof_len`. The big-endian length field matches the length-encoding convention used elsewhere in the project.
+
+Pack and unpack helpers (`voleith_ring_sig_pack`, `voleith_ring_sig_unpack`) compute both fingerprints internally and reject mismatches on unpack with a constant-time comparison. A consumer who hands the wrong cfg or wrong params to unpack gets `-1` without ever touching the inner proof bytes. The inner GF(2^8) proof itself is not re-validated by unpack; that is `voleith_rsv1_verify`'s job on the unpacked sig.
+
+### Software helpers
+
+The data-layer helpers expose the same Merkle and IMT machinery the prover uses, so applications can build and maintain rings without re-implementing the tree walk:
+
+- `voleith_merkle_vt_build(vt, leaf_nodes, n_leaves, root_out)`: compute the Merkle root from `n_leaves` leaf-node values (must be a power of two). Walks `vt->inode_hash` level by level.
+- `voleith_merkle_vt_compute_path(vt, leaf_nodes, n_leaves, leaf_index, siblings_out)`: emit the sibling path from leaf `leaf_index` to the root.
+- `voleith_imt_vt_build(vt, records, n_records, value_bytes, index_bytes, root_out)`: compute the IMT root from sort-ordered records.
+- `voleith_imt_vt_lookup_nonmember(vt, records, n_records, value_bytes, index_bytes, target, adj_idx_out, path_out)`: locate the adjacent record straddling `target` and emit its sibling path. Returns -1 when `target` matches any record's value (target is a member, no non-membership proof possible).
+- `voleith_rsv1_ring_build(cfg, sks, n_members, root_out, paths_out, siblings_storage)`: one-call ring construction. Computes per-member leaves via `owf_vt.leaf_hash`, pads sub-capacity slots with the all-zero sentinel, calls `voleith_merkle_vt_build`, and emits per-member path bundles.
+
+### Tests and examples
+
+Test coverage for `tests/test_ring_sig_v1_gf8.c` includes: sign / verify roundtrip on AES-DM and on Hirose; rejection of wrong sk, wrong sibling, wrong root, tampered message, mismatched cfg; revocation-positive (leaf not in V accepts), revocation-negative (leaf in V rejects at the lookup helper, so no witness can be produced); asymmetric OWF / tree-hash pairings (`owf_hash != tree_hash` with matching `node_bytes`); strength-relationship rejection (weaker OWF rejected by validate); fingerprint determinism and per-field binding; the fs_seed byte-exact KAT; the wire envelope's pack / unpack roundtrip plus magic / version / fingerprint / length-mismatch rejections; an anonymity smoke test that two distinct members signing the same `m` produce distinct proof bytestreams with no leaf node embedded in either proof under a memcmp scan.
+
+Two example programs (`examples/example_ring_sig_v1_gf8.c`, `examples/example_ring_sig_v1_revocable_gf8.c`) drive the full sign-pack-unpack-verify path end-to-end. Both are parameterised over the cfg struct: changing the `tree_hash` vt, `sk_bytes`, and depths propagates through all downstream buffer sizing automatically, so a consumer can swap AES-DM (16-byte node, 2^64 CR) for Hirose (32-byte node, 2^128 CR) or Grøstl-256 (32-byte node, 2^128 CR) without further edits.
+
+### Out of scope for V1
+
+The plan deliberately ships V1 first as the smallest useful surface, with explicit hooks for follow-on variants:
+
+- **V2 (linkable).** A per-(signer, tag) nullifier that lets a verifier detect when the same member signs twice under the same tag, without revealing identity.
+- **V3 (attribute predicates).** Each member's leaf binds attributes; the signer proves a predicate over them.
+- **V4 (claimable / accountable).** The signer can later, optionally, prove they were the signer; or an authority can.
+- **V5 (traceable line-reveal).** Two signatures by the same member under the same context reveal the member.
+- **V6 (forward-secure key evolution).** Per-epoch key derivation so past signatures stay valid after key compromise.
+- **V7 (threshold t-of-n).** A signature requires t of n authorised members to cooperate.
+
+The `voleith_rs_membership_*` layer is named separately from `voleith_rsv1_*` precisely so V2 / V4 / V5 / V7 can share the membership baseline without copy-paste. V3 and V6 deviate from the baseline shape and will get their own builders. None of these variants ship in the V1 release.
+
+Also deferred: a public-dir companion to the `from_leaf_node` secret-dir entry (would mirror the secret-dir variant for the rare public-leaf-index use case); incremental ring-update helpers (path-only update vs full rebuild); an on-disk path-bundle format.
 
 ---
 

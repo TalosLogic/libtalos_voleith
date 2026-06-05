@@ -261,15 +261,40 @@ voleith_shake128_absorb(voleith_hash_ctx_t *ctx, const uint8_t *data,
     sponge_absorb(ctx, data, len);
 }
 
+/* Pack v as 4 little-endian bytes.  Local helper for the u32_le
+ * absorbers below; lifted here so SHAKE-128 and SHAKE-256 share one
+ * byte-order implementation. */
+static void
+pack_u32_le(uint8_t buf[4], uint32_t v)
+{
+    buf[0] = (uint8_t)(v & 0xff);
+    buf[1] = (uint8_t)((v >> 8) & 0xff);
+    buf[2] = (uint8_t)((v >> 16) & 0xff);
+    buf[3] = (uint8_t)((v >> 24) & 0xff);
+}
+
+static void
+pack_u64_le(uint8_t buf[8], uint64_t v)
+{
+    for (size_t i = 0; i < 8; i++)
+        buf[i] = (uint8_t)((v >> (8 * i)) & 0xffu);
+}
+
 void
 voleith_shake128_absorb_u32_le(voleith_hash_ctx_t *ctx, uint32_t v)
 {
     uint8_t buf[4];
 
-    buf[0] = (uint8_t)(v & 0xff);
-    buf[1] = (uint8_t)((v >> 8) & 0xff);
-    buf[2] = (uint8_t)((v >> 16) & 0xff);
-    buf[3] = (uint8_t)((v >> 24) & 0xff);
+    pack_u32_le(buf, v);
+    sponge_absorb(ctx, buf, sizeof(buf));
+}
+
+void
+voleith_shake128_absorb_u64_le(voleith_hash_ctx_t *ctx, uint64_t v)
+{
+    uint8_t buf[8];
+
+    pack_u64_le(buf, v);
     sponge_absorb(ctx, buf, sizeof(buf));
 }
 
@@ -301,6 +326,24 @@ void
 voleith_shake256_squeeze(voleith_hash_ctx_t *ctx, uint8_t *out, size_t len)
 {
     sponge_squeeze(ctx, out, len);
+}
+
+void
+voleith_shake256_absorb_u32_le(voleith_hash_ctx_t *ctx, uint32_t v)
+{
+    uint8_t buf[4];
+
+    pack_u32_le(buf, v);
+    sponge_absorb(ctx, buf, sizeof(buf));
+}
+
+void
+voleith_shake256_absorb_u64_le(voleith_hash_ctx_t *ctx, uint64_t v)
+{
+    uint8_t buf[8];
+
+    pack_u64_le(buf, v);
+    sponge_absorb(ctx, buf, sizeof(buf));
 }
 
 void

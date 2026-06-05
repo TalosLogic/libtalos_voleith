@@ -72,6 +72,13 @@ void voleith_shake128_squeeze(voleith_hash_ctx_t *ctx, uint8_t *out,
 void voleith_shake128_absorb_u32_le(voleith_hash_ctx_t *ctx, uint32_t v);
 
 /*
+ * Absorb a 64-bit value into a SHAKE-128 context as eight little-endian
+ * bytes.  Same canonical-serialization use case as the u32_le helper
+ * for fields that need the wider range (lengths, counts, depths).
+ */
+void voleith_shake128_absorb_u64_le(voleith_hash_ctx_t *ctx, uint64_t v);
+
+/*
  * SHAKE-256: incremental interface
  *
  * Same usage pattern as SHAKE-128.
@@ -81,6 +88,13 @@ void voleith_shake256_absorb(voleith_hash_ctx_t *ctx, const uint8_t *data,
                              size_t len);
 void voleith_shake256_squeeze(voleith_hash_ctx_t *ctx, uint8_t *out,
                               size_t len);
+
+/*
+ * SHAKE-256 little-endian integer absorbers - same shape as the
+ * SHAKE-128 helpers above.
+ */
+void voleith_shake256_absorb_u32_le(voleith_hash_ctx_t *ctx, uint32_t v);
+void voleith_shake256_absorb_u64_le(voleith_hash_ctx_t *ctx, uint64_t v);
 
 /*
  * Securely zero all state in ctx.

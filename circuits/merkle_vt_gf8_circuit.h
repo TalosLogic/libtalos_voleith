@@ -126,4 +126,44 @@ int merkle_vt_gf8_path_circuit_secret_dir(voleith_gf8_circuit_t *c,
                                           const gf8_wire_id *path_dirs,
                                           size_t depth, gf8_wire_id *root);
 
+/*
+ * merkle_vt_gf8_path_from_leaf_node_secret_dir - verify a Merkle path
+ * with a private (witness) leaf index, starting from a pre-computed
+ * leaf node.
+ *
+ * Same as merkle_vt_gf8_path_circuit_secret_dir, but skips the
+ * leaf-hash gates: the caller supplies h->node_bytes wires that
+ * already hold the leaf node value (e.g. the output wires of an OWF
+ * leaf_circuit shared with the membership tree).  Enables RSv1 and any
+ * future consumer to feed an already-hashed leaf into the inode walk
+ * without paying a second leaf-hash gate stream.
+ *
+ * Equivalence: when called on `vt->leaf_hash(leaf_data)`, the gate
+ * stream of the inode walk is byte-exact identical to
+ * merkle_vt_gf8_path_circuit_secret_dir called on `leaf_data`.  The
+ * caller is responsible for declaring or building the leaf_node wires
+ * however they wish; this entry owns only the inode walk and the
+ * per-level booleanity check on path_dirs.
+ *
+ * Booleanity: every dir wire is constrained to {0, 1} by an
+ * in-circuit assert_product(dir, dir, dir) at the matching level.
+ * Same structural soundness rule as the existing secret-dir entry.
+ *
+ * c          - circuit to append to
+ * h          - node-hash vt
+ * leaf_node  - h->node_bytes wire IDs holding the leaf node value
+ * path_nodes - depth * h->node_bytes wire IDs of sibling hashes,
+ *              leaf-level first
+ * path_dirs  - depth witness wires, each 0x00 or 0x01
+ * depth      - number of levels from leaf node to root
+ * root       - output: h->node_bytes wire IDs for the root
+ *
+ * Returns 0 on success, -1 if h->node_bytes exceeds
+ * MERKLE_VT_MAX_NODE_BYTES.
+ */
+int merkle_vt_gf8_path_from_leaf_node_secret_dir(
+    voleith_gf8_circuit_t *c, const voleith_node_hash_vt *h,
+    const gf8_wire_id *leaf_node, const gf8_wire_id *path_nodes,
+    const gf8_wire_id *path_dirs, size_t depth, gf8_wire_id *root);
+
 #endif /* VOLEITH_MERKLE_VT_GF8_CIRCUIT_H */

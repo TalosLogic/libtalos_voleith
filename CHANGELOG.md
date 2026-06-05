@@ -5,6 +5,84 @@ All notable changes to libtalos_voleith are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] 2026-06-05
+
+Adds RSv1 ring signatures: a non-interactive, publicly verifiable ring
+signature with optional revocation, parameterised over any wrapped
+node-hash vt.  Built on top of the existing vt-driven Merkle / IMT
+stack with one new circuit entry point and a handful of software
+helpers.  Inner GF(2⁸) proof format is unchanged; existing proofs
+verify unchanged.  See DESIGN.md "Ring Signatures (RSv1)" for the
+full design.
+
+### Added
+
+- `proof/ring_sig_v1_gf8.{c,h}`: data layer.  Membership cfg, validate,
+  canonical-encoding absorber (reusable across future linkable /
+  claimable / threshold variants), V1 cfg fingerprint, witness packer,
+  `voleith_rsv1_ring_build`, sign / verify, fs_seed construction.
+- `circuits/ring_sig_v1_gf8_circuit.{c,h}`:
+  `voleith_rs_membership_build_circuit`, composing the OWF circuit,
+  the secret-dir vt-driven Merkle path, and (when `depth_r > 0`) the
+  secret-dir vt-driven IMT non-member branch.
+- `merkle_vt_gf8_path_from_leaf_node_secret_dir`: new entry point on
+  the vt-driven Merkle circuit that walks the inode chain from a
+  pre-computed leaf-node wire array (instead of re-hashing leaf
+  data).  Used to feed the OWF output into the path.  Bit-exact
+  per-vt equivalence with the existing secret-dir entry is pinned in
+  `test_merkle_vt_gf8_equivalence.c`.
+- Software helpers `voleith_merkle_vt_build`,
+  `voleith_merkle_vt_compute_path`
+  (`circuits/merkle_vt_gf8_helpers.{c,h}`) and `voleith_imt_vt_build`,
+  `voleith_imt_vt_lookup_nonmember`
+  (`circuits/indexed_merkle_vt_gf8_helpers.{c,h}`): library-level
+  tree / IMT construction and lookup, lifting the inline tree code
+  previously open-coded in KVAC fixtures.
+- On-the-wire envelope: `voleith_ring_sig_pack`,
+  `voleith_ring_sig_unpack`, `voleith_ring_sig_packed_len`,
+  `voleith_ring_sig_free`.  41-byte header ("VRS1" magic + version
+  + cfg fingerprint + params fingerprint + big-endian proof length),
+  constant-time fingerprint checks on unpack.
+- `include/voleith_gf8.h` now pulls in the vt-driven Merkle / IMT
+  stack and the RSv1 API; a complete RSv1 program can be written
+  against the single umbrella header.
+- Examples `example_ring_sig_v1_gf8.c` and
+  `example_ring_sig_v1_revocable_gf8.c`: full sign-pack-unpack-verify
+  demos, with and without revocation.  Both are parameterised over
+  the cfg struct so swapping in a different node-hash vt or depth is
+  a one-field edit.
+- Tests `tests/test_ring_sig_v1_gf8.c`: cfg validate + fingerprint
+  KAT pin, build_circuit + witness packer, ring_build, fs_seed KAT
+  pin, sign / verify roundtrip on AES-DM and Hirose, asymmetric OWF /
+  tree-hash pairing, anonymity smoke (two members signing the same
+  message produce distinct proofs with no leaf-node embedded under
+  memcmp), revocation positive and negative, wire envelope tamper
+  rejections (magic, version, both fingerprints, length).
+
+### Changed
+
+- `voleith_node_hash_vt` (`circuits/node_hash_vt.h`) gains two fields:
+  `cr_bits` (the vt's collision-resistance bound, used by
+  `voleith_rs_membership_validate` to enforce the OWF-not-weaker-than-
+  tree relationship) and `fixed_leaf_bytes` (non-zero for fixed-leaf
+  vts such as `hirose_fixed32`, zero for variable-leaf vts).
+  Source-compatible: in-tree vts use C99 designated initializers, so
+  the added fields default-zero on any consumer that does not set
+  them; out-of-tree vts that want the new strength / fixed-width
+  enforcement must set them explicitly.
+
+### Security
+
+- `voleith_imt_vt_validate_records`
+  (`circuits/indexed_merkle_vt_gf8_helpers.{c,h}`): rejects record
+  arrays with sort-order, wrap-around-interval, or overlap violations
+  before any hashing.  Wired into `voleith_imt_vt_build` and
+  `voleith_imt_vt_lookup_nonmember` at the public boundary; catches
+  the "forgot to update predecessor's next_value" foot-gun that
+  would otherwise let an adversarial prover forge non-membership for
+  an actual revoked member.  Accepts the degenerate "max sentinel"
+  padding pattern used by the revocable example.
+
 ## [1.3.0] 2026-06-03
 
 Adds a 48-byte v1 metadata header at the start of every proof, binding
@@ -15,8 +93,6 @@ any tampering breaks the final chall_3 check.  Pre-header proofs are
 still accepted via a compile-time-gated legacy fallback in the
 verifier.  Resolves the circuit/params identity-binding half of the
 security review.
-
-See `docs/PROOF_METADATA_HEADER_DESIGN.md` for the full specification.
 
 ### Added
 

@@ -56,6 +56,22 @@ typedef struct {
     size_t node_bytes; /* 16, 27, 32, 59, or 64 */
     size_t cr_bits;    /* 64, 108, 128, 236, or 256 */
 
+    /*
+     * Fixed-leaf input width.  0 means the vt is variable-leaf (any
+     * leaf_data_bytes >= 0 is valid).  Non-zero means the vt's
+     * leaf_circuit / leaf_hash require exactly this many input bytes;
+     * any other value is a contract violation (currently silently
+     * truncated by some vts, but consumers that validate up-front
+     * should reject it instead of letting a wrong-width sk reach the
+     * leaf builders).  Used by voleith_rs_membership_validate to enforce
+     * the sk-width match.
+     *
+     * Only hirose-aes-256-fixed32 (= 32) is non-zero today; the other
+     * shipped vts are variable-leaf and get 0 via C99 designated
+     * initializers (unmentioned fields = 0).
+     */
+    size_t fixed_leaf_bytes;
+
     /* witness sizing */
     size_t (*leaf_invin_bytes)(size_t leaf_data_bytes);
     size_t (*inode_invin_bytes)(void);

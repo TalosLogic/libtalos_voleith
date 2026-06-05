@@ -482,6 +482,7 @@ const voleith_node_hash_vt voleith_node_hash_hirose_fixed32 = {
     .name = "hirose-aes-256-fixed32",
     .node_bytes = 32,
     .cr_bits = 128,
+    .fixed_leaf_bytes = 32,
     .leaf_invin_bytes = merkle_hirose_gf8_fixed32_leaf_invin_bytes,
     .inode_invin_bytes = merkle_hirose_gf8_inode_invin_bytes,
     .leaf_circuit = merkle_hirose_gf8_fixed32_leaf_circuit,

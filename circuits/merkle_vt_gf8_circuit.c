@@ -23,20 +23,22 @@
 /* MERKLE_VT_MAX_NODE_BYTES lives in node_hash_vt.h so vt definitions
  * can _Static_assert against it. */
 
-int
-merkle_vt_gf8_path_circuit(voleith_gf8_circuit_t *c,
-                           const voleith_node_hash_vt *h,
-                           const gf8_wire_id *leaf_data, size_t leaf_data_bytes,
-                           const gf8_wire_id *path_nodes,
-                           const uint8_t *path_dirs, size_t depth,
-                           gf8_wire_id *root)
+/*
+ * walk_inodes_public_dir - inode-chain walk for the public-dir entry
+ * points.  Direction is resolved statically at circuit-build time, so
+ * the left/right swap is a pointer choice with zero mul-gate cost.
+ *
+ * On entry `current` holds the W = h->node_bytes leaf-level wire IDs
+ * (already populated by the caller, from either leaf_circuit or a
+ * pre-computed leaf node).  On exit `current` holds the root-level
+ * wire IDs.
+ */
+static void
+walk_inodes_public_dir(voleith_gf8_circuit_t *c, const voleith_node_hash_vt *h,
+                       gf8_wire_id *current, const gf8_wire_id *path_nodes,
+                       const uint8_t *path_dirs, size_t depth)
 {
-    if (h->node_bytes > MERKLE_VT_MAX_NODE_BYTES)
-        return -1;
     size_t W = h->node_bytes;
-
-    gf8_wire_id current[MERKLE_VT_MAX_NODE_BYTES];
-    h->leaf_circuit(c, leaf_data, leaf_data_bytes, current);
 
     for (size_t level = 0; level < depth; level++) {
         const gf8_wire_id *sibling = path_nodes + level * W;
@@ -48,27 +50,27 @@ merkle_vt_gf8_path_circuit(voleith_gf8_circuit_t *c,
         for (size_t i = 0; i < W; i++)
             current[i] = next[i];
     }
-
-    for (size_t i = 0; i < W; i++)
-        root[i] = current[i];
-    return 0;
 }
 
-int
-merkle_vt_gf8_path_circuit_secret_dir(voleith_gf8_circuit_t *c,
-                                      const voleith_node_hash_vt *h,
-                                      const gf8_wire_id *leaf_data,
-                                      size_t leaf_data_bytes,
-                                      const gf8_wire_id *path_nodes,
-                                      const gf8_wire_id *path_dirs,
-                                      size_t depth, gf8_wire_id *root)
+/*
+ * walk_inodes_secret_dir - inode-chain walk for the secret-dir entry
+ * points.  Each level pays W mul gates for a per-byte mux selecting
+ * the (left, right) pair from (current, sibling) under dir, plus one
+ * free assert_product(dir, dir, dir) booleanity check.
+ *
+ * Booleanity is enforced HERE so every secret-dir caller inherits the
+ * structural soundness rule.  Never leave the {0, 1} constraint to the
+ * caller - an unconstrained mux selector is a silent soundness break.
+ *
+ * On entry `current` holds the W = h->node_bytes leaf-level wire IDs.
+ * On exit `current` holds the root-level wire IDs.
+ */
+static void
+walk_inodes_secret_dir(voleith_gf8_circuit_t *c, const voleith_node_hash_vt *h,
+                       gf8_wire_id *current, const gf8_wire_id *path_nodes,
+                       const gf8_wire_id *path_dirs, size_t depth)
 {
-    if (h->node_bytes > MERKLE_VT_MAX_NODE_BYTES)
-        return -1;
     size_t W = h->node_bytes;
-
-    gf8_wire_id current[MERKLE_VT_MAX_NODE_BYTES];
-    h->leaf_circuit(c, leaf_data, leaf_data_bytes, current);
 
     for (size_t level = 0; level < depth; level++) {
         const gf8_wire_id *sibling = path_nodes + level * W;
@@ -97,6 +99,70 @@ merkle_vt_gf8_path_circuit_secret_dir(voleith_gf8_circuit_t *c,
         for (size_t i = 0; i < W; i++)
             current[i] = next[i];
     }
+}
+
+int
+merkle_vt_gf8_path_circuit(voleith_gf8_circuit_t *c,
+                           const voleith_node_hash_vt *h,
+                           const gf8_wire_id *leaf_data, size_t leaf_data_bytes,
+                           const gf8_wire_id *path_nodes,
+                           const uint8_t *path_dirs, size_t depth,
+                           gf8_wire_id *root)
+{
+    if (h->node_bytes > MERKLE_VT_MAX_NODE_BYTES)
+        return -1;
+    size_t W = h->node_bytes;
+
+    gf8_wire_id current[MERKLE_VT_MAX_NODE_BYTES];
+    h->leaf_circuit(c, leaf_data, leaf_data_bytes, current);
+
+    walk_inodes_public_dir(c, h, current, path_nodes, path_dirs, depth);
+
+    for (size_t i = 0; i < W; i++)
+        root[i] = current[i];
+    return 0;
+}
+
+int
+merkle_vt_gf8_path_circuit_secret_dir(voleith_gf8_circuit_t *c,
+                                      const voleith_node_hash_vt *h,
+                                      const gf8_wire_id *leaf_data,
+                                      size_t leaf_data_bytes,
+                                      const gf8_wire_id *path_nodes,
+                                      const gf8_wire_id *path_dirs,
+                                      size_t depth, gf8_wire_id *root)
+{
+    if (h->node_bytes > MERKLE_VT_MAX_NODE_BYTES)
+        return -1;
+    size_t W = h->node_bytes;
+
+    gf8_wire_id current[MERKLE_VT_MAX_NODE_BYTES];
+    h->leaf_circuit(c, leaf_data, leaf_data_bytes, current);
+
+    walk_inodes_secret_dir(c, h, current, path_nodes, path_dirs, depth);
+
+    for (size_t i = 0; i < W; i++)
+        root[i] = current[i];
+    return 0;
+}
+
+int
+merkle_vt_gf8_path_from_leaf_node_secret_dir(voleith_gf8_circuit_t *c,
+                                             const voleith_node_hash_vt *h,
+                                             const gf8_wire_id *leaf_node,
+                                             const gf8_wire_id *path_nodes,
+                                             const gf8_wire_id *path_dirs,
+                                             size_t depth, gf8_wire_id *root)
+{
+    if (h->node_bytes > MERKLE_VT_MAX_NODE_BYTES)
+        return -1;
+    size_t W = h->node_bytes;
+
+    gf8_wire_id current[MERKLE_VT_MAX_NODE_BYTES];
+    for (size_t i = 0; i < W; i++)
+        current[i] = leaf_node[i];
+
+    walk_inodes_secret_dir(c, h, current, path_nodes, path_dirs, depth);
 
     for (size_t i = 0; i < W; i++)
         root[i] = current[i];

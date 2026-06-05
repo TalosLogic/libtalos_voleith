@@ -64,6 +64,46 @@
  *   grostl256_gf8_circuit / grostl512_gf8_circuit - Grøstl hash
  *   merkle_grostl_gf8_path_circuit              - Wide-node Grøstl Merkle path
  *   indexed_merkle_grostl_gf8_nonmember_circuit - Wide-node Grøstl indexed non-membership
+ *   merkle_vt_gf8_path_circuit                  - Hash-agnostic Merkle path (vt-driven)
+ *   merkle_vt_gf8_indexed_nonmember_circuit     - Hash-agnostic indexed Merkle non-membership
+ *
+ * ================================================================
+ * Node-hash vt registry
+ * ================================================================
+ *
+ * The vt-driven (hash-agnostic) Merkle / IMT circuits and the RSv1 ring
+ * signature layer accept any wrapped voleith_node_hash_vt:
+ *
+ *   voleith_node_hash_aes_dm        - AES-128 Davies-Meyer    (16B, 2⁶⁴  CR)
+ *   voleith_node_hash_aes_cmac128   - AES-128-CMAC            (16B, 2⁶⁴  CR)
+ *   voleith_node_hash_aes_cmac256   - AES-256-CMAC            (16B, 2⁶⁴  CR)
+ *   voleith_node_hash_grostl256     - Grøstl-256              (32B, 2¹²⁸ CR)
+ *   voleith_node_hash_grostl256_t27 - Grøstl-256 truncated 27 (27B, 2¹⁰⁸ CR)
+ *   voleith_node_hash_grostl512     - Grøstl-512              (64B, 2²⁵⁶ CR)
+ *   voleith_node_hash_grostl512_t59 - Grøstl-512 truncated 59 (59B, 2²³⁶ CR)
+ *   voleith_node_hash_hirose        - Hirose-AES-256 variable (32B, 2¹²⁸ CR)
+ *   voleith_node_hash_hirose_fixed32- Hirose-AES-256 fixed-32 (32B, 2¹²⁸ CR)
+ *
+ * See circuits/node_hash_vt.h for the vt struct and the rationale per
+ * variant.
+ *
+ * ================================================================
+ * RSv1 ring signatures
+ * ================================================================
+ *
+ * voleith_rsv1_* wraps the vt-driven Merkle / IMT circuits into a
+ * non-interactive ring signature with optional revocation.  Statement:
+ * "I know sk such that OWF(sk) is in the membership tree at root R
+ * (and, optionally, NOT in the revocation IMT at root V); m is bound
+ * via Fiat-Shamir."
+ *
+ *   voleith_rsv1_ring_build(cfg, sks, n, root_out, paths_out, ...)
+ *   voleith_rsv1_sign(sig, cfg, params, sk, R, membership, V, revocation, m)
+ *   voleith_rsv1_verify(sig, cfg, params, R, V, m)
+ *   voleith_ring_sig_pack / _unpack    - on-the-wire envelope ("VRS1")
+ *
+ * See proof/ring_sig_v1_gf8.h and docs/RSV1_DESIGN.md for the full API
+ * and protocol spec.
  *
  * ================================================================
  * VOLE slot costs (ell = n_witness + n_mul)
@@ -124,9 +164,9 @@
 /* Library version */
 #ifndef VOLEITH_VERSION_MAJOR
 #define VOLEITH_VERSION_MAJOR 1
-#define VOLEITH_VERSION_MINOR 3
+#define VOLEITH_VERSION_MINOR 4
 #define VOLEITH_VERSION_PATCH 0
-#define VOLEITH_VERSION_STRING "1.3.0"
+#define VOLEITH_VERSION_STRING "1.4.0"
 #endif
 
 /* GF(2⁸) proof system: circuit builder and prove/verify API */
@@ -143,5 +183,16 @@
 #include "grostl_gf8_circuit.h"
 #include "merkle_grostl_gf8_circuit.h"
 #include "indexed_merkle_grostl_gf8_circuit.h"
+
+/* Hash-agnostic (vt-driven) Merkle / IMT stack */
+#include "node_hash_vt.h"
+#include "merkle_vt_gf8_circuit.h"
+#include "indexed_merkle_vt_gf8_circuit.h"
+#include "merkle_vt_gf8_helpers.h"
+#include "indexed_merkle_vt_gf8_helpers.h"
+
+/* RSv1 ring signatures */
+#include "ring_sig_v1_gf8.h"
+#include "ring_sig_v1_gf8_circuit.h"
 
 #endif /* VOLEITH_GF8_H */
