@@ -111,4 +111,17 @@ void voleith_grostl_finalize(voleith_grostl_ctx_t *ctx, uint8_t *out);
  */
 void voleith_grostl_clear(voleith_grostl_ctx_t *ctx);
 
+/*
+ * Return a short string naming the active SubBytes backend: "aesni",
+ * "armv8", or "soft".  Triggers dispatch initialization if not yet done.
+ */
+const char *voleith_grostl_backend_name(void);
+
+/*
+ * Reset the dispatch table to uninitialized, forcing reselection on the
+ * next Groestl call.  Use only in tests, in combination with
+ * voleith_cpu_features_override(), to cycle through backends.
+ */
+void voleith_grostl_dispatch_reset(void);
+
 #endif /* VOLEITH_GROSTL_H */

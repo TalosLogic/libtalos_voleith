@@ -2,22 +2,20 @@
  * Copyright (c) 2026 Jason Crawford
  * SPDX-License-Identifier: AGPL-3.0-only
  *
- * test_aes.c - Tests for the voleith_aes backend (AES-NI or
- * table-lookup software, depending on build flags).
+ * test_aes.c - Tests for the voleith_aes public API.
  *
- * NIST known-answer vectors are exercised via the shared
- * aes_kat_run_all() runner - same vector set as test_aes_ct64.
- * This file also covers the backend-specific tests that the runner
- * does not handle: FIPS 197 Appendix A round-key inspection,
- * in-place (aliased in==out) encryption, and rejection of invalid
- * key sizes.
+ * Runs the full test suite against whatever backend is active: FIPS 197
+ * round-key inspection (HW backends only), in-place encrypt, encrypt_x4,
+ * invalid key-size rejection, and the NIST KAT suite via the shared runner.
+ * CTest registers this binary twice -- once with the hardware backend and
+ * once with VOLEITH_FORCE_BACKEND=aes:bitsliced -- to cover both paths.
  */
 
 #include "aes.h"
 #include "aes_kat_runner.h"
+
 #include <stdio.h>
 #include <string.h>
-#include <stdlib.h>
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -47,7 +45,7 @@ hex_print(const uint8_t *data, size_t len)
     } while (0)
 
 /* ================================================================
- * KAT-runner adapter for the voleith_aes backend.
+ * KAT-runner adapter.
  * ================================================================ */
 
 static int
@@ -65,18 +63,11 @@ voleith_aes_kat_adapter(int key_bits, const uint8_t *key, uint8_t out[16],
 /* ================================================================
  * FIPS 197 Appendix A - round-key inspection.
  *
- * The KAT runner validates that the final ciphertext is correct;
- * these tests verify intermediate state (the last round key) to
- * catch a class of key-schedule bug where the first and last bytes
- * land correctly but middle bytes are wrong.  Backend-specific
- * because they peek at the ctx.rk byte layout - only the AES-NI
- * and ARMv8 backends carry round keys in that layout; the bitsliced
- * backend uses a bit-plane representation that this test cannot
- * inspect directly.  Bitsliced correctness for key schedule is
- * established by the KAT runner.
+ * Only valid for AES-NI and ARMv8 backends, which store expanded
+ * round keys as a flat byte array in ctx.storage[0..239].
+ * Bitsliced backend stores bit-plane round keys; correctness for
+ * that backend is established by the KAT runner.
  * ================================================================ */
-
-#if defined(VOLEITH_HAVE_AES_NI) || defined(VOLEITH_HAVE_ARMV8_AES)
 
 static void
 test_aes128_key_expansion(void)
@@ -92,11 +83,11 @@ test_aes128_key_expansion(void)
 
     voleith_aes_key_expand(&ctx, key, 128);
 
-    if (memcmp(&ctx.rk[160], last_rk, 16) != 0) {
+    if (memcmp(&ctx.storage[160], last_rk, 16) != 0) {
         printf("FAIL\n    expected last rk: ");
         hex_print(last_rk, 16);
         printf("\n    got:               ");
-        hex_print(&ctx.rk[160], 16);
+        hex_print(&ctx.storage[160], 16);
         printf("\n");
         return;
     }
@@ -119,18 +110,16 @@ test_aes256_key_expansion(void)
 
     voleith_aes_key_expand(&ctx, key, 256);
 
-    if (memcmp(&ctx.rk[224], last_rk, 16) != 0) {
+    if (memcmp(&ctx.storage[224], last_rk, 16) != 0) {
         printf("FAIL\n    expected last rk: ");
         hex_print(last_rk, 16);
         printf("\n    got:               ");
-        hex_print(&ctx.rk[224], 16);
+        hex_print(&ctx.storage[224], 16);
         printf("\n");
         return;
     }
     PASS();
 }
-
-#endif /* VOLEITH_HAVE_AES_NI || VOLEITH_HAVE_ARMV8_AES */
 
 /* ================================================================
  * In-place (aliased in == out) encrypt.
@@ -166,11 +155,6 @@ test_aes128_inplace(void)
 
 /* ================================================================
  * voleith_aes_encrypt_x4 vs four serial single-block encrypts.
- *
- * The default implementation chains four single-block calls, so
- * this test mainly guards against future backend-specific overrides
- * (e.g., dispatch to aes_ct64_encrypt_x4) introducing a divergence.
- * Also exercises aliasing of in/out, which the public API allows.
  * ================================================================ */
 
 static void
@@ -180,7 +164,6 @@ test_aes128_encrypt_x4(void)
 
     const uint8_t key[16] = {0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
                              0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c};
-    /* Four distinct plaintexts to exercise per-block routing. */
     const uint8_t in[64] = {
         0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e,
         0x11, 0x73, 0x93, 0x17, 0x2a, 0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03,
@@ -212,7 +195,6 @@ test_aes128_encrypt_x4(void)
         return;
     }
 
-    /* Aliased in/out: scratch buffer encrypted in place. */
     uint8_t buf[64];
     memcpy(buf, in, 64);
     voleith_aes_encrypt_x4(&ctx, buf, buf);
@@ -248,32 +230,38 @@ test_invalid_key_size(void)
 }
 
 /* ================================================================
+ * Test suite entry point.
+ * ================================================================ */
+
+static void
+run_all_tests(void)
+{
+    voleith_aes_backend_t be = voleith_aes_backend();
+
+    /* Round-key inspection: flat byte layout valid only for HW backends. */
+    if (be == VOLEITH_AES_BACKEND_AESNI || be == VOLEITH_AES_BACKEND_ARMV8) {
+        test_aes128_key_expansion();
+        test_aes256_key_expansion();
+    }
+
+    test_aes128_inplace();
+    test_aes128_encrypt_x4();
+    test_invalid_key_size();
+
+    aes_kat_run_all("voleith_aes", voleith_aes_kat_adapter, &tests_run,
+                    &tests_passed);
+}
+
+/* ================================================================
  * Main
  * ================================================================ */
 
 int
 main(void)
 {
-    int failures = 0;
-
-    printf("AES tests (voleith_aes backend)\n");
-    printf("================================\n");
-    printf("active backend: %s\n", voleith_aes_backend_name());
-
-    /* Backend-specific tests. */
-    printf("\n  Backend-specific\n");
-#if defined(VOLEITH_HAVE_AES_NI) || defined(VOLEITH_HAVE_ARMV8_AES)
-    test_aes128_key_expansion();
-    test_aes256_key_expansion();
-#endif
-    test_aes128_inplace();
-    test_aes128_encrypt_x4();
-    test_invalid_key_size();
-
-    /* Full NIST KAT suite via shared runner. */
-    failures += aes_kat_run_all("voleith_aes", voleith_aes_kat_adapter,
-                                &tests_run, &tests_passed);
-
+    printf("AES tests (%s)\n", voleith_aes_backend_name());
+    printf("=====================================\n");
+    run_all_tests();
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
-    return (tests_passed == tests_run && failures == 0) ? 0 : 1;
+    return (tests_passed == tests_run) ? 0 : 1;
 }

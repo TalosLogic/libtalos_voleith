@@ -5,6 +5,79 @@ All notable changes to libtalos_voleith are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] 2026-06-09
+
+Collapses the previous per-ISA library variants (`libvoleith_sw.a`,
+`libvoleith_aesni.a`, `libvoleith_clmul.a`, `libvoleith_aesni_clmul.a`,
+and the parallel ARMv8 set) into a single `libtalos_voleith` artefact
+that detects host CPU features at first use and routes through a
+function-pointer dispatch table to the highest-priority compiled-in
+backend. No public API or wire-format change; existing proofs verify
+unchanged. See DESIGN.md "Runtime Hardware Dispatch (Single-Binary Fat
+Builds)" for the full design, lean-build opt-outs, and test profile.
+
+### Added
+
+- `core/cpu.{c,h}`, `core/cpu_x86.c`, `core/cpu_aarch64.c`,
+  `core/cpu_generic.c`: per-architecture CPU feature probe with cached
+  bitmask, exposed via `voleith_cpu_features()`. Bits are stable across
+  versions. `voleith_cpu_features_override()` is provided for tests.
+- `VOLEITH_FORCE_BACKEND` environment variable: comma-separated
+  `domain:value` list that strips feature bits so dispatch routes to a
+  specific backend. Recognised values cover all three domains. Unknown
+  values abort with a diagnostic.
+- `VOLEITH_QUIET=1` suppresses the lean-build mismatch notice.
+- `core/aes_dispatch.h`, `core/field_dispatch.h`, `core/grostl_dispatch.h`:
+  internal ops-table types and per-backend extern declarations.
+- `core/aes_aesni.{c,h}`, `core/aes_armv8.{c,h}`, `core/aes_ct64_ops.c`,
+  `core/field_clmul.c`, `core/field_pmull.c`, `core/field_scalar.c`,
+  `core/grostl_aesni.c`, `core/grostl_armv8.c`, `core/grostl_soft.c`,
+  `core/grostl_core.h`: per-backend translation units, each gated by
+  `VOLEITH_HAVE_*` macros and compiled with ISA flags scoped to the
+  single TU via `set_source_files_properties`.
+- `voleith_aes_backend()`, `voleith_aes_backend_name()`,
+  `voleith_grostl_backend_name()`: diagnostic introspection of which
+  backend the dispatcher selected.
+- `tests/test_cpu_dispatch.c`, `tests/test_cpu_features.c`,
+  `tests/test_lean_build_warning.c`: coverage for the probe, dispatch
+  tables, override parsing, and mismatch-notice path.
+
+### Changed
+
+- `core/aes.c`, `core/field.c`, `core/grostl.c` reduced to public
+  forwarders + dispatch-init only. Per-backend implementations moved
+  to their own TUs. The forwarder branch on the atomic ops-table
+  pointer adds one acquire load + one indirect call per public call.
+- `CMakeLists.txt`: drops the variant matrix; builds one
+  `voleith_core` (static) + optional `voleith_core_shared` containing
+  every compiled-in backend. Build options `VOLEITH_AES_NI`,
+  `VOLEITH_CLMUL`, `VOLEITH_ARMV8_AES`, `VOLEITH_PMULL` are now
+  lean-build opt-outs (omit the corresponding backend TU); the
+  bitsliced AES and scalar field backends are always compiled as the
+  unconditional dispatch floor.
+- `tests/CMakeLists.txt`: every `voleith_add_test` registration now
+  produces two ctest entries, `<NAME>` (hardware-dispatched) and
+  `<NAME>_sw` (`VOLEITH_FORCE_BACKEND=aes:bitsliced,field:scalar,grostl:soft`
+  in the environment). Validates both paths on every host without
+  rebuilds.
+- `include/voleith.h` pulls in `cpu.h` so the feature probe is part
+  of the public umbrella header.
+- `proof/proof_header.h` documents the AES backend selection priority
+  in the `aes.h` header comment for cross-reference.
+
+### Security
+
+- All three compiled-in AES backends and both field backends remain
+  constant-time. The dispatch decision is made on a data-independent
+  feature bitmask; the function pointer selected is invariant for
+  process lifetime, so secret data never influences which backend
+  handles it.
+- On a lean build deployed to a hardware-capable host, the dispatch
+  init emits a one-shot stderr notice naming the missing backend, the
+  expected slowdown, and the configure flag that re-enables it.
+  Intended as a misconfiguration backstop for accidental lean-build
+  releases.
+
 ## [1.4.0] 2026-06-05
 
 Adds RSv1 ring signatures: a non-interactive, publicly verifiable ring

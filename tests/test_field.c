@@ -4,8 +4,11 @@
  *
  * test_field.c - Test suite for GF(2^k) field arithmetic
  *
- * Tests against known AES test vectors (FIPS 197) for GF(2^8),
- * and algebraic property tests for all field sizes.
+ * GF(2^8) and GF(2^64) tests run once (single-implementation).
+ * GF(2^128/192/256) and ByteCombine tests run against whatever field backend
+ * is active.  CTest registers this binary twice -- once with the hardware
+ * backend and once with VOLEITH_FORCE_BACKEND=field:scalar -- to cover both
+ * paths.
  */
 
 #include "field.h"
@@ -100,20 +103,13 @@ test_gf8_mul_commutative(void)
     PASS();
 }
 
-/*
- * Known AES test vectors from FIPS 197, Section 4.2.1:
- *   {57} * {83} = {c1}
- *   {57} * {13} = {fe}
- */
 static void
 test_gf8_mul_aes_vectors(void)
 {
     TEST("gf8: AES test vectors");
     ASSERT_EQ(voleith_gf8_mul(0x57, 0x83), 0xc1, "{57}*{83} != {c1}");
     ASSERT_EQ(voleith_gf8_mul(0x57, 0x13), 0xfe, "{57}*{13} != {fe}");
-    /* xtime({57}) = {ae} (multiply by x = 0x02) */
     ASSERT_EQ(voleith_gf8_mul(0x57, 0x02), 0xae, "{57}*{02} != {ae}");
-    /* {ae} * {02} = {47} ^ {1b} = {47}^{1b} */
     ASSERT_EQ(voleith_gf8_mul(0xae, 0x02), 0x47, "{ae}*{02} != {47}");
     PASS();
 }
@@ -122,7 +118,6 @@ static void
 test_gf8_mul_associative(void)
 {
     TEST("gf8: mul associative (spot check)");
-    /* Test a sample of values for (a*b)*c == a*(b*c) */
     uint8_t vals[] = {0x00, 0x01, 0x02, 0x53, 0xCA, 0xFF, 0x83, 0x57};
     int n = (int)(sizeof(vals) / sizeof(vals[0]));
     for (int i = 0; i < n; i++) {
@@ -211,8 +206,19 @@ test_gf64_mul_associative(void)
     PASS();
 }
 
+static void
+test_gf64_mul_faest_ref(void)
+{
+    TEST("gf64: faest-ref known-answer vector");
+    voleith_gf64_t lhs = UINT64_C(0xefcdab8967452301);
+    voleith_gf64_t rhs = UINT64_C(0x0123456789abcdef);
+    voleith_gf64_t expected = UINT64_C(0x490c13538cc9d696);
+    ASSERT_EQ(voleith_gf64_mul(lhs, rhs), expected, "gf64 mul mismatch");
+    PASS();
+}
+
 /* ========================================================================
- * GF(2^128) tests
+ * GF(2^128) tests - run under each field backend
  * ======================================================================== */
 
 static void
@@ -316,10 +322,8 @@ test_gf128_mul_squaring(void)
     voleith_gf128_t a = {{0xDEADBEEFCAFEBABEULL, 0x0102030405060708ULL}};
     voleith_gf128_t aa;
     voleith_gf128_mul(&aa, &a, &a);
-    /* a^2 should not be zero for non-zero a */
     voleith_gf128_t zero = voleith_gf128_zero();
     ASSERT_EQ(voleith_gf128_eq(&aa, &zero), 0, "a*a == 0 for non-zero a");
-    /* a^2 * 1 = a^2 */
     voleith_gf128_t one = voleith_gf128_one();
     voleith_gf128_t aa1;
     voleith_gf128_mul(&aa1, &aa, &one);
@@ -327,8 +331,42 @@ test_gf128_mul_squaring(void)
     PASS();
 }
 
+static void
+test_gf128_bytes_roundtrip(void)
+{
+    TEST("gf128: bytes round-trip");
+    uint8_t buf[16] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+                       0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10};
+    voleith_gf128_t a;
+    uint8_t buf2[16];
+    voleith_gf128_from_bytes(&a, buf);
+    voleith_gf128_to_bytes(buf2, &a);
+    ASSERT_EQ(memcmp(buf, buf2, 16), 0, "round-trip failed");
+    PASS();
+}
+
+static void
+test_gf128_mul_faest_ref(void)
+{
+    TEST("gf128: faest-ref known-answer vector");
+    uint8_t lhs_bytes[16] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+                             0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef};
+    uint8_t rhs_bytes[16] = {0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01,
+                             0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01};
+    uint8_t exp_bytes[16] = {0xe2, 0x3d, 0x64, 0xab, 0xb2, 0x4c, 0x15, 0xda,
+                             0x43, 0x9c, 0xc5, 0x0a, 0x13, 0xed, 0xb4, 0x7b};
+
+    voleith_gf128_t lhs, rhs, result, expected;
+    voleith_gf128_from_bytes(&lhs, lhs_bytes);
+    voleith_gf128_from_bytes(&rhs, rhs_bytes);
+    voleith_gf128_from_bytes(&expected, exp_bytes);
+    voleith_gf128_mul(&result, &lhs, &rhs);
+    ASSERT_EQ(voleith_gf128_eq(&result, &expected), 1, "gf128 mul mismatch");
+    PASS();
+}
+
 /* ========================================================================
- * GF(2^192) tests
+ * GF(2^192) tests - run under each field backend
  * ======================================================================== */
 
 static void
@@ -375,8 +413,31 @@ test_gf192_mul_associative(void)
     PASS();
 }
 
+static void
+test_gf192_mul_faest_ref(void)
+{
+    TEST("gf192: faest-ref known-answer vector");
+    uint8_t lhs_bytes[24] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+                             0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+                             0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef};
+    uint8_t rhs_bytes[24] = {0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01,
+                             0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01,
+                             0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01};
+    uint8_t exp_bytes[24] = {0x22, 0xdc, 0x85, 0x4a, 0x53, 0xad, 0xf4, 0x3b,
+                             0xa2, 0x7d, 0x24, 0xeb, 0xf2, 0x0c, 0x55, 0x9a,
+                             0x03, 0xdc, 0x85, 0x4a, 0x53, 0xad, 0xf4, 0x3b};
+
+    voleith_gf192_t lhs, rhs, result, expected;
+    voleith_gf192_from_bytes(&lhs, lhs_bytes);
+    voleith_gf192_from_bytes(&rhs, rhs_bytes);
+    voleith_gf192_from_bytes(&expected, exp_bytes);
+    voleith_gf192_mul(&result, &lhs, &rhs);
+    ASSERT_EQ(voleith_gf192_eq(&result, &expected), 1, "gf192 mul mismatch");
+    PASS();
+}
+
 /* ========================================================================
- * GF(2^256) tests
+ * GF(2^256) tests - run under each field backend
  * ======================================================================== */
 
 static void
@@ -423,88 +484,6 @@ test_gf256_mul_associative(void)
     PASS();
 }
 
-/* ========================================================================
- * Serialization / round-trip tests
- * ======================================================================== */
-
-static void
-test_gf128_bytes_roundtrip(void)
-{
-    TEST("gf128: bytes round-trip");
-    uint8_t buf[16] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
-                       0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10};
-    voleith_gf128_t a;
-    uint8_t buf2[16];
-    voleith_gf128_from_bytes(&a, buf);
-    voleith_gf128_to_bytes(buf2, &a);
-    ASSERT_EQ(memcmp(buf, buf2, 16), 0, "round-trip failed");
-    PASS();
-}
-
-/* ========================================================================
- * faest-ref known-answer test vectors
- *
- * These test concrete multiplication results against the faest-ref
- * implementation (MIT licensed, used as test oracle only per CLAUDE.md).
- * ======================================================================== */
-
-static void
-test_gf64_mul_faest_ref(void)
-{
-    TEST("gf64: faest-ref known-answer vector");
-    /* lhs = {0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef} (LE bytes) */
-    voleith_gf64_t lhs = UINT64_C(0xefcdab8967452301);
-    /* rhs = {0xef,0xcd,0xab,0x89,0x67,0x45,0x23,0x01} */
-    voleith_gf64_t rhs = UINT64_C(0x0123456789abcdef);
-    /* expected = {0x96,0xd6,0xc9,0x8c,0x53,0x13,0x0c,0x49} */
-    voleith_gf64_t expected = UINT64_C(0x490c13538cc9d696);
-    ASSERT_EQ(voleith_gf64_mul(lhs, rhs), expected, "gf64 mul mismatch");
-    PASS();
-}
-
-static void
-test_gf128_mul_faest_ref(void)
-{
-    TEST("gf128: faest-ref known-answer vector");
-    uint8_t lhs_bytes[16] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-                             0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef};
-    uint8_t rhs_bytes[16] = {0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01,
-                             0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01};
-    uint8_t exp_bytes[16] = {0xe2, 0x3d, 0x64, 0xab, 0xb2, 0x4c, 0x15, 0xda,
-                             0x43, 0x9c, 0xc5, 0x0a, 0x13, 0xed, 0xb4, 0x7b};
-
-    voleith_gf128_t lhs, rhs, result, expected;
-    voleith_gf128_from_bytes(&lhs, lhs_bytes);
-    voleith_gf128_from_bytes(&rhs, rhs_bytes);
-    voleith_gf128_from_bytes(&expected, exp_bytes);
-    voleith_gf128_mul(&result, &lhs, &rhs);
-    ASSERT_EQ(voleith_gf128_eq(&result, &expected), 1, "gf128 mul mismatch");
-    PASS();
-}
-
-static void
-test_gf192_mul_faest_ref(void)
-{
-    TEST("gf192: faest-ref known-answer vector");
-    uint8_t lhs_bytes[24] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-                             0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-                             0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef};
-    uint8_t rhs_bytes[24] = {0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01,
-                             0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01,
-                             0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01};
-    uint8_t exp_bytes[24] = {0x22, 0xdc, 0x85, 0x4a, 0x53, 0xad, 0xf4, 0x3b,
-                             0xa2, 0x7d, 0x24, 0xeb, 0xf2, 0x0c, 0x55, 0x9a,
-                             0x03, 0xdc, 0x85, 0x4a, 0x53, 0xad, 0xf4, 0x3b};
-
-    voleith_gf192_t lhs, rhs, result, expected;
-    voleith_gf192_from_bytes(&lhs, lhs_bytes);
-    voleith_gf192_from_bytes(&rhs, rhs_bytes);
-    voleith_gf192_from_bytes(&expected, exp_bytes);
-    voleith_gf192_mul(&result, &lhs, &rhs);
-    ASSERT_EQ(voleith_gf192_eq(&result, &expected), 1, "gf192 mul mismatch");
-    PASS();
-}
-
 static void
 test_gf256_mul_faest_ref(void)
 {
@@ -532,14 +511,7 @@ test_gf256_mul_faest_ref(void)
 }
 
 /* ========================================================================
- * ByteCombine ring homomorphism tests
- *
- * The alpha tables (gf128_alpha, gf192_alpha, gf256_alpha) encode alpha_8,
- * the root of P_8 = x^8+x^4+x^3+x+1 embedded in GF(2^lambda).  The ring
- * homomorphism property must hold: embed(a)*embed(b) == embed(a*b) for all
- * a,b in GF(2^8).  We test every a in {0..255} against each of the 8
- * single-bit b values {0x01,0x02,...,0x80} so that each alpha power is
- * exercised independently.  A bug in alpha[i] is caught by b = 1<<i.
+ * ByteCombine ring homomorphism tests - run under each field backend
  * ======================================================================== */
 
 static void
@@ -658,7 +630,44 @@ test_byte_combine_ring_hom_256(void)
 }
 
 /* ========================================================================
- * Main test runner
+ * Test suite entry point for dispatched operations
+ * ======================================================================== */
+
+static void
+run_dispatched_tests(void)
+{
+    printf("  === GF(2^128) ===\n");
+    test_gf128_add_identity();
+    test_gf128_add_self_inverse();
+    test_gf128_mul_identity();
+    test_gf128_mul_zero();
+    test_gf128_mul_commutative();
+    test_gf128_mul_associative();
+    test_gf128_mul_distributive();
+    test_gf128_mul_squaring();
+    test_gf128_bytes_roundtrip();
+    test_gf128_mul_faest_ref();
+
+    printf("  === GF(2^192) ===\n");
+    test_gf192_mul_identity();
+    test_gf192_mul_commutative();
+    test_gf192_mul_associative();
+    test_gf192_mul_faest_ref();
+
+    printf("  === GF(2^256) ===\n");
+    test_gf256_mul_identity();
+    test_gf256_mul_commutative();
+    test_gf256_mul_associative();
+    test_gf256_mul_faest_ref();
+
+    printf("  === ByteCombine Ring Homomorphism ===\n");
+    test_byte_combine_ring_hom_128();
+    test_byte_combine_ring_hom_192();
+    test_byte_combine_ring_hom_256();
+}
+
+/* ========================================================================
+ * main
  * ======================================================================== */
 
 int
@@ -681,34 +690,8 @@ main(void)
     test_gf64_mul_associative();
     test_gf64_mul_faest_ref();
 
-    printf("\n=== GF(2^128) Tests ===\n");
-    test_gf128_add_identity();
-    test_gf128_add_self_inverse();
-    test_gf128_mul_identity();
-    test_gf128_mul_zero();
-    test_gf128_mul_commutative();
-    test_gf128_mul_associative();
-    test_gf128_mul_distributive();
-    test_gf128_mul_squaring();
-    test_gf128_bytes_roundtrip();
-    test_gf128_mul_faest_ref();
-
-    printf("\n=== GF(2^192) Tests ===\n");
-    test_gf192_mul_identity();
-    test_gf192_mul_commutative();
-    test_gf192_mul_associative();
-    test_gf192_mul_faest_ref();
-
-    printf("\n=== GF(2^256) Tests ===\n");
-    test_gf256_mul_identity();
-    test_gf256_mul_commutative();
-    test_gf256_mul_associative();
-    test_gf256_mul_faest_ref();
-
-    printf("\n=== ByteCombine Ring Homomorphism Tests ===\n");
-    test_byte_combine_ring_hom_128();
-    test_byte_combine_ring_hom_192();
-    test_byte_combine_ring_hom_256();
+    printf("\n=== Dispatched field tests ===\n");
+    run_dispatched_tests();
 
     printf("\n=== Results: %d/%d passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

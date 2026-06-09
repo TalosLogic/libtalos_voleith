@@ -8,14 +8,14 @@
  * Only encryption is provided - decryption is not needed for the
  * VOLEitH protocol (PRG uses AES-CTR which only needs encrypt).
  *
- * Backend selection happens at compile time, in this priority:
- *   1. AES-NI         (x86_64; VOLEITH_HAVE_AES_NI defined).
- *   2. ARMv8 Crypto   (aarch64; VOLEITH_HAVE_ARMV8_AES defined).
- *   3. Bitsliced      (portable constant-time; default fallback).
+ * Backend selection happens at runtime via a function-pointer dispatch
+ * table populated on first use from voleith_cpu_features().  Priority:
+ *   1. AES-NI         (x86_64; VOLEITH_HAVE_AES_NI compiled in).
+ *   2. ARMv8 Crypto   (aarch64; VOLEITH_HAVE_ARMV8_AES compiled in).
+ *   3. Bitsliced      (portable constant-time; always compiled in).
  *
- * All three backends are constant-time.  The bitsliced backend
- * (core/aes_ct64.c) is the universal fallback and is always compiled
- * in when no hardware backend is selected.
+ * All three backends are constant-time.  VOLEITH_FORCE_BACKEND (env
+ * var) can pin a specific backend for testing; see core/cpu.h.
  */
 
 #ifndef VOLEITH_AES_H
@@ -24,42 +24,43 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define VOLEITH_AES_MAX_RK_BYTES (15 * 16)
+/*
+ * Size of the round-key storage array in voleith_aes_ctx_t.
+ *
+ * Must be large enough for every compiled-in backend:
+ *   AES-NI / ARMv8:  15 round keys * 16 bytes = 240 bytes.
+ *   Bitsliced:       15 rounds * 8 bit-planes * 8 bytes = 960 bytes.
+ *
+ * 960 bytes is the union-of-max.  AES-NI and ARMv8 backends use only
+ * the first 240 bytes; the remaining 720 bytes are unused in those
+ * paths.  At most a handful of contexts exist per proof session so the
+ * overhead (~2 KB total) is invisible against the working-set size.
+ */
+#define VOLEITH_AES_CTX_STORAGE_BYTES 960
 
 /*
  * AES key context.
  *
- * Layout depends on the selected backend:
- *   - AES-NI / ARMv8: 240-byte expanded round-key table.
- *   - Bitsliced: bit-plane round keys (uint64_t[15][8]).
+ * A single layout used by all backends.  The interpretation of
+ * storage[] is backend-specific:
+ *   AES-NI / ARMv8: storage[0..239] holds the expanded round-key table
+ *                   (up to 15 * 16 bytes of uint8_t round keys).
+ *   Bitsliced:      storage[0..959] holds uint64_t[15][8] bit-plane
+ *                   round keys.
  *
- * The two layouts are deliberately not interchangeable; downstream
- * code that peeks at ctx.rk[] (e.g., FIPS 197 Appendix A round-key
- * inspection in test_aes.c) only applies to the byte-rep backends.
- */
-#if defined(VOLEITH_HAVE_AES_NI) || defined(VOLEITH_HAVE_ARMV8_AES)
-
-/*
- * The AES-NI key-expand and encrypt paths cast ctx->rk to (__m128i *)
- * and dereference it as rk[i], which compilers emit as MOVDQA
- * (aligned-only).  Without an explicit alignment the struct's natural
- * alignment is _Alignof(int) = 4 and a stack-local instance can land
- * on an offset that #GP-faults the aligned store/load.  Forcing
- * 16-byte alignment on rk also bumps the struct's alignment so
- * embeddings (heap, stack, or as a member of a larger struct) carry
- * the requirement through.
+ * The backend_tag field records which backend last called key_expand
+ * on this context.  Useful for round-key inspection in tests.
+ *
+ * The _Alignas(16) ensures that AES-NI backends can cast storage to
+ * __m128i * and use aligned MOVDQA loads/stores without faulting.
+ * It also satisfies the uint64_t alignment requirement for the
+ * bitsliced backend.
  */
 typedef struct {
-    _Alignas(16) uint8_t rk[VOLEITH_AES_MAX_RK_BYTES];
+    _Alignas(16) uint8_t storage[VOLEITH_AES_CTX_STORAGE_BYTES];
     int nr;
+    uint8_t backend_tag; /* VOLEITH_AES_BACKEND_* value */
 } voleith_aes_ctx_t;
-
-#else
-
-#include "aes_ct64.h"
-typedef aes_ct64_ctx_t voleith_aes_ctx_t;
-
-#endif
 
 /*
  * Expands the cipher key into round keys.
@@ -99,11 +100,9 @@ void voleith_aes_encrypt_x4(const voleith_aes_ctx_t *ctx, uint8_t out[64],
 void voleith_aes_ctx_clear(voleith_aes_ctx_t *ctx);
 
 /*
- * Identifies the AES backend compiled into the library (selected
- * at build time via the dispatch macros documented at the top of
- * this header).  Applications can call voleith_aes_backend_name()
- * during startup logging to make the active backend visible in
- * operational logs.
+ * Identifies the AES backend currently selected by the dispatch table.
+ * On the first call, triggers dispatch initialization (reads
+ * voleith_cpu_features()).
  */
 typedef enum {
     VOLEITH_AES_BACKEND_AESNI = 1,
@@ -118,5 +117,25 @@ voleith_aes_backend_t voleith_aes_backend(void);
  * backend.  Caller does not free.
  */
 const char *voleith_aes_backend_name(void);
+
+/*
+ * Initialise the AES dispatch table if it has not been set yet.
+ * Selects the highest-priority compiled-in backend whose required
+ * feature bits are present in voleith_cpu_features().  Also emits
+ * the lean-build notice when applicable.  Called lazily by every
+ * public forwarder; may be called explicitly by tests.
+ *
+ * DO NOT call this in production code.
+ */
+void voleith_aes_dispatch_init(void);
+
+/*
+ * Reset the AES dispatch table to NULL so the next forwarder call
+ * re-runs voleith_aes_dispatch_init().  Used by the test suite to
+ * cycle through backends via voleith_cpu_features_override().
+ *
+ * DO NOT call this in production code.
+ */
+void voleith_aes_dispatch_reset(void);
 
 #endif /* VOLEITH_AES_H */

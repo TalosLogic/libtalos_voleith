@@ -2,17 +2,17 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 cmake_minimum_required(VERSION 3.16)
-project(libvoleith VERSION 1.4.0 LANGUAGES C)
+project(libvoleith VERSION 1.4.1 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
 # Build options
-option(VOLEITH_AES_NI     "Enable x86 AES-NI intrinsics"                       ON)
-option(VOLEITH_CLMUL      "Enable x86 CLMUL (PCLMULQDQ) intrinsics"            ON)
-option(VOLEITH_ARMV8_AES  "Enable ARMv8 Crypto Extension AES instructions"     ON)
-option(VOLEITH_PMULL      "Enable ARMv8 PMULL carry-less multiply instruction"  ON)
+option(VOLEITH_AES_NI     "Compile AES-NI backend (omit for lean build)"              ON)
+option(VOLEITH_CLMUL      "Compile CLMUL (PCLMULQDQ) field backend (omit for lean build)" ON)
+option(VOLEITH_ARMV8_AES  "Compile ARMv8 AES backend (omit for lean build)"         ON)
+option(VOLEITH_PMULL      "Compile ARMv8 PMULL field backend (omit for lean build)"  ON)
 option(VOLEITH_BUILD_TESTS "Build test suite" ON)
 option(VOLEITH_BUILD_EXAMPLES "Build example programs" ON)
 option(VOLEITH_BUILD_SHARED "Build shared library (libvoleith.so/.dylib) in addition to static" OFF)
@@ -156,18 +156,30 @@ endif()
 unset(_ARMV8_AES_SRC)
 unset(_ARMV8_PMULL_SRC)
 
-# Tell the build engineer (and CI/CD log scrapers) which AES and
-# field backends the production library will use.  Variants below
-# each pick their own backend per variant configuration.
+# Tell the build engineer (and CI/CD log scrapers) which backends
+# the fat library will prefer at runtime.
 voleith_report_aes_backend()
 voleith_report_field_backend()
 
 # Source files for core library
 set(VOLEITH_CORE_SOURCES
+    core/cpu.c
+    core/cpu_x86.c
+    core/cpu_aarch64.c
+    core/cpu_generic.c
     core/field.c
+    core/field_clmul.c
+    core/field_pmull.c
+    core/field_scalar.c
     core/aes.c
+    core/aes_aesni.c
+    core/aes_armv8.c
     core/aes_ct64.c
+    core/aes_ct64_ops.c
     core/grostl.c
+    core/grostl_aesni.c
+    core/grostl_armv8.c
+    core/grostl_soft.c
     core/hirose.c
     core/prg.c
     core/hash.c
@@ -245,6 +257,38 @@ function(voleith_apply_hw_flags TARGET)
     endif()
 endfunction()
 
+# Per-TU compile flags for AES and field backend files.
+#
+# Only the respective backend TU needs the ISA instruction flags.  The
+# flags are directory-scoped (CMake 3.16 compatible), so they apply to
+# every target in this CMakeLists.txt that compiles these source files.
+# For targets that do not define the corresponding VOLEITH_HAVE_* macro,
+# the files compile to empty objects and the extra flags are harmless.
+if(HAVE_AES_NI)
+    set_source_files_properties(core/aes_aesni.c PROPERTIES
+        COMPILE_FLAGS "-maes -msse2 -mssse3")
+endif()
+if(HAVE_ARMV8_AES AND ARMV8_CRYPTO_FLAGS)
+    set_source_files_properties(core/aes_armv8.c PROPERTIES
+        COMPILE_FLAGS "${ARMV8_CRYPTO_FLAGS}")
+endif()
+if(HAVE_CLMUL)
+    set_source_files_properties(core/field_clmul.c PROPERTIES
+        COMPILE_FLAGS "-mpclmul -msse2 -msse4.1")
+endif()
+if(HAVE_PMULL AND ARMV8_CRYPTO_FLAGS)
+    set_source_files_properties(core/field_pmull.c PROPERTIES
+        COMPILE_FLAGS "${ARMV8_CRYPTO_FLAGS}")
+endif()
+if(HAVE_AES_NI)
+    set_source_files_properties(core/grostl_aesni.c PROPERTIES
+        COMPILE_FLAGS "-maes -msse2 -mssse3")
+endif()
+if(HAVE_ARMV8_AES AND ARMV8_CRYPTO_FLAGS)
+    set_source_files_properties(core/grostl_armv8.c PROPERTIES
+        COMPILE_FLAGS "${ARMV8_CRYPTO_FLAGS}")
+endif()
+
 # Production static library (libtalos_voleith.a)
 add_library(voleith_core STATIC ${VOLEITH_CORE_SOURCES})
 set_target_properties(voleith_core PROPERTIES OUTPUT_NAME talos_voleith)
@@ -263,96 +307,8 @@ if(VOLEITH_BUILD_SHARED)
     voleith_apply_hw_flags(voleith_core_shared)
 endif()
 
-# Test variants: build all 4 combinations to test all code paths
 if(VOLEITH_BUILD_TESTS)
     enable_testing()
-
-    # Accumulated by voleith_add_variant.  Variants whose required
-    # hardware feature was not detected on the build host are skipped
-    # entirely (neither built nor added to the test-variant list).
-    set(VOLEITH_TEST_VARIANTS "")
-
-    # Helper function to create a library variant with specific intrinsics.
-    function(voleith_add_variant SUFFIX USE_CLMUL USE_AES_NI
-                                        USE_ARMV8_AES USE_PMULL)
-        # Skip the variant when a required hardware feature is absent on
-        # this host.  Building it would either fail (compiler rejects the
-        # ISA flag) or silently degrade to the sw equivalent, neither of
-        # which is useful.
-        if(USE_CLMUL AND NOT HAVE_CLMUL)
-            message(STATUS
-                "voleith: skipping variant '${SUFFIX}' (CLMUL not detected)")
-            return()
-        endif()
-        if(USE_AES_NI AND NOT HAVE_AES_NI)
-            message(STATUS
-                "voleith: skipping variant '${SUFFIX}' (AES-NI not detected)")
-            return()
-        endif()
-        if(USE_ARMV8_AES AND NOT HAVE_ARMV8_AES)
-            message(STATUS
-                "voleith: skipping variant '${SUFFIX}' "
-                "(ARMv8 AES not detected)")
-            return()
-        endif()
-        if(USE_PMULL AND NOT HAVE_PMULL)
-            message(STATUS
-                "voleith: skipping variant '${SUFFIX}' (PMULL not detected)")
-            return()
-        endif()
-
-        set(TARGET_NAME voleith_core_${SUFFIX})
-        add_library(${TARGET_NAME} STATIC ${VOLEITH_CORE_SOURCES})
-        target_include_directories(${TARGET_NAME}
-            PUBLIC ${VOLEITH_CORE_INCLUDES}
-        )
-
-        if(USE_CLMUL AND HAVE_CLMUL)
-            target_compile_definitions(${TARGET_NAME} PUBLIC VOLEITH_HAVE_CLMUL)
-            target_compile_options(${TARGET_NAME} PRIVATE -mpclmul -msse2 -msse4.1)
-        endif()
-
-        if(USE_AES_NI AND HAVE_AES_NI)
-            target_compile_definitions(${TARGET_NAME} PUBLIC VOLEITH_HAVE_AES_NI)
-            target_compile_options(${TARGET_NAME} PRIVATE -maes -msse2 -mssse3)
-        endif()
-
-        if(USE_ARMV8_AES AND HAVE_ARMV8_AES)
-            target_compile_definitions(${TARGET_NAME} PUBLIC VOLEITH_HAVE_ARMV8_AES)
-            if(ARMV8_CRYPTO_FLAGS)
-                target_compile_options(${TARGET_NAME} PRIVATE ${ARMV8_CRYPTO_FLAGS})
-            endif()
-        endif()
-
-        if(USE_PMULL AND HAVE_PMULL)
-            target_compile_definitions(${TARGET_NAME} PUBLIC VOLEITH_HAVE_PMULL)
-            if(ARMV8_CRYPTO_FLAGS AND NOT (USE_ARMV8_AES AND HAVE_ARMV8_AES))
-                target_compile_options(${TARGET_NAME} PRIVATE ${ARMV8_CRYPTO_FLAGS})
-            endif()
-        endif()
-
-        # Record this suffix so tests can iterate only over the variants
-        # that were actually built.
-        set(VOLEITH_TEST_VARIANTS ${VOLEITH_TEST_VARIANTS} ${SUFFIX}
-            PARENT_SCOPE)
-    endfunction()
-
-    #                   suffix          CLMUL  AES_NI  ARMV8_AES  PMULL
-    voleith_add_variant(sw              OFF    OFF     OFF        OFF)
-    voleith_add_variant(clmul           ON     OFF     OFF        OFF)
-    voleith_add_variant(aesni           OFF    ON      OFF        OFF)
-    voleith_add_variant(clmul_aesni     ON     ON      OFF        OFF)
-    voleith_add_variant(armv8_aes       OFF    OFF     ON         OFF)
-    voleith_add_variant(pmull           OFF    OFF     OFF        ON)
-    voleith_add_variant(armv8           OFF    OFF     ON         ON)
-
-    # VOLEITH_TEST_VARIANTS is now populated with only the suffixes
-    # whose underlying hardware feature was detected on this host;
-    # voleith_add_variant returned early and did not append for the
-    # rest.  Surface the final list at configure time so a captured
-    # CMake log explains why a given variant did or did not build.
-    message(STATUS "voleith: enabled test variants: ${VOLEITH_TEST_VARIANTS}")
-
     add_subdirectory(tests)
 endif()
 

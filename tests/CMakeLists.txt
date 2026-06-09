@@ -4,46 +4,73 @@
 # Test executables build into their own directory
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
 
-# Helper function: create one test executable per variant for a given test source.
+# Helper function: create one test executable linked against the fat library and
+# register it under two CTest names:
+#   <TEST_NAME>     -- hardware profile: best backend selected at runtime
+#   <TEST_NAME>_sw  -- software profile: all domains forced to fallback paths
+#
 # Additional source files (e.g., shared test helpers like aes_kat_runner.c) may be
-# supplied after the main TEST_SOURCE; they are compiled into every per-variant
-# build of the test binary.
+# supplied after the main TEST_SOURCE.
 function(voleith_add_test TEST_NAME TEST_SOURCE)
-    foreach(VARIANT ${VOLEITH_TEST_VARIANTS})
-        set(TARGET_NAME ${TEST_NAME}_${VARIANT})
-        set(LIB_NAME voleith_core_${VARIANT})
+    add_executable(${TEST_NAME} ${TEST_SOURCE} ${ARGN})
+    target_link_libraries(${TEST_NAME} voleith_core)
 
-        add_executable(${TARGET_NAME} ${TEST_SOURCE} ${ARGN})
-        target_link_libraries(${TARGET_NAME} ${LIB_NAME})
+    # Let tests that read fixtures (e.g. NIST KAT files under
+    # third_party/) locate the repo root at runtime.
+    target_compile_definitions(${TEST_NAME} PRIVATE
+        VOLEITH_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
-        # Let tests that read fixtures (e.g. NIST KAT files under
-        # third_party/) locate the repo root at runtime.
-        target_compile_definitions(${TARGET_NAME} PRIVATE
-            VOLEITH_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-
-        # Add intrinsics compile flags for test source files that use them directly
-        get_target_property(LIB_DEFS ${LIB_NAME} INTERFACE_COMPILE_DEFINITIONS)
-        if(LIB_DEFS)
-            if("VOLEITH_HAVE_CLMUL" IN_LIST LIB_DEFS)
-                target_compile_options(${TARGET_NAME} PRIVATE -mpclmul -msse2 -msse4.1)
-            endif()
-            if("VOLEITH_HAVE_AES_NI" IN_LIST LIB_DEFS)
-                target_compile_options(${TARGET_NAME} PRIVATE -maes -msse2 -mssse3)
-            endif()
+    # Add intrinsics compile flags for test source files that use them directly.
+    get_target_property(LIB_DEFS voleith_core INTERFACE_COMPILE_DEFINITIONS)
+    if(LIB_DEFS)
+        if("VOLEITH_HAVE_CLMUL" IN_LIST LIB_DEFS)
+            target_compile_options(${TEST_NAME} PRIVATE -mpclmul -msse2 -msse4.1)
         endif()
+        if("VOLEITH_HAVE_AES_NI" IN_LIST LIB_DEFS)
+            target_compile_options(${TEST_NAME} PRIVATE -maes -msse2 -mssse3)
+        endif()
+    endif()
 
-        add_test(NAME ${TARGET_NAME} COMMAND $<TARGET_FILE:${TARGET_NAME}>)
-    endforeach()
+    # Hardware profile: runtime dispatch selects the best compiled-in backend.
+    add_test(NAME ${TEST_NAME} COMMAND $<TARGET_FILE:${TEST_NAME}>)
+
+    # Software profile: forces all dispatch domains to their fallback paths so
+    # the software backends are validated even on hardware-capable hosts.
+    add_test(NAME ${TEST_NAME}_sw COMMAND $<TARGET_FILE:${TEST_NAME}>)
+    set_tests_properties(${TEST_NAME}_sw PROPERTIES
+        ENVIRONMENT "VOLEITH_FORCE_BACKEND=aes:bitsliced,field:scalar,grostl:soft")
 endfunction()
 
-# Apply CTest labels to every per-variant instance of a registered test.
+# Register a test that only runs in the hardware profile (no _sw variant).
+# Use for tests that verify the detection layer itself rather than backend
+# correctness.  The _sw profile's VOLEITH_FORCE_BACKEND override makes
+# hardware cross-check assertions trivially wrong for those tests.
+function(voleith_add_hw_test TEST_NAME TEST_SOURCE)
+    add_executable(${TEST_NAME} ${TEST_SOURCE} ${ARGN})
+    target_link_libraries(${TEST_NAME} voleith_core)
+
+    target_compile_definitions(${TEST_NAME} PRIVATE
+        VOLEITH_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
+    get_target_property(LIB_DEFS voleith_core INTERFACE_COMPILE_DEFINITIONS)
+    if(LIB_DEFS)
+        if("VOLEITH_HAVE_CLMUL" IN_LIST LIB_DEFS)
+            target_compile_options(${TEST_NAME} PRIVATE -mpclmul -msse2 -msse4.1)
+        endif()
+        if("VOLEITH_HAVE_AES_NI" IN_LIST LIB_DEFS)
+            target_compile_options(${TEST_NAME} PRIVATE -maes -msse2 -mssse3)
+        endif()
+    endif()
+
+    add_test(NAME ${TEST_NAME} COMMAND $<TARGET_FILE:${TEST_NAME}>)
+endfunction()
+
+# Apply a CTest label to both profiles of a registered test.
 # Use the "slow" label for heavy tests (e.g. the Monte Carlo chains) so the
 # default loop can skip them with `ctest -LE slow` and run them on demand
 # with `ctest -L slow`.
 function(voleith_label_test TEST_NAME)
-    foreach(VARIANT ${VOLEITH_TEST_VARIANTS})
-        set_tests_properties(${TEST_NAME}_${VARIANT} PROPERTIES LABELS "${ARGN}")
-    endforeach()
+    set_tests_properties(${TEST_NAME} ${TEST_NAME}_sw PROPERTIES LABELS "${ARGN}")
 endfunction()
 
 # Register tests
@@ -92,3 +119,6 @@ voleith_add_test(test_node_hash_vt_conformance test_node_hash_vt_conformance.c)
 voleith_add_test(test_gf8_quicksilver test_gf8_quicksilver.c)
 voleith_add_test(test_gf8_proof test_gf8_proof.c)
 voleith_add_test(test_ring_sig_v1_gf8 test_ring_sig_v1_gf8.c)
+voleith_add_hw_test(test_cpu_features test_cpu_features.c)
+voleith_add_test(test_cpu_dispatch test_cpu_dispatch.c)
+voleith_add_test(test_lean_build_warning test_lean_build_warning.c)

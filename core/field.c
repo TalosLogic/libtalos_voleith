@@ -4,22 +4,25 @@
  *
  * field.c - Finite field arithmetic for F_{2^k}
  *
- * Implements multiplication in GF(2^k) for k = 8, 64, 128, 192, 256.
+ * GF(2^8):  constant-time software only (not on the dispatch hot path).
+ * GF(2^64): compile-time dispatch (CLMUL / PMULL / software).
+ * GF(2^128/192/256): one-line forwarders through voleith_field_ops.
  *
- * Each multiplication has two possible implementations, selected by
- * preprocessor in this order of preference:
- *
- *   1. VOLEITH_HAVE_CLMUL / VOLEITH_HAVE_PMULL - hardware carry-less
- *                                    multiply (constant-time by ISA;
- *                                    highest performance).
- *   2. (default)                   - constant-time mask-based software
- *                                    fallback.  Used when no hardware
- *                                    backend is selected.
+ * The three GF(2^N) backends live in:
+ *   core/field_clmul.c   (PCLMULQDQ; compiled with -mpclmul -msse2 -msse4.1)
+ *   core/field_pmull.c   (ARMv8 PMULL; compiled with -march=armv8-a+crypto)
+ *   core/field_scalar.c  (constant-time software; always compiled)
  *
  * Clean-room implementation from the FAEST v2.0 specification.
  */
 
 #include "field.h"
+#include "field_dispatch.h"
+#include "cpu.h"
+
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #ifdef VOLEITH_HAVE_CLMUL
 #include <wmmintrin.h>
@@ -29,26 +32,10 @@
 
 #ifdef VOLEITH_HAVE_PMULL
 #include <arm_neon.h>
-
-/*
- * 64x64 → 128-bit carry-less multiply using ARMv8 PMULL instruction.
- * Equivalent to x86 PCLMULQDQ; same reduction formulas apply.
- */
-static inline void
-pmull64(uint64_t a, uint64_t b, uint64_t *hi, uint64_t *lo)
-{
-    poly128_t r = vmull_p64((poly64_t)a, (poly64_t)b);
-    *lo = (uint64_t)vgetq_lane_u64(vreinterpretq_u64_p128(r), 0);
-    *hi = (uint64_t)vgetq_lane_u64(vreinterpretq_u64_p128(r), 1);
-}
 #endif
 
 /* ========================================================================
  * Constant-time helpers
- *
- * Used by the constant-time software arms (the default when CLMUL is
- * unavailable).  Not referenced when VOLEITH_HAVE_CLMUL is defined;
- * gated to avoid unused-function warnings under that configuration.
  *
  * The optimizer-barrier idiom (`__asm__ volatile ("" : "+r"(x))`) is
  * the standard cryptographic-library technique for preventing a
@@ -69,34 +56,11 @@ ct_barrier_u64(uint64_t x)
     return x;
 }
 
-#if !defined(VOLEITH_HAVE_CLMUL)
-/*
- * Multi-limb constant-time bit accessor.  Returns 0 or ~0 depending
- * on bit `pos` of `v`.  Only used by the multi-limb (128/192/256)
- * constant-time arms, so gated behind !HAVE_CLMUL to avoid unused-
- * function warnings on a hardware-CLMUL build.
- */
-static inline uint64_t
-limbs_get_bit_mask(const uint64_t *v, int pos)
-{
-    /* `pos` is loop-counter-controlled (public).  v[] may carry a
-     * secret; the bit-extract becomes a mask via unary minus. */
-    uint64_t bit = (v[pos / 64] >> (pos % 64)) & 1ULL;
-    return -bit;
-}
-#endif /* !VOLEITH_HAVE_CLMUL */
-
 /* ========================================================================
  * GF(2^8) - AES field
  * P_8 = x^8 + x^4 + x^3 + x + 1, reduction constant 0x1B
  * ======================================================================== */
 
-/*
- * Constant-time mask-based implementation.  Each conditional XOR is
- * replaced by an AND with a {0, ~0} mask derived from the relevant
- * bit; the mask passes through ct_barrier_u64 to block the optimizer
- * from re-deriving a branch.  Performs the Russian-peasant algorithm.
- */
 voleith_gf8_t
 voleith_gf8_mul(voleith_gf8_t a, voleith_gf8_t b)
 {
@@ -114,22 +78,6 @@ voleith_gf8_mul(voleith_gf8_t a, voleith_gf8_t b)
     return (voleith_gf8_t)result;
 }
 
-/*
- * Constant-time GF(2^8) inverse via Fermat's little theorem.
- *
- * For nonzero a in GF(2^8), a^255 = 1, hence a^254 = a^{-1}.  The
- * exponent 254 = 0b1111_1110 = 2 + 4 + 8 + 16 + 32 + 64 + 128, so
- *
- *   a^254 = a^2 * a^4 * a^8 * a^16 * a^32 * a^64 * a^128.
- *
- * Each a^(2^k) is one squaring of a^(2^{k-1}).  Total: 7 squarings +
- * 6 multiplications = 13 voleith_gf8_mul calls, fixed addition chain,
- * constant-time.
- *
- * For a = 0 every intermediate is 0, so the chain returns 0 - matching
- * the convention used by the AES S-box (Proposition 6.4) where the
- * "inv_in" wire holds 0 when the S-box input is 0.
- */
 voleith_gf8_t
 voleith_gf8_inv(voleith_gf8_t a)
 {
@@ -151,17 +99,12 @@ voleith_gf8_inv(voleith_gf8_t a)
 }
 
 /* ========================================================================
- * GF(2^64)
+ * GF(2^64) - compile-time dispatch (not on the runtime dispatch hot path)
  * P_64 = x^64 + x^4 + x^3 + x + 1, reduction constant 0x1B
  * ======================================================================== */
 
 #ifdef VOLEITH_HAVE_CLMUL
 
-/*
- * CLMUL-accelerated GF(2^64) multiplication.
- * Uses a single PCLMULQDQ instruction for the 64x64 carry-less multiply,
- * then reduces the 128-bit product modulo P_64.
- */
 voleith_gf64_t
 voleith_gf64_mul(voleith_gf64_t a, voleith_gf64_t b)
 {
@@ -172,9 +115,7 @@ voleith_gf64_mul(voleith_gf64_t a, voleith_gf64_t b)
     uint64_t lo = (uint64_t)_mm_extract_epi64(prod, 0);
     uint64_t hi = (uint64_t)_mm_extract_epi64(prod, 1);
 
-    /* Reduce: x^64 ≡ x^4+x^3+x+1. Process hi bits. */
     lo ^= hi ^ (hi << 1) ^ (hi << 3) ^ (hi << 4);
-    /* Overflow from shifts: at most 4 bits above position 64 */
     uint64_t overflow = (hi >> 60) ^ (hi >> 61) ^ (hi >> 63);
     lo ^= overflow ^ (overflow << 1) ^ (overflow << 3) ^ (overflow << 4);
     return lo;
@@ -182,11 +123,14 @@ voleith_gf64_mul(voleith_gf64_t a, voleith_gf64_t b)
 
 #elif defined(VOLEITH_HAVE_PMULL)
 
-/*
- * PMULL-accelerated GF(2^64) multiplication.
- * Uses a single vmull_p64 for the 64x64 carry-less product; same
- * reduction as the CLMUL path (the polynomial irreducible is the same).
- */
+static inline void
+pmull64(uint64_t a, uint64_t b, uint64_t *hi, uint64_t *lo)
+{
+    poly128_t r = vmull_p64((poly64_t)a, (poly64_t)b);
+    *lo = (uint64_t)vgetq_lane_u64(vreinterpretq_u64_p128(r), 0);
+    *hi = (uint64_t)vgetq_lane_u64(vreinterpretq_u64_p128(r), 1);
+}
+
 voleith_gf64_t
 voleith_gf64_mul(voleith_gf64_t a, voleith_gf64_t b)
 {
@@ -201,12 +145,6 @@ voleith_gf64_mul(voleith_gf64_t a, voleith_gf64_t b)
 
 #else /* Constant-time software path */
 
-/*
- * Constant-time software carry-less multiply.  The conditional XOR on
- * `(b >> i) & 1` becomes an AND with a mask through ct_barrier_u64.
- * The `i == 0` branch is on the loop counter (public) and is needed
- * because C makes shifts by the width of the type undefined behavior.
- */
 static void
 clmul64_soft(uint64_t a, uint64_t b, uint64_t *hi, uint64_t *lo)
 {
@@ -226,8 +164,6 @@ voleith_gf64_mul(voleith_gf64_t a, voleith_gf64_t b)
     uint64_t hi, lo;
     clmul64_soft(a, b, &hi, &lo);
 
-    /* Reduce: x^64 ≡ x^4+x^3+x+1.  Branch-free, no secret-dependent
-     * memory access. */
     lo ^= hi ^ (hi << 1) ^ (hi << 3) ^ (hi << 4);
     uint64_t overflow = (hi >> 60) ^ (hi >> 61) ^ (hi >> 63);
     lo ^= overflow ^ (overflow << 1) ^ (overflow << 3) ^ (overflow << 4);
@@ -237,421 +173,100 @@ voleith_gf64_mul(voleith_gf64_t a, voleith_gf64_t b)
 #endif /* VOLEITH_HAVE_CLMUL */
 
 /* ========================================================================
- * Multi-limb helpers for GF(2^128), GF(2^192), GF(2^256)
- *
- * These fields use the "Russian peasant" / shift-and-reduce approach:
- * iterate over bits of b, conditionally XOR shifted a into accumulator,
- * doubling a (with reduction) at each step.
+ * GF(2^128/192/256) dispatch table
  * ======================================================================== */
 
-/*
- * Shift a multi-limb value left by 1 bit.
- * Returns the overflow bit (the bit shifted out of the top limb).
- */
-static inline uint64_t
-limbs_shl1(uint64_t *v, int n)
+_Atomic(const voleith_field_ops_t *) voleith_field_ops = NULL;
+
+static atomic_flag s_field_warn_once = ATOMIC_FLAG_INIT;
+
+void
+voleith_field_dispatch_init(void)
 {
-    uint64_t carry = 0;
-    for (int i = 0; i < n; i++) {
-        uint64_t next_carry = v[i] >> 63;
-        v[i] = (v[i] << 1) | carry;
-        carry = next_carry;
-    }
-    return carry;
+    if (atomic_load_explicit(&voleith_field_ops, memory_order_acquire) != NULL)
+        return;
+    unsigned feat = voleith_cpu_features();
+    const voleith_field_ops_t *pick = NULL;
+#ifdef VOLEITH_HAVE_CLMUL
+    if (pick == NULL && (feat & VOLEITH_CPU_CLMUL))
+        pick = &voleith_field_ops_clmul;
+#endif
+#ifdef VOLEITH_HAVE_PMULL
+    if (pick == NULL && (feat & VOLEITH_CPU_PMULL))
+        pick = &voleith_field_ops_pmull;
+#endif
+    if (pick == NULL)
+        pick = &voleith_field_ops_scalar;
+
+#ifndef VOLEITH_HAVE_CLMUL
+    if ((feat & VOLEITH_CPU_CLMUL) && getenv("VOLEITH_QUIET") == NULL &&
+        !atomic_flag_test_and_set(&s_field_warn_once))
+        fputs("voleith: notice: host CPU has CLMUL but the clmul backend"
+              " was not compiled in; running on scalar fallback."
+              " Rebuild with -DVOLEITH_CLMUL=ON."
+              " Suppress with VOLEITH_QUIET=1.\n",
+              stderr);
+#endif
+#ifndef VOLEITH_HAVE_PMULL
+    if ((feat & VOLEITH_CPU_PMULL) && getenv("VOLEITH_QUIET") == NULL &&
+        !atomic_flag_test_and_set(&s_field_warn_once))
+        fputs("voleith: notice: host CPU has PMULL but the pmull backend"
+              " was not compiled in; running on scalar fallback."
+              " Rebuild with -DVOLEITH_PMULL=ON."
+              " Suppress with VOLEITH_QUIET=1.\n",
+              stderr);
+#endif
+
+    const voleith_field_ops_t *expected = NULL;
+    atomic_compare_exchange_strong_explicit(&voleith_field_ops, &expected, pick,
+                                            memory_order_release,
+                                            memory_order_acquire);
+}
+
+void
+voleith_field_dispatch_reset(void)
+{
+    atomic_store_explicit(&voleith_field_ops, NULL, memory_order_release);
 }
 
 /* ========================================================================
- * GF(2^128) multiplication
- * P_128 = x^128 + x^7 + x^2 + x + 1
+ * GF(2^128) public forwarder
  * ======================================================================== */
 
-#ifdef VOLEITH_HAVE_CLMUL
-
-/*
- * CLMUL-accelerated GF(2^128) multiplication.
- * Schoolbook 128x128 → 256-bit product using 4 PCLMULQDQ, then reduce.
- */
 void
 voleith_gf128_mul(voleith_gf128_t *c, const voleith_gf128_t *a,
                   const voleith_gf128_t *b)
 {
-    __m128i va = _mm_loadu_si128((const __m128i *)a->v);
-    __m128i vb = _mm_loadu_si128((const __m128i *)b->v);
-
-    /* Schoolbook: a = a1:a0, b = b1:b0 */
-    __m128i p00 = _mm_clmulepi64_si128(va, vb, 0x00); /* a0*b0 */
-    __m128i p11 = _mm_clmulepi64_si128(va, vb, 0x11); /* a1*b1 */
-    __m128i p01 = _mm_clmulepi64_si128(va, vb, 0x01); /* a0*b1 */
-    __m128i p10 = _mm_clmulepi64_si128(va, vb, 0x10); /* a1*b0 */
-
-    /* Cross terms */
-    __m128i mid = _mm_xor_si128(p01, p10);
-
-    /* Assemble 256-bit product in [c0, c1, c2, c3] */
-    uint64_t c0 = (uint64_t)_mm_extract_epi64(p00, 0);
-    uint64_t c1 = (uint64_t)_mm_extract_epi64(p00, 1) ^
-                  (uint64_t)_mm_extract_epi64(mid, 0);
-    uint64_t c2 = (uint64_t)_mm_extract_epi64(p11, 0) ^
-                  (uint64_t)_mm_extract_epi64(mid, 1);
-    uint64_t c3 = (uint64_t)_mm_extract_epi64(p11, 1);
-
-    /*
-     * Reduce modulo P_128 = x^128 + x^7 + x^2 + x + 1.
-     * x^128 ≡ x^7 + x^2 + x + 1.
-     *
-     * Step 1: Fold c3 (bits 192..255).
-     *   c3 * x^192 = c3 * x^64 * x^128 ≡ c3 * x^64 * (x^7+x^2+x+1)
-     *   Contributes to c1 with overflow into c2.
-     */
-    c1 ^= c3 ^ (c3 << 1) ^ (c3 << 2) ^ (c3 << 7);
-    c2 ^= (c3 >> 57) ^ (c3 >> 62) ^ (c3 >> 63);
-
-    /*
-     * Step 2: Fold c2 (bits 128..191).
-     *   c2 * x^128 ≡ c2 * (x^7+x^2+x+1)
-     */
-    c0 ^= c2 ^ (c2 << 1) ^ (c2 << 2) ^ (c2 << 7);
-    c1 ^= (c2 >> 57) ^ (c2 >> 62) ^ (c2 >> 63);
-
-    c->v[0] = c0;
-    c->v[1] = c1;
+    if (atomic_load_explicit(&voleith_field_ops, memory_order_acquire) == NULL)
+        voleith_field_dispatch_init();
+    voleith_field_ops->gf128_mul(c, a, b);
 }
-
-#elif defined(VOLEITH_HAVE_PMULL)
-
-/*
- * PMULL-accelerated GF(2^128) multiplication.
- * Schoolbook 128x128 → 256-bit product using 4 vmull_p64 calls; same
- * reduction as the CLMUL path.
- */
-void
-voleith_gf128_mul(voleith_gf128_t *c, const voleith_gf128_t *a,
-                  const voleith_gf128_t *b)
-{
-    uint64_t p00h, p00l, p01h, p01l, p10h, p10l, p11h, p11l;
-    pmull64(a->v[0], b->v[0], &p00h, &p00l);
-    pmull64(a->v[0], b->v[1], &p01h, &p01l);
-    pmull64(a->v[1], b->v[0], &p10h, &p10l);
-    pmull64(a->v[1], b->v[1], &p11h, &p11l);
-
-    uint64_t c0 = p00l;
-    uint64_t c1 = p00h ^ p01l ^ p10l;
-    uint64_t c2 = p01h ^ p10h ^ p11l;
-    uint64_t c3 = p11h;
-
-    /* Reduce modulo P_128 = x^128 + x^7 + x^2 + x + 1. */
-    c1 ^= c3 ^ (c3 << 1) ^ (c3 << 2) ^ (c3 << 7);
-    c2 ^= (c3 >> 57) ^ (c3 >> 62) ^ (c3 >> 63);
-    c0 ^= c2 ^ (c2 << 1) ^ (c2 << 2) ^ (c2 << 7);
-    c1 ^= (c2 >> 57) ^ (c2 >> 62) ^ (c2 >> 63);
-
-    c->v[0] = c0;
-    c->v[1] = c1;
-}
-
-#else /* Constant-time software path */
-
-/*
- * Constant-time software GF(2^128) multiplication.  Each conditional
- * XOR is replaced by AND with a {0, ~0} mask routed through
- * ct_barrier_u64.
- */
-void
-voleith_gf128_mul(voleith_gf128_t *c, const voleith_gf128_t *a,
-                  const voleith_gf128_t *b)
-{
-    uint64_t result[2] = {0, 0};
-    uint64_t shifted[2] = {a->v[0], a->v[1]};
-
-    for (int i = 0; i < 128; i++) {
-        uint64_t mask = ct_barrier_u64(limbs_get_bit_mask(b->v, i));
-        result[0] ^= shifted[0] & mask;
-        result[1] ^= shifted[1] & mask;
-        uint64_t overflow = limbs_shl1(shifted, 2);
-        uint64_t omask = ct_barrier_u64(-(overflow & 1ULL));
-        shifted[0] ^= VOLEITH_GF128_REDUCE & omask;
-    }
-    c->v[0] = result[0];
-    c->v[1] = result[1];
-}
-
-#endif /* VOLEITH_HAVE_CLMUL */
 
 /* ========================================================================
- * GF(2^192) multiplication
- * P_192 = x^192 + x^7 + x^2 + x + 1
+ * GF(2^192) public forwarder
  * ======================================================================== */
-
-#ifdef VOLEITH_HAVE_CLMUL
-
-/*
- * CLMUL-accelerated GF(2^192) multiplication.
- * Schoolbook 192x192 → 384-bit product using 9 PCLMULQDQ, then reduce.
- * a = [a0, a1, a2], b = [b0, b1, b2] (each 64-bit limbs)
- */
-void
-voleith_gf192_mul(voleith_gf192_t *c, const voleith_gf192_t *a,
-                  const voleith_gf192_t *b)
-{
-    /* 9 carry-less 64x64 multiplies for schoolbook */
-    __m128i va0 = _mm_set_epi64x(0, (long long)a->v[0]);
-    __m128i va1 = _mm_set_epi64x(0, (long long)a->v[1]);
-    __m128i va2 = _mm_set_epi64x(0, (long long)a->v[2]);
-    __m128i vb0 = _mm_set_epi64x(0, (long long)b->v[0]);
-    __m128i vb1 = _mm_set_epi64x(0, (long long)b->v[1]);
-    __m128i vb2 = _mm_set_epi64x(0, (long long)b->v[2]);
-
-    __m128i p00 = _mm_clmulepi64_si128(va0, vb0, 0x00);
-    __m128i p01 = _mm_clmulepi64_si128(va0, vb1, 0x00);
-    __m128i p02 = _mm_clmulepi64_si128(va0, vb2, 0x00);
-    __m128i p10 = _mm_clmulepi64_si128(va1, vb0, 0x00);
-    __m128i p11 = _mm_clmulepi64_si128(va1, vb1, 0x00);
-    __m128i p12 = _mm_clmulepi64_si128(va1, vb2, 0x00);
-    __m128i p20 = _mm_clmulepi64_si128(va2, vb0, 0x00);
-    __m128i p21 = _mm_clmulepi64_si128(va2, vb1, 0x00);
-    __m128i p22 = _mm_clmulepi64_si128(va2, vb2, 0x00);
-
-    /* Accumulate into 6 limbs [d0..d5] */
-    uint64_t d[6] = {0};
-
-    /* d0 = p00_lo */
-    d[0] = (uint64_t)_mm_extract_epi64(p00, 0);
-
-    /* d1 = p00_hi + p01_lo + p10_lo */
-    d[1] = (uint64_t)_mm_extract_epi64(p00, 1) ^
-           (uint64_t)_mm_extract_epi64(p01, 0) ^
-           (uint64_t)_mm_extract_epi64(p10, 0);
-
-    /* d2 = p01_hi + p10_hi + p02_lo + p11_lo + p20_lo */
-    d[2] = (uint64_t)_mm_extract_epi64(p01, 1) ^
-           (uint64_t)_mm_extract_epi64(p10, 1) ^
-           (uint64_t)_mm_extract_epi64(p02, 0) ^
-           (uint64_t)_mm_extract_epi64(p11, 0) ^
-           (uint64_t)_mm_extract_epi64(p20, 0);
-
-    /* d3 = p02_hi + p11_hi + p20_hi + p12_lo + p21_lo */
-    d[3] = (uint64_t)_mm_extract_epi64(p02, 1) ^
-           (uint64_t)_mm_extract_epi64(p11, 1) ^
-           (uint64_t)_mm_extract_epi64(p20, 1) ^
-           (uint64_t)_mm_extract_epi64(p12, 0) ^
-           (uint64_t)_mm_extract_epi64(p21, 0);
-
-    /* d4 = p12_hi + p21_hi + p22_lo */
-    d[4] = (uint64_t)_mm_extract_epi64(p12, 1) ^
-           (uint64_t)_mm_extract_epi64(p21, 1) ^
-           (uint64_t)_mm_extract_epi64(p22, 0);
-
-    /* d5 = p22_hi */
-    d[5] = (uint64_t)_mm_extract_epi64(p22, 1);
-
-    /*
-     * Reduce modulo P_192 = x^192 + x^7 + x^2 + x + 1.
-     * x^192 ≡ x^7+x^2+x+1, so fold d[5], d[4], d[3] into d[2], d[1], d[0].
-     * Process from top (d[5]) to bottom (d[3]).
-     */
-
-    /* d5 at bit offset 320: x^320 = x^128 * x^192 ≡ x^128 * R */
-    d[2] ^= d[5] ^ (d[5] << 1) ^ (d[5] << 2) ^ (d[5] << 7);
-    d[3] ^= (d[5] >> 57) ^ (d[5] >> 62) ^ (d[5] >> 63);
-
-    /* d4 at bit offset 256: x^256 = x^64 * x^192 ≡ x^64 * R */
-    d[1] ^= d[4] ^ (d[4] << 1) ^ (d[4] << 2) ^ (d[4] << 7);
-    d[2] ^= (d[4] >> 57) ^ (d[4] >> 62) ^ (d[4] >> 63);
-
-    /* d3 at bit offset 192: x^192 ≡ R */
-    d[0] ^= d[3] ^ (d[3] << 1) ^ (d[3] << 2) ^ (d[3] << 7);
-    d[1] ^= (d[3] >> 57) ^ (d[3] >> 62) ^ (d[3] >> 63);
-
-    c->v[0] = d[0];
-    c->v[1] = d[1];
-    c->v[2] = d[2];
-}
-
-#elif defined(VOLEITH_HAVE_PMULL)
-
-/*
- * PMULL-accelerated GF(2^192) multiplication.
- * Schoolbook 192x192 → 384-bit product using 9 vmull_p64 calls.
- * Identical reduction to the CLMUL path.
- */
-void
-voleith_gf192_mul(voleith_gf192_t *c, const voleith_gf192_t *a,
-                  const voleith_gf192_t *b)
-{
-    uint64_t d[6] = {0};
-
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) {
-            uint64_t hi, lo;
-            pmull64(a->v[i], b->v[j], &hi, &lo);
-            d[i + j] ^= lo;
-            d[i + j + 1] ^= hi;
-        }
-    }
-
-    /* Reduce modulo P_192 = x^192 + x^7 + x^2 + x + 1. */
-    d[2] ^= d[5] ^ (d[5] << 1) ^ (d[5] << 2) ^ (d[5] << 7);
-    d[3] ^= (d[5] >> 57) ^ (d[5] >> 62) ^ (d[5] >> 63);
-
-    d[1] ^= d[4] ^ (d[4] << 1) ^ (d[4] << 2) ^ (d[4] << 7);
-    d[2] ^= (d[4] >> 57) ^ (d[4] >> 62) ^ (d[4] >> 63);
-
-    d[0] ^= d[3] ^ (d[3] << 1) ^ (d[3] << 2) ^ (d[3] << 7);
-    d[1] ^= (d[3] >> 57) ^ (d[3] >> 62) ^ (d[3] >> 63);
-
-    c->v[0] = d[0];
-    c->v[1] = d[1];
-    c->v[2] = d[2];
-}
-
-#else /* Constant-time software path */
 
 void
 voleith_gf192_mul(voleith_gf192_t *c, const voleith_gf192_t *a,
                   const voleith_gf192_t *b)
 {
-    uint64_t result[3] = {0, 0, 0};
-    uint64_t shifted[3] = {a->v[0], a->v[1], a->v[2]};
-
-    for (int i = 0; i < 192; i++) {
-        uint64_t mask = ct_barrier_u64(limbs_get_bit_mask(b->v, i));
-        result[0] ^= shifted[0] & mask;
-        result[1] ^= shifted[1] & mask;
-        result[2] ^= shifted[2] & mask;
-        uint64_t overflow = limbs_shl1(shifted, 3);
-        uint64_t omask = ct_barrier_u64(-(overflow & 1ULL));
-        shifted[0] ^= VOLEITH_GF192_REDUCE & omask;
-    }
-    c->v[0] = result[0];
-    c->v[1] = result[1];
-    c->v[2] = result[2];
+    if (atomic_load_explicit(&voleith_field_ops, memory_order_acquire) == NULL)
+        voleith_field_dispatch_init();
+    voleith_field_ops->gf192_mul(c, a, b);
 }
-
-#endif /* VOLEITH_HAVE_CLMUL */
 
 /* ========================================================================
- * GF(2^256) multiplication
- * P_256 = x^256 + x^10 + x^5 + x^2 + 1
+ * GF(2^256) public forwarder
  * ======================================================================== */
 
-#ifdef VOLEITH_HAVE_CLMUL
-
-/*
- * CLMUL-accelerated GF(2^256) multiplication.
- * Schoolbook 256x256 → 512-bit product using 16 PCLMULQDQ, then reduce.
- */
 void
 voleith_gf256_mul(voleith_gf256_t *c, const voleith_gf256_t *a,
                   const voleith_gf256_t *b)
 {
-    /* 16 carry-less 64x64 multiplies for 4x4 schoolbook */
-    uint64_t d[8] = {0};
-
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            __m128i ai = _mm_set_epi64x(0, (long long)a->v[i]);
-            __m128i bj = _mm_set_epi64x(0, (long long)b->v[j]);
-            __m128i p = _mm_clmulepi64_si128(ai, bj, 0x00);
-            d[i + j] ^= (uint64_t)_mm_extract_epi64(p, 0);
-            d[i + j + 1] ^= (uint64_t)_mm_extract_epi64(p, 1);
-        }
-    }
-
-    /*
-     * Reduce modulo P_256 = x^256 + x^10 + x^5 + x^2 + 1.
-     * x^256 ≡ x^10 + x^5 + x^2 + 1.
-     * Fold d[7]..d[4] into d[3]..d[0].
-     */
-
-    /* d7 at bit offset 448: x^448 = x^192 * x^256 ≡ x^192 * R */
-    d[3] ^= d[7] ^ (d[7] << 2) ^ (d[7] << 5) ^ (d[7] << 10);
-    d[4] ^= (d[7] >> 54) ^ (d[7] >> 59) ^ (d[7] >> 62);
-
-    /* d6 at bit offset 384: x^384 = x^128 * x^256 ≡ x^128 * R */
-    d[2] ^= d[6] ^ (d[6] << 2) ^ (d[6] << 5) ^ (d[6] << 10);
-    d[3] ^= (d[6] >> 54) ^ (d[6] >> 59) ^ (d[6] >> 62);
-
-    /* d5 at bit offset 320: x^320 = x^64 * x^256 ≡ x^64 * R */
-    d[1] ^= d[5] ^ (d[5] << 2) ^ (d[5] << 5) ^ (d[5] << 10);
-    d[2] ^= (d[5] >> 54) ^ (d[5] >> 59) ^ (d[5] >> 62);
-
-    /* d4 at bit offset 256: x^256 ≡ R */
-    d[0] ^= d[4] ^ (d[4] << 2) ^ (d[4] << 5) ^ (d[4] << 10);
-    d[1] ^= (d[4] >> 54) ^ (d[4] >> 59) ^ (d[4] >> 62);
-
-    c->v[0] = d[0];
-    c->v[1] = d[1];
-    c->v[2] = d[2];
-    c->v[3] = d[3];
+    if (atomic_load_explicit(&voleith_field_ops, memory_order_acquire) == NULL)
+        voleith_field_dispatch_init();
+    voleith_field_ops->gf256_mul(c, a, b);
 }
-
-#elif defined(VOLEITH_HAVE_PMULL)
-
-/*
- * PMULL-accelerated GF(2^256) multiplication.
- * Schoolbook 256x256 → 512-bit product using 16 vmull_p64 calls.
- * Identical reduction to the CLMUL path.
- */
-void
-voleith_gf256_mul(voleith_gf256_t *c, const voleith_gf256_t *a,
-                  const voleith_gf256_t *b)
-{
-    uint64_t d[8] = {0};
-
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            uint64_t hi, lo;
-            pmull64(a->v[i], b->v[j], &hi, &lo);
-            d[i + j] ^= lo;
-            d[i + j + 1] ^= hi;
-        }
-    }
-
-    /* Reduce modulo P_256 = x^256 + x^10 + x^5 + x^2 + 1. */
-    d[3] ^= d[7] ^ (d[7] << 2) ^ (d[7] << 5) ^ (d[7] << 10);
-    d[4] ^= (d[7] >> 54) ^ (d[7] >> 59) ^ (d[7] >> 62);
-
-    d[2] ^= d[6] ^ (d[6] << 2) ^ (d[6] << 5) ^ (d[6] << 10);
-    d[3] ^= (d[6] >> 54) ^ (d[6] >> 59) ^ (d[6] >> 62);
-
-    d[1] ^= d[5] ^ (d[5] << 2) ^ (d[5] << 5) ^ (d[5] << 10);
-    d[2] ^= (d[5] >> 54) ^ (d[5] >> 59) ^ (d[5] >> 62);
-
-    d[0] ^= d[4] ^ (d[4] << 2) ^ (d[4] << 5) ^ (d[4] << 10);
-    d[1] ^= (d[4] >> 54) ^ (d[4] >> 59) ^ (d[4] >> 62);
-
-    c->v[0] = d[0];
-    c->v[1] = d[1];
-    c->v[2] = d[2];
-    c->v[3] = d[3];
-}
-
-#else /* Constant-time software path */
-
-void
-voleith_gf256_mul(voleith_gf256_t *c, const voleith_gf256_t *a,
-                  const voleith_gf256_t *b)
-{
-    uint64_t result[4] = {0, 0, 0, 0};
-    uint64_t shifted[4] = {a->v[0], a->v[1], a->v[2], a->v[3]};
-
-    for (int i = 0; i < 256; i++) {
-        uint64_t mask = ct_barrier_u64(limbs_get_bit_mask(b->v, i));
-        result[0] ^= shifted[0] & mask;
-        result[1] ^= shifted[1] & mask;
-        result[2] ^= shifted[2] & mask;
-        result[3] ^= shifted[3] & mask;
-        uint64_t overflow = limbs_shl1(shifted, 4);
-        uint64_t omask = ct_barrier_u64(-(overflow & 1ULL));
-        shifted[0] ^= VOLEITH_GF256_REDUCE & omask;
-    }
-    c->v[0] = result[0];
-    c->v[1] = result[1];
-    c->v[2] = result[2];
-    c->v[3] = result[3];
-}
-
-#endif /* VOLEITH_HAVE_CLMUL */
 
 /* ========================================================================
  * ByteCombine - FAEST spec Section 3.2, Figure 3.4
@@ -664,10 +279,6 @@ voleith_gf256_mul(voleith_gf256_t *c, const voleith_gf256_t *a,
  * faest-ref (used as test oracle only).
  * ======================================================================== */
 
-/*
- * Precomputed alpha^1 through alpha^7 for GF(2^128).
- * alpha[0] = alpha_8^1, alpha[1] = alpha_8^2, ..., alpha[6] = alpha_8^7
- */
 static const voleith_gf128_t gf128_alpha[7] = {
     {{UINT64_C(0xa13fe8ac5560ce0d), UINT64_C(0x053d8555a9979a1c)}},
     {{UINT64_C(0xec7759ca3488aee1), UINT64_C(0x4cf4b7439cbfbb84)}},
@@ -678,7 +289,6 @@ static const voleith_gf128_t gf128_alpha[7] = {
     {{UINT64_C(0x7a7a8e94e136f9bc), UINT64_C(0x0950311a4fb78fe0)}},
 };
 
-/* Precomputed alpha^1 through alpha^7 for GF(2^192). */
 static const voleith_gf192_t gf192_alpha[7] = {
     {{UINT64_C(0xccc8a3d56f389763), UINT64_C(0xe665d76c966ebdea),
       UINT64_C(0x310bc8140e6b3662)}},
@@ -696,7 +306,6 @@ static const voleith_gf192_t gf192_alpha[7] = {
       UINT64_C(0xc77c56540f87c4b0)}},
 };
 
-/* Precomputed alpha^1 through alpha^7 for GF(2^256). */
 static const voleith_gf256_t gf256_alpha[7] = {
     {{UINT64_C(0x969788420bdefee7), UINT64_C(0xbed68d38a0474e67),
       UINT64_C(0xdf229845f8f1e16a), UINT64_C(0x04c9a8cf20c95833)}},
@@ -714,20 +323,6 @@ static const voleith_gf256_t gf256_alpha[7] = {
       UINT64_C(0x2f652b2af4e81545), UINT64_C(0x133eea09d26b7bb8)}},
 };
 
-/*
- * Constant-time mask-based implementation.  Each `if (x[i] & 1) ...`
- * is replaced by AND with a {0, ~0} mask derived from the bit and
- * routed through ct_barrier_u64.  The per-limb XOR is inlined so the
- * mask AND fuses naturally with the table-constant load.
- *
- * The lambda dispatch itself (128 / 192 / 256) is a public choice,
- * fixed at proof-system parameter selection - not secret-dependent -
- * so branching on it is fine.
- *
- * Note: the unrolled i=0 case (mask the constant 1 into v[0] of the
- * zeroed result) is folded into the same loop by starting from i=0
- * and treating alpha^0 = 1 specially via an inline constant.
- */
 int
 voleith_byte_combine(uint8_t *out, const uint8_t x[8], int lambda)
 {

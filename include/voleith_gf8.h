@@ -165,8 +165,8 @@
 #ifndef VOLEITH_VERSION_MAJOR
 #define VOLEITH_VERSION_MAJOR 1
 #define VOLEITH_VERSION_MINOR 4
-#define VOLEITH_VERSION_PATCH 0
-#define VOLEITH_VERSION_STRING "1.4.0"
+#define VOLEITH_VERSION_PATCH 1
+#define VOLEITH_VERSION_STRING "1.4.1"
 #endif
 
 /* GF(2⁸) proof system: circuit builder and prove/verify API */

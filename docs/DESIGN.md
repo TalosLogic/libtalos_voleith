@@ -907,9 +907,130 @@ Also deferred: a public-dir companion to the `from_leaf_node` secret-dir entry (
 
 ---
 
+## Runtime Hardware Dispatch (Single-Binary Fat Builds)
+
+One library binary serves every supported host. At first use, each of three independent dispatch domains (AES, GF(2^k) field multiplication, Grøstl compression) probes the running CPU and routes subsequent calls through a function-pointer table to the highest-priority backend whose required instruction-set features are present. There is no per-host build, no per-CPU library variant, and no caller-visible API change between hardware and software paths.
+
+Earlier releases produced separate static libraries per ISA variant (`libvoleith_sw.a`, `libvoleith_aesni.a`, `libvoleith_clmul.a`, `libvoleith_aesni_clmul.a` on x86_64, plus parallel ARMv8 variants); consumers had to match the binary to the deployment target. 1.4.1 collapses that matrix into one `libtalos_voleith.a` / `.so` artefact that compiles every available backend and selects among them at runtime.
+
+### Three independent dispatch domains
+
+Each domain has its own ops table, init function, and per-backend translation unit. They share the CPU-feature probe but are otherwise independent.
+
+| Domain | Public forwarders | Selection priority (highest first) |
+|---|---|---|
+| AES block cipher | `voleith_aes_key_expand`, `voleith_aes_encrypt`, `voleith_aes_encrypt_x4` | AES-NI (x86_64) → ARMv8 Crypto (aarch64) → bitsliced ct64 (portable) |
+| GF(2^k) field multiply (k=64,128,192,256) | `voleith_gf{64,128,192,256}_mul` | CLMUL/PCLMULQDQ (x86_64) → PMULL (aarch64) → constant-time scalar |
+| Grøstl compression | `voleith_grostl{256,512}_compress` | AES-NI (x86_64) → ARMv8 Crypto (aarch64) → software |
+
+Each public forwarder is a one-line indirect call: load the atomic ops-table pointer, branch on `if (ops == NULL) dispatch_init()`, then call through the selected function pointer. The init cost is paid once per process; the per-call overhead is one acquire load and one indirect branch.
+
+### CPU feature probe
+
+`core/cpu.h` exposes `voleith_cpu_features()`, which returns a stable `unsigned` bitmask of feature flags (`VOLEITH_CPU_AES_NI`, `VOLEITH_CPU_CLMUL`, `VOLEITH_CPU_SSE41`, `VOLEITH_CPU_SSSE3`, `VOLEITH_CPU_ARMV8_AES`, `VOLEITH_CPU_PMULL`). The probe is implemented per-architecture in `core/cpu_x86.c` (CPUID-based), `core/cpu_aarch64.c` (`getauxval(AT_HWCAP)`-based), or `core/cpu_generic.c` (returns zero on unknown architectures). Exactly one of those translation units is compiled for any given target.
+
+The bitmask is computed on the first call via a compare-and-swap guard, cached in an atomic, and returned by all subsequent calls with a single acquire load. Bit assignments are stable across library versions (bits 0–15 for x86_64 features, 16–31 for aarch64 features), so consumers may persist or compare masks across builds.
+
+### Dispatch tables and atomic init
+
+Each domain follows the same shape (illustrated for AES):
+
+```
+core/aes.c              Public forwarders + voleith_aes_dispatch_init().
+                        Holds _Atomic(const voleith_aes_ops_t *) voleith_aes_ops.
+core/aes_dispatch.h     Internal ops-table type, extern declarations for each
+                        backend's ops, declaration of voleith_aes_ops.
+core/aes_aesni.c        x86_64 AES-NI backend (compiled iff VOLEITH_HAVE_AES_NI).
+core/aes_armv8.c        ARMv8 Crypto backend (compiled iff VOLEITH_HAVE_ARMV8_AES).
+core/aes_ct64.c         Portable bitsliced ct64 engine (always compiled).
+core/aes_ct64_ops.c     Bitsliced ops-table adapter (always compiled).
+```
+
+`voleith_aes_dispatch_init()` reads the feature bitmask, walks the compiled-in backends in priority order, picks the first one whose feature bits are present, and publishes the chosen ops table with a release store + CAS so concurrent first-callers converge on the same selection. Field-multiply and Grøstl follow the identical pattern (`field_dispatch.h` / `grostl_dispatch.h`).
+
+### Compile-time gating and per-TU instruction flags
+
+Backend translation units that need ISA-specific intrinsics (`-maes -mssse3` for AES-NI, `-mpclmul -msse4.1` for CLMUL, `-march=armv8-a+crypto` for ARMv8 Crypto and PMULL) compile with those flags scoped to the file via `set_source_files_properties(... COMPILE_FLAGS ...)`. The flags do not propagate to any other translation unit, so consumers do not need to compile their own code with `-maes` and the library does not accidentally emit AES-NI in unrelated functions.
+
+CMake probes the toolchain for each instruction set at configure time. If a probe succeeds, the corresponding `VOLEITH_HAVE_*` macro is defined as a public compile definition on the library target; the backend TU's contents are then enabled by an `#ifdef` at the file top. If the probe fails (older toolchain, missing intrinsics header), the TU compiles to an empty object and the dispatcher falls through to the next backend in priority order.
+
+### Lean-build opt-outs
+
+Operators who want to strip the library to the smallest possible footprint, or who target a deployment that will never see hardware acceleration, can disable any backend at configure time:
+
+```
+-DVOLEITH_AES_NI=OFF       # omit core/aes_aesni.c
+-DVOLEITH_ARMV8_AES=OFF    # omit core/aes_armv8.c
+-DVOLEITH_CLMUL=OFF        # omit core/field_clmul.c
+-DVOLEITH_PMULL=OFF        # omit core/field_pmull.c
+```
+
+The portable bitsliced AES backend (`aes_ct64`) and the constant-time scalar field backend are always compiled; they are the unconditional floor of the dispatch table. A lean build that omits every hardware backend produces a fully functional binary that runs the portable paths on every host.
+
+### Lean-build mismatch notice
+
+When `voleith_aes_dispatch_init()` selects the bitsliced fallback because a hardware backend was *opted out at compile time* on a CPU that *does* support the corresponding ISA, it emits a one-line notice to stderr the first time it runs:
+
+```
+voleith: notice: host CPU has AES-NI but the aes-ni backend was not compiled
+in; running on bitsliced fallback (~30-50x slower). Rebuild with
+-DVOLEITH_AES_NI=ON. Suppress with VOLEITH_QUIET=1.
+```
+
+Analogous notices exist for ARMv8 AES, CLMUL, and PMULL. The notice is fired through an `atomic_flag_test_and_set` once-guard so it appears at most once per process per domain. It is intended as a misconfiguration backstop: a lean-build artefact accidentally shipped to hardware-capable production should be loud enough about the performance loss that operators notice before users do. Setting `VOLEITH_QUIET=1` in the environment suppresses every variant of the notice (useful in test harnesses that deliberately exercise the fallback).
+
+A run on a host that genuinely lacks the hardware (e.g., a generic x86_64 VM without AES-NI) produces no notice: the bitsliced backend is the correct, only available choice in that case.
+
+### Backend override for testing
+
+`VOLEITH_FORCE_BACKEND` is a comma-separated `domain:value` list parsed once during the first call to `voleith_cpu_features()`. Recognised values:
+
+```
+aes:aesni      aes:armv8      aes:bitsliced
+field:clmul    field:pmull    field:scalar
+grostl:aesni   grostl:armv8   grostl:soft
+```
+
+The parser strips the corresponding feature bits from the cached bitmask so subsequent dispatch-init calls route to the requested backend. Forcing a backend that the host does not support (e.g., `aes:aesni` on aarch64) prints a diagnostic and `abort()`s; forcing a backend that the build did not compile in falls through to the next-priority backend with no error. Forcing the scalar/bitsliced/software path on a hardware-capable host is the supported A/B-benchmarking mode.
+
+The override is not part of the supported public API; production deployments should not set it. Its sole purpose is the test profile described in the next subsection.
+
+### Constant-time guarantee preserved across backends
+
+Every compiled-in backend is constant-time:
+
+- AES-NI and ARMv8 Crypto use hardware AES instructions whose latency is data-independent on every architecturally compliant implementation.
+- The portable AES backend is bitsliced (`aes_ct64`); no S-box table lookup.
+- The CLMUL and PMULL field backends use the corresponding carry-less multiply instruction (data-independent on every architecturally compliant implementation).
+- The scalar field backend is constant-time scalar code (no secret-indexed memory access, no secret-dependent branches).
+- Grøstl AES-NI / ARMv8 backends drive the AES round instructions over Grøstl's 64-byte / 128-byte state; the software backend is straight-line table-free Grøstl.
+
+The dispatch decision itself is made on the CPU feature bitmask, which is data-independent. The function-pointer selected by dispatch is invariant for the remainder of the process, so secret data never influences which backend handles it.
+
+### Test methodology: every test runs in both profiles
+
+`ctest` registers every test twice. The default registration (`<NAME>`) runs the binary as the operator would, so the dispatcher selects whichever hardware backend the host actually has. A second registration (`<NAME>_sw`) runs the same binary with `VOLEITH_FORCE_BACKEND=aes:bitsliced,field:scalar,grostl:soft` in the environment, exercising the software floor on the same host. This means every CI run validates both paths on every supported architecture without separate build configurations.
+
+A dedicated test (`tests/test_lean_build_warning.c`) covers the mismatch-notice path: it captures stderr while triggering `voleith_aes_dispatch_init()` on a build that omitted the hardware backend, asserts the expected notice text appears, and confirms that `VOLEITH_QUIET=1` suppresses it. On a fat build the test exits immediately with PASS because the warning code path is not reached.
+
+### Public introspection
+
+Three symbols let a consumer ask which backend a built library will actually use:
+
+```c
+voleith_aes_backend_t   voleith_aes_backend(void);     /* AESNI | ARMV8 | BITSLICED */
+const char             *voleith_aes_backend_name(void);
+const char             *voleith_grostl_backend_name(void);
+unsigned                voleith_cpu_features(void);    /* raw bitmask */
+```
+
+The first call to any of these triggers `voleith_aes_dispatch_init()` (or the corresponding Grøstl init) if it has not already run. These are intended for diagnostic logging and for verifying the expected backend in a deployment health check; the protocol layer never consults them.
+
+---
+
 ## Correctness Testing
 
-The library is tested against known-answer vectors from multiple independent sources. CMake auto-detects the host's hardware extensions and builds every relevant variant: software-only (always), x86 CLMUL, AES-NI, and combined CLMUL+AES-NI on x86_64; ARMv8 AES, PMULL, and combined ARMv8 (AES+PMULL) on aarch64. Each variant runs the full test suite against the same vectors, ensuring backend dispatch does not affect correctness.
+The library is tested against known-answer vectors from multiple independent sources. A single library binary contains every available backend; `ctest` runs every test in two profiles (hardware-dispatched and software-forced via `VOLEITH_FORCE_BACKEND`) so both the hardware path and the constant-time software floor are exercised against the same vectors on every run. The dispatch machinery itself is covered above in "Runtime Hardware Dispatch".
 
 ### Primitives (Layer 1)
 

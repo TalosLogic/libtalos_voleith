@@ -249,9 +249,11 @@ the full security-architecture write-up.
 
 ## Correctness testing
 
-Tests run in four build configurations (software-only, CLMUL, AES-NI, combined
-CLMUL+AES-NI) and validate every layer against known-answer vectors from
-multiple independent sources:
+One library binary contains every compiled-in backend; `ctest` runs each test
+twice on every host, once with hardware dispatch (`<NAME>`) and once with the
+software floor forced via `VOLEITH_FORCE_BACKEND` (`<NAME>_sw`). Both paths
+are validated against the same known-answer vectors from multiple independent
+sources:
 
 - **AES primitive:** FIPS 197 (Appendices A and B), NIST SP 800-38A
   Appendix F.1, NIST CAVP AESVS (GFSbox, KeySbox, VarKey, VarTxt).
@@ -278,9 +280,11 @@ The full test-vector inventory is in
 
 ### Build
 
-Requirements: CMake 3.16+, a C17 compiler (GCC or Clang), Linux or macOS.
-AES-NI and CLMUL are detected automatically; software fallbacks are always
-built.
+Requirements: CMake 3.16+, a C17 compiler (GCC or Clang), Linux or macOS
+(x86_64 or aarch64). The default build is a single-binary fat library that
+compiles every available backend (AES-NI, ARMv8 Crypto, CLMUL, PMULL, plus
+portable constant-time fallbacks) and selects among them at runtime based on
+the host CPU. There is no per-host build step.
 
 ```sh
 cmake -B build
@@ -288,13 +292,27 @@ cmake --build build -j$(nproc)
 ctest --test-dir build/tests --output-on-failure
 ```
 
-Build options:
+Build options. The first four are *lean-build opt-outs*: omit a hardware
+backend to shrink the binary or target a deployment that will never see the
+corresponding ISA. The portable bitsliced AES backend and constant-time
+scalar field backend are always compiled as the unconditional dispatch
+floor.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `VOLEITH_AES_NI`      | ON  | Enable AES-NI intrinsics (`-maes -msse2`) |
-| `VOLEITH_CLMUL`       | ON  | Enable CLMUL carry-less multiply (`-mpclmul -msse2 -msse4.1`) |
+| `VOLEITH_AES_NI`       | ON  | Compile the x86_64 AES-NI backend |
+| `VOLEITH_ARMV8_AES`    | ON  | Compile the aarch64 ARMv8 Crypto AES backend |
+| `VOLEITH_CLMUL`        | ON  | Compile the x86_64 CLMUL field-multiply backend |
+| `VOLEITH_PMULL`        | ON  | Compile the aarch64 PMULL field-multiply backend |
 | `VOLEITH_BUILD_SHARED` | OFF | Build shared library (`libtalos_voleith.so`/`.dylib`) in addition to the static library |
+
+A lean build deployed to a hardware-capable host emits a one-shot stderr
+notice naming the missing backend and the configure flag that re-enables
+it (suppressible with `VOLEITH_QUIET=1` in the environment). The dispatch
+machinery, lean-build trade-offs, the `VOLEITH_FORCE_BACKEND` testing
+override, and the constant-time guarantees across every compiled-in
+backend are documented in
+[`docs/DESIGN.md` → Runtime Hardware Dispatch](docs/DESIGN.md#runtime-hardware-dispatch-single-binary-fat-builds).
 
 ### Minimal example
 
