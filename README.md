@@ -179,6 +179,32 @@ the Examples table below).
 
 ---
 
+## Loading external circuits (Bristol Fashion)
+
+Besides circuits built programmatically through the API, the library can
+parse circuits in **Bristol Fashion**, the boolean-circuit file format used
+as the standard comparison baseline across the MPC/ZK ecosystem (AES, DES,
+SHA-256, adders, comparators, multipliers, etc.).  `parsers/bristol.h`
+exposes `voleith_bristol_parse_file` / `voleith_bristol_parse_buffer`, which
+read a Bristol file and build a bit-level `voleith_circuit_t` that feeds
+directly into `voleith_prove` / `voleith_verify`.
+
+Because Bristol has no witness-vs-instance distinction, the caller supplies a
+per-input-value role array (`WITNESS` or `INSTANCE`); outputs are returned as
+bare wire IDs for the caller to constrain.  Supported gates are XOR, AND,
+INV, EQ, and EQW; `MAND` and the older pre-Fashion format are detected and
+rejected.  A small corpus of canonical circuits (AES-128, AES-256, 64-bit
+negate, 64×64 multiply) is vendored under `tests/data/bristol/` for
+cross-validation, and `examples/example_bristol_aes128.c` proves AES-128 key
+knowledge from the parsed Bristol circuit.
+
+See [`docs/DESIGN.md` → "Bristol Fashion Circuit Parser"](docs/DESIGN.md#bristol-fashion-circuit-parser)
+for the format, the role-assignment and ownership model, the single-pass
+parse algorithm and its validation invariants, the full error-code list, and
+the test corpus.
+
+---
+
 ## Fiat-Shamir transform
 
 `voleith_prove` / `voleith_verify` and `voleith_gf8_prove` /
@@ -359,8 +385,8 @@ witness construction with `aes_gf8_build_witness`.
 
 ## Examples
 
-Twenty-one runnable example programs in `examples/` exercise every circuit
-building block in both proof-system variants:
+Runnable example programs in `examples/` exercise every circuit building
+block in both proof-system variants, plus the Bristol Fashion parser:
 
 | Example | What it proves |
 |---------|----------------|
@@ -379,6 +405,7 @@ building block in both proof-system variants:
 | `example_hirose_gf8.c`                            | Knowledge of (G, H, M) producing a given Hirose-AES-256 iteration output (the bare iteration primitive) |
 | `example_hirose_leaf_gf8.c`                       | Knowledge of a 32-byte preimage under the Hirose-AES-256 fixed-32 leaf hash (the leaf side of the Hirose Merkle node vt) |
 | `example_hirose_inode_gf8.c`                      | Knowledge of children (L, R) under the Hirose-AES-256 inode hash (the inode side of the Hirose Merkle node vt) |
+| `example_bristol_aes128.c`                        | AES-128 key knowledge from a circuit loaded via the Bristol Fashion parser |
 
 Each example builds the circuit, generates a valid witness, produces a proof,
 verifies it, and prints circuit statistics (AND-gate count, ell, proof size)

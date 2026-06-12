@@ -122,3 +122,6 @@ voleith_add_test(test_ring_sig_v1_gf8 test_ring_sig_v1_gf8.c)
 voleith_add_hw_test(test_cpu_features test_cpu_features.c)
 voleith_add_test(test_cpu_dispatch test_cpu_dispatch.c)
 voleith_add_test(test_lean_build_warning test_lean_build_warning.c)
+voleith_add_test(test_bristol_parser test_bristol_parser.c)
+target_compile_definitions(test_bristol_parser PRIVATE
+    VOLEITH_BRISTOL_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/data/bristol")

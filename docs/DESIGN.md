@@ -18,7 +18,7 @@ All protocol code is a clean-room implementation derived from the FAEST v2.0 spe
 The library is organised into five layers, each independently testable and each consuming only the layer below it:
 
 ```
-Layer 5: circuits/                 Reusable circuit building blocks
+Layer 5: circuits/ + parsers/      Reusable circuit building blocks + format parsers
   aes_circuit / aes_gf8_circuit         AES-128 and AES-256 encryption
   grostl_gf8_circuit                    Grøstl-256 / Grøstl-512 hash
   hirose_gf8_circuit                    Hirose-AES-256 DBL iteration
@@ -31,6 +31,7 @@ Layer 5: circuits/                 Reusable circuit building blocks
   node_hash_{aes,grostl,hirose}_gf8     Per-family vt instances
   merkle_vt_gf8_circuit                 Generic vt-driven Merkle path
   indexed_merkle_vt_gf8_circuit         Generic vt-driven indexed non-member
+  bristol (parsers/)                    Bristol Fashion boolean-circuit parser
 
 Layer 4: proof/                    QuickSilver proof system
   circuit / gf8_circuit                 Circuit definition API
@@ -153,6 +154,92 @@ Constraints are what make the circuit a *statement*, not just a computation. The
 ### Soundness invariant: assert_product
 
 In the GF(2^8) variant, `assert_product(a, b, c)` is the soundness-critical constraint that anchors the S-box inversion. The prover MUST commit to `c = a · b` computed in GF(2^8); committing instead to some other value (even one the prover knows is correct in some other arithmetic) breaks soundness because the ZK hash check would become tautologically consistent. This is documented in the prover code and tested directly in `tests/test_gf8_quicksilver.c`.
+
+---
+
+## Bristol Fashion Circuit Parser
+
+The library can ingest circuits described in **Bristol Fashion**, the boolean-circuit file format maintained by Nigel Smart's group and used as the standard comparison baseline across the MPC/ZK ecosystem (AES, DES, SHA-256, adders, comparators, multipliers, etc.). The parser lives in `parsers/bristol.{c,h}` and is a Layer 5 consumer of the bit-level circuit API: it reads a file (or in-memory buffer) and builds a `voleith_circuit_t` that feeds directly into `voleith_prove` / `voleith_verify`.
+
+The parser targets the **bit-level** (GF(2)) API only. Bristol is a pure-boolean format; projecting onto GF(2^8) wires would defeat the point, so the GF(2^8) layer gets nothing from this work.
+
+### Why a `parsers/` subdirectory
+
+The parser is structurally a peer of `circuits/`, not a member of it: a `circuits/` building block constructs gates from C, whereas a parser constructs gates from an external file. Giving format parsers their own directory keeps that distinction clean and means a future parser (SIEVE IR, ABY's circuit format) lands as a sibling rather than as a structural rework. The parser depends only on `proof/circuit.h`; it does not touch `vole/`, the prover/verifier, or `circuits/`. CMake compiles it unconditionally into `voleith_core` with no new build option.
+
+### The format
+
+Bristol Fashion is three header lines, a blank line, then one line per gate:
+
+```
+<n_gates> <n_wires>
+<n_input_values> <input_1_bits> <input_2_bits> ... <input_k_bits>
+<n_output_values> <output_1_bits> <output_2_bits> ... <output_m_bits>
+
+<gate_1>
+...
+```
+
+Wires are numbered `0 .. n_wires-1`. The first `sum(input_*_bits)` wires are the inputs (value 1's bits first, then value 2's, etc.), the **last** `sum(output_*_bits)` wires are the outputs, and the interior wires are gate outputs in topological order. Each gate line is `<n_in> <n_out> <in1> [in2] <out> <gate_type>`. The supported gate types and their mapping onto the circuit API:
+
+| Gate | n_in | n_out | Semantics             | Maps to                     |
+|------|------|-------|-----------------------|-----------------------------|
+| XOR  | 2    | 1     | out = a ⊕ b           | `voleith_circuit_add_xor`   |
+| AND  | 2    | 1     | out = a · b           | `voleith_circuit_add_and`   |
+| INV  | 1    | 1     | out = ¬a              | `voleith_circuit_add_not`   |
+| EQ   | 1    | 1     | out = constant 0 or 1 | `voleith_circuit_add_const` |
+| EQW  | 1    | 1     | out = a               | reuse the input wire's id   |
+
+The `EQ` line's "input" field is the literal `0` or `1` constant, not a wire id, a format quirk noted in the parser. `EQW` (wire copy) adds no gate; it aliases the output wire id to the input's mapped circuit wire. `MAND` (multi-input AND) and any other gate type are **rejected** in v1 with a specific error; `MAND` is desugarable into a tree of binary ANDs but is added only when a real consumer needs it. The older pre-Fashion "Bristol Format" is detected by its different header arity and rejected with a distinct error.
+
+### Witness / instance role assignment
+
+Bristol has no witness-vs-instance distinction: all inputs are just "value 1 bits, value 2 bits, ...". The proof system requires the split, so the caller supplies a **per-input-value role array** (`voleith_bristol_config_t`) of `WITNESS` or `INSTANCE`, one entry per input value declared in the header. The parser validates that the array length matches the file's `n_input_values` (returning `VOLEITH_BRISTOL_ERR_ROLE_MISMATCH` otherwise) and allocates each input value's bits via `add_witness` or `add_instance` accordingly. For the canonical Bristol AES-128 circuit (two 128-bit input values, key and plaintext), a "prove I know the key" use case passes `{WITNESS, INSTANCE}`.
+
+Bristol outputs are bare wires; the format has no `assert_zero` / `assert_equal` concept. The parser returns the output wire ids in a `voleith_bristol_parsed_t`, and the caller attaches whatever constraints the use case demands (e.g. `assert_equal` against expected-ciphertext constant bits for an AES-key-knowledge proof, or leave them unconstrained for free composition into a larger circuit).
+
+### Parse result and ownership
+
+```c
+typedef struct {
+    voleith_circuit_t *circuit;        /* parser-built, caller frees */
+    wire_id  *input_wires;             /* flattened, file order */
+    size_t    n_input_wires;
+    wire_id  *output_wires;            /* flattened, file order */
+    size_t    n_output_wires;
+    size_t   *input_value_sizes;       /* bit-counts per input value */
+    size_t    n_input_values;
+    size_t   *output_value_sizes;      /* bit-counts per output value */
+    size_t    n_output_values;
+} voleith_bristol_parsed_t;
+```
+
+`voleith_bristol_parse_file` and `voleith_bristol_parse_buffer` return 0 on success and a negative `voleith_bristol_error_t` on failure. On success the caller owns the circuit and the four arrays; `voleith_bristol_parsed_free` releases them all and is safe to call on a zero-initialised struct (so the standard cleanup pattern is `voleith_bristol_parsed_t p = {0};` plus an unconditional free on every exit path). On any failure the parser frees all partial allocations, including the partially-built circuit, and zeroes `*out`.
+
+**Callers must validate the parsed shape before indexing the returned arrays or sizing fixed witness/instance buffers.** The parser makes no assumptions about what the circuit means: a file that does not match the caller's expected input/output layout would otherwise drive an out-of-bounds read in caller code. The AES-128 example demonstrates the guard (check `n_input_values == 2`, both `input_value_sizes` equal 128, and `n_output_wires >= 128` before proceeding).
+
+### Algorithm and validation
+
+The parser is single-pass. A flat `wire_id` array of size `n_wires` maps each dense Bristol wire id to the circuit wire id returned by the builder (no hash table needed). Inputs are allocated from the header; each gate line then looks up its input mappings, dispatches to the builder, and records the output mapping. Bristol Fashion files are topologically ordered by construction, so the parser does **not** sort: it instead enforces the format's invariants and rejects any file that violates them. For every gate it checks that each input wire id is strictly less than the output wire id (topological order), that no input wire is used before it is defined, and that no output wire id is reassigned (no SSA violation). After the gate loop it confirms that exactly `n_wires` entries were populated. The error codes (`VOLEITH_BRISTOL_ERR_IO`, `_HEADER`, `_ROLE_MISMATCH`, `_GATE_SYNTAX`, `_UNKNOWN_GATE`, `_WIRE_ORDER`, `_WIRE_REDEF`, `_WIRE_COUNT`, `_ALLOC`, `_OLD_FORMAT`) each have a single well-defined cause; there are no assertions and every error path propagates a code.
+
+### Test corpus and cross-validation
+
+A small set of canonical Bristol Fashion circuits is vendored under `tests/data/bristol/` (attribution and the upstream source in that directory's `README.md`):
+
+| File           | Circuit                                                  |
+|----------------|----------------------------------------------------------|
+| `aes_128.txt`  | AES-128 (Boyar-Peralta S-box, 6,400 AND gates)           |
+| `aes_256.txt`  | AES-256 (Boyar-Peralta S-box, 8,832 AND gates)           |
+| `neg64.txt`    | 64-bit two's-complement negation                         |
+| `mult2_64.txt` | 64×64 → 128-bit unsigned multiply                        |
+
+These give independent cross-validation of the parser against real-world circuits. The AES files in this corpus encode 128-bit blocks with reversed byte order (wire 0 carries bit 0 of the last byte), while the arithmetic circuits (`neg64`, `mult2_64`) use the plain little-endian convention (wire 0 = LSB); the test and example code account for both. Note the AES AND-gate counts differ from this library's hand-built circuits (7,200 for AES-128, 9,936 for AES-256): the Bristol circuits use the Boyar-Peralta 32-AND S-box rather than the Canright 36-AND build, and that expected ratio is itself a sanity check.
+
+`tests/test_bristol_parser.c` exercises: a synthetic 4-gate round-trip (XOR/AND/INV/EQW) evaluated against hand-computed outputs, a per-gate sweep, one minimal malformed buffer per error code, a role-count-mismatch rejection, AES-128 and AES-256 AND-gate-count and FIPS-197 evaluation-parity checks, the `neg64` and `mult2_64` arithmetic circuits over their little-endian convention, and a full `voleith_prove` / `voleith_verify` round-trip on the parsed AES-128 circuit. `examples/example_bristol_aes128.c` is the runnable form of that last test: it parses the vendored AES-128 circuit, marks the key as witness and the plaintext as instance, constrains each output wire to the expected FIPS-197 ciphertext bit via `add_const`, and proves/verifies under FAEST-EM-128f.
+
+### Non-goals (v1)
+
+Writing Bristol files (no consumer is asking), `MAND` desugaring, streaming/partial parsing (whole-file in-memory only; the largest standard Bristol circuit is well under 100 MB), GF(2^8) projection, and support for the older pre-Fashion format beyond detect-and-reject.
 
 ---
 

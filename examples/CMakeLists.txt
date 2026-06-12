@@ -31,6 +31,7 @@ set(EXAMPLE_NAMES
     example_kvac_pq_grostl_gf8_depth12
     example_ring_sig_v1_gf8
     example_ring_sig_v1_revocable_gf8
+    example_bristol_aes128
 )
 
 foreach(EXAMPLE ${EXAMPLE_NAMES})

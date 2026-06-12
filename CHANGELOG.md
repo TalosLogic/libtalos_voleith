@@ -5,6 +5,38 @@ All notable changes to libtalos_voleith are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] 2026-06-11
+
+Adds a Bristol Fashion circuit parser: load boolean circuits in the
+standard MPC/ZK file format and prove/verify them through the existing
+bit-level pipeline. New `parsers/` subdirectory; no public API or
+wire-format change to the proof system. See DESIGN.md "Bristol Fashion
+Circuit Parser" for the format, role model, parse algorithm, and error
+codes.
+
+### Added
+
+- `parsers/bristol.{c,h}`: Bristol Fashion parser building a bit-level
+  `voleith_circuit_t`. `voleith_bristol_parse_file` /
+  `voleith_bristol_parse_buffer` / `voleith_bristol_parsed_free`, with a
+  per-input-value `WITNESS`/`INSTANCE` role array and returned input/output
+  wire-id arrays. Supports XOR/AND/INV/EQ/EQW; rejects MAND and the older
+  pre-Fashion format.
+- `tests/test_bristol_parser.c`: synthetic round-trip, per-gate sweep,
+  one malformed buffer per error code, role-count mismatch, AES-128/256
+  AND-gate-count and FIPS-197 evaluation parity, neg64 and mult2_64
+  arithmetic circuits, and a full prove/verify on the parsed AES-128 circuit.
+- `examples/example_bristol_aes128.c`: AES-128 key-knowledge proof from a
+  parsed Bristol circuit under FAEST-EM-128f.
+- `tests/data/bristol/`: vendored Bristol Fashion corpus (AES-128, AES-256,
+  neg64, mult2_64) with attribution README for cross-validation.
+
+### Changed
+
+- `CMakeLists.txt`: new `VOLEITH_PARSERS_SOURCES`, `parsers/` added to the
+  core include path and compiled unconditionally into `voleith_core`. No
+  new build option.
+
 ## [1.4.1] 2026-06-09
 
 Collapses the previous per-ISA library variants (`libvoleith_sw.a`,

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 cmake_minimum_required(VERSION 3.16)
-project(libvoleith VERSION 1.4.1 LANGUAGES C)
+project(libvoleith VERSION 1.5.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -225,11 +225,17 @@ set(VOLEITH_CORE_SOURCES
     circuits/ring_sig_v1_gf8_circuit.c
 )
 
+set(VOLEITH_PARSERS_SOURCES
+    parsers/bristol.c
+)
+list(APPEND VOLEITH_CORE_SOURCES ${VOLEITH_PARSERS_SOURCES})
+
 set(VOLEITH_CORE_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}/core
     ${CMAKE_CURRENT_SOURCE_DIR}/vole
     ${CMAKE_CURRENT_SOURCE_DIR}/proof
     ${CMAKE_CURRENT_SOURCE_DIR}/circuits
+    ${CMAKE_CURRENT_SOURCE_DIR}/parsers
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
