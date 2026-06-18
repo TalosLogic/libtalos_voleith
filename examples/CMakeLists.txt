@@ -32,6 +32,10 @@ set(EXAMPLE_NAMES
     example_ring_sig_v1_gf8
     example_ring_sig_v1_revocable_gf8
     example_bristol_aes128
+    example_shipshape_parse_prove
+    example_shipshape_anon_membership
+    example_shipshape_kvac
+    example_shipshape_ring_sig
 )
 
 foreach(EXAMPLE ${EXAMPLE_NAMES})
@@ -40,3 +44,19 @@ foreach(EXAMPLE ${EXAMPLE_NAMES})
     set_target_properties(${EXAMPLE} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples)
 endforeach()
+
+# Default .ship path for the parse/prove example (overridable via argv[1]).
+target_compile_definitions(example_shipshape_parse_prove PRIVATE
+    VOLEITH_SHIPSHAPE_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/data/shipshape")
+
+# Default .ship path for the anonymous membership example (overridable via argv[1]).
+target_compile_definitions(example_shipshape_anon_membership PRIVATE
+    VOLEITH_SHIPSHAPE_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/data/shipshape")
+
+# .ship data dir for the KVAC credential lifecycle example.
+target_compile_definitions(example_shipshape_kvac PRIVATE
+    VOLEITH_SHIPSHAPE_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/data/shipshape")
+
+# Default .ship path for the RSv1 ring signature example (overridable via argv[1]).
+target_compile_definitions(example_shipshape_ring_sig PRIVATE
+    VOLEITH_SHIPSHAPE_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/data/shipshape")

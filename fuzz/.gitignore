@@ -1,0 +1,22 @@
+# Copyright (c) 2026 Jason Crawford
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# libFuzzer writes generated inputs and crash artifacts into the working
+# tree.  Only the hand-written seed corpus (corpus/*/*.ship, *.txt) is
+# committed; everything the fuzzer produces is regenerable and ignored.
+
+# Crash / failure artifacts (reproduce, then promote to a W4.3 ctest).
+crash-*
+leak-*
+oom-*
+timeout-*
+slow-unit-*
+
+# Mutable working corpus libFuzzer grows during a run.
+corpus-work/
+
+# Safety net: the discovered corpus is SHA1-named and extensionless.  Ignore
+# anything in a seed dir that is not one of the committed named seeds.
+corpus/*/*
+!corpus/*/*.ship
+!corpus/*/*.txt

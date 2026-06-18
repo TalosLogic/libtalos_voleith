@@ -25,9 +25,21 @@ struct voleith_gf8_circuit {
 
     size_t n_witness;
     size_t n_instance;
+    size_t n_const;          /* CONST input-wire count */
     size_t n_mul;            /* add_mul gate count */
     size_t n_assert_product; /* assert_product constraint count */
     int alloc_ok;            /* 0 if any append failed */
+
+    /*
+     * Incremental resource ceilings (0 == unlimited; the default).  When set
+     * via voleith_gf8_circuit_set_limits(), append_wire refuses to grow the
+     * circuit past wire_cap total wires or gate_cap gate (non-input) wires,
+     * clearing alloc_ok the moment a ceiling would be crossed.  This bounds a
+     * bulk emitter (a Tier 2a registry body) as it runs instead of only after
+     * the whole body has been materialized.
+     */
+    size_t wire_cap;
+    size_t gate_cap;
 };
 
 /* ================================================================
@@ -38,6 +50,24 @@ struct voleith_gf8_circuit {
 static gf8_wire_id
 append_wire(voleith_gf8_circuit_t *c, gf8_wire_entry_t entry)
 {
+    /*
+     * Incremental resource caps (0 == unlimited).  Checked at the sole
+     * wire-append choke point so a bulk emitter is stopped the moment a
+     * ceiling is crossed, never after the whole body has materialized.  A
+     * refused append clears alloc_ok, exactly like an allocation failure, so
+     * every existing voleith_gf8_circuit_ok() caller already catches it.
+     */
+    if (c->wire_cap != 0 && c->n_wires >= c->wire_cap) {
+        c->alloc_ok = 0;
+        return GF8_WIRE_ID_INVALID;
+    }
+    if (c->gate_cap != 0 && entry.kind != GF8_WIRE_WITNESS &&
+        entry.kind != GF8_WIRE_INSTANCE && entry.kind != GF8_WIRE_CONST &&
+        c->n_wires - c->n_witness - c->n_instance - c->n_const >= c->gate_cap) {
+        c->alloc_ok = 0;
+        return GF8_WIRE_ID_INVALID;
+    }
+
     if (c->n_wires == c->cap_wires) {
         size_t new_cap = c->cap_wires * 2;
         gf8_wire_entry_t *p =
@@ -327,6 +357,16 @@ voleith_gf8_circuit_free(voleith_gf8_circuit_t *c)
     free(c);
 }
 
+void
+voleith_gf8_circuit_set_limits(voleith_gf8_circuit_t *c, size_t max_wires,
+                               size_t max_gates)
+{
+    if (!c)
+        return;
+    c->wire_cap = max_wires;
+    c->gate_cap = max_gates;
+}
+
 /* ================================================================
  * Builder API
  * ================================================================ */
@@ -373,7 +413,10 @@ voleith_gf8_add_const(voleith_gf8_circuit_t *c, uint8_t val)
         .const_val = val,
         .matrix = {0},
     };
-    return append_wire(c, e);
+    gf8_wire_id id = append_wire(c, e);
+    if (id != GF8_WIRE_ID_INVALID)
+        c->n_const++;
+    return id;
 }
 
 gf8_wire_id
@@ -527,6 +570,15 @@ size_t
 voleith_gf8_circuit_instance_count(const voleith_gf8_circuit_t *c)
 {
     return c->n_instance;
+}
+
+size_t
+voleith_gf8_circuit_gate_count(const voleith_gf8_circuit_t *c)
+{
+    /* Gates are the produced (non-input) wires: every XOR, XOR_CONST,
+     * LINEAR_MAP, SQUARE, and MUL wire.  The inputs are WITNESS, INSTANCE,
+     * and CONST wires. */
+    return c->n_wires - c->n_witness - c->n_instance - c->n_const;
 }
 
 size_t

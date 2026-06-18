@@ -238,12 +238,12 @@ rot_word_gf8(const gf8_wire_id in[4], gf8_wire_id out[4])
 }
 
 /* ================================================================
- * AES-128 key schedule
+ * Public API: AES-128 key schedule (gate-level)
  * ================================================================ */
 
-static void
-aes128_gf8_key_schedule(voleith_gf8_circuit_t *c, const gf8_wire_id key[16],
-                        gf8_wire_id rk[11][16])
+void
+aes128_gf8_expand_key(voleith_gf8_circuit_t *c, const gf8_wire_id key[16],
+                      gf8_wire_id rk[11][16])
 {
     /* Round 0: original key. */
     for (int k = 0; k < 16; k++)
@@ -287,17 +287,13 @@ aes128_gf8_key_schedule(voleith_gf8_circuit_t *c, const gf8_wire_id key[16],
 }
 
 /* ================================================================
- * Public API: AES-128 circuit
+ * Public API: AES-128 encryption with precomputed round keys
  * ================================================================ */
 
 void
-aes128_gf8_circuit(voleith_gf8_circuit_t *c, const gf8_wire_id key[16],
-                   const gf8_wire_id plaintext[16], gf8_wire_id output[16])
+aes128_gf8_encrypt_rk(voleith_gf8_circuit_t *c, const gf8_wire_id rk[11][16],
+                      const gf8_wire_id plaintext[16], gf8_wire_id output[16])
 {
-    /* Build key schedule: adds 40 S-box witnesses (key schedule). */
-    gf8_wire_id rk[11][16];
-    aes128_gf8_key_schedule(c, key, rk);
-
     /* Initialize state from plaintext. */
     aes_gf8_state state;
     for (int k = 0; k < 16; k++)
@@ -322,6 +318,19 @@ aes128_gf8_circuit(voleith_gf8_circuit_t *c, const gf8_wire_id key[16],
 
     for (int k = 0; k < 16; k++)
         output[k] = state[k];
+}
+
+/* ================================================================
+ * Public API: AES-128 circuit (thin wrapper)
+ * ================================================================ */
+
+void
+aes128_gf8_circuit(voleith_gf8_circuit_t *c, const gf8_wire_id key[16],
+                   const gf8_wire_id plaintext[16], gf8_wire_id output[16])
+{
+    gf8_wire_id rk[11][16];
+    aes128_gf8_expand_key(c, key, rk);
+    aes128_gf8_encrypt_rk(c, rk, plaintext, output);
 }
 
 /* ================================================================
@@ -501,21 +510,18 @@ mix_columns_bytes(uint8_t state[16])
 }
 
 void
-aes128_gf8_build_witness(const uint8_t key[16], const uint8_t plaintext[16],
-                         uint8_t witness[216], uint8_t ciphertext[16])
+aes128_gf8_expand_key_witness(const uint8_t key[16],
+                              uint8_t inv_out[AES128_GF8_KS_INVIN_BYTES],
+                              uint8_t rk_out[11][16])
 {
-    /* witness[0..15] = key bytes */
-    memcpy(witness, key, 16);
-    uint8_t *inv_slot = witness + 16;
+    uint8_t *inv_slot = inv_out;
 
     /* Byte-level key schedule: track w[0..3] as 4×4 bytes. */
     uint8_t w[4][4];
     for (int word = 0; word < 4; word++)
         memcpy(w[word], key + 4 * word, 4);
 
-    /* Round keys (for data path trace). */
-    uint8_t rk[11][16];
-    memcpy(rk[0], key, 16);
+    memcpy(rk_out[0], key, 16);
 
     for (int round = 1; round <= 10; round++) {
         /* RotWord(w[3]) */
@@ -541,9 +547,22 @@ aes128_gf8_build_witness(const uint8_t key[16], const uint8_t plaintext[16],
 
         for (int word = 0; word < 4; word++) {
             memcpy(w[word], new_w[word], 4);
-            memcpy(rk[round] + 4 * word, new_w[word], 4);
+            memcpy(rk_out[round] + 4 * word, new_w[word], 4);
         }
     }
+
+    /* CIR-11: clear the expanded-words scratch.  The caller is
+     * responsible for clearing rk_out at the appropriate point. */
+    voleith_secure_zero(w, sizeof(w));
+}
+
+void
+aes128_gf8_encrypt_rk_witness(const uint8_t rk[11][16],
+                              const uint8_t plaintext[16],
+                              uint8_t inv_out[AES128_GF8_ENC_INVIN_BYTES],
+                              uint8_t ciphertext[16])
+{
+    uint8_t *inv_slot = inv_out;
 
     /* Data path: trace state, recording inv_in for each S-box in order. */
     uint8_t state[16];
@@ -574,12 +593,25 @@ aes128_gf8_build_witness(const uint8_t key[16], const uint8_t plaintext[16],
     if (ciphertext)
         memcpy(ciphertext, state, 16);
 
-    /* CIR-11: clear key-schedule working state and per-block running
-     * state.  `w` holds expanded key-schedule words; `rk` is the full
-     * round-key table; `state` is the AES data path mid-encrypt. */
-    voleith_secure_zero(w, sizeof(w));
-    voleith_secure_zero(rk, sizeof(rk));
+    /* CIR-11: clear per-block mid-encrypt state. */
     voleith_secure_zero(state, sizeof(state));
+}
+
+void
+aes128_gf8_build_witness(const uint8_t key[16], const uint8_t plaintext[16],
+                         uint8_t witness[216], uint8_t ciphertext[16])
+{
+    /* witness[0..15] = key bytes */
+    memcpy(witness, key, 16);
+
+    uint8_t rk[11][16];
+    aes128_gf8_expand_key_witness(key, witness + 16, rk);
+    aes128_gf8_encrypt_rk_witness(
+        rk, plaintext, witness + 16 + AES128_GF8_KS_INVIN_BYTES, ciphertext);
+
+    /* CIR-11: clear the round-key table that the split functions
+     * leave to the caller. */
+    voleith_secure_zero(rk, sizeof(rk));
 }
 
 void

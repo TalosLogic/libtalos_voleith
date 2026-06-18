@@ -85,6 +85,10 @@ gf8_wire_id aes_gf8_sbox(voleith_gf8_circuit_t *c, gf8_wire_id in);
  * Adds 200 witness wires (inv_in per S-box) and 400 assert_product constraints.
  * ell contribution: 200 (from 200 aes_gf8_sbox calls).
  *
+ * Thin wrapper around aes128_gf8_expand_key + aes128_gf8_encrypt_rk; the gate
+ * stream and witness layout are identical to calling the two split functions
+ * directly with the same key/plaintext.
+ *
  * Typical usage:
  *   gf8_wire_id key[16], pt[16], ct[16];
  *   for (int i = 0; i < 16; i++) key[i] = voleith_gf8_add_witness(c);
@@ -96,6 +100,52 @@ gf8_wire_id aes_gf8_sbox(voleith_gf8_circuit_t *c, gf8_wire_id in);
 void aes128_gf8_circuit(voleith_gf8_circuit_t *c, const gf8_wire_id key[16],
                         const gf8_wire_id plaintext[16],
                         gf8_wire_id output[16]);
+
+/*
+ * S-box counts produced by the AES-128 split functions.  Used as the
+ * inv_in byte counts for the matching witness builders.
+ */
+#define AES128_GF8_KS_INVIN_BYTES 40   /* aes128_gf8_expand_key       */
+#define AES128_GF8_ENC_INVIN_BYTES 160 /* aes128_gf8_encrypt_rk        */
+
+/*
+ * aes128_gf8_expand_key - AES-128 key schedule as a GF(2⁸) element circuit.
+ *
+ * Expands 16 key wires into 11 round keys of 16 wires each.  Adds 40
+ * witness wires (inv_in per SubWord S-box) and 80 assert_product
+ * constraints.  No data-path gates emitted.
+ *
+ * Splitting the schedule out lets callers that need to encrypt several
+ * plaintexts under the same key emit the schedule once and reuse the
+ * resulting round-key wires across multiple aes128_gf8_encrypt_rk calls.
+ *
+ * The round-key output rk is round-major: rk[round][byte] holds byte
+ * `byte` of round key `round`.  The flat .circ signature (key : byte[16])
+ * -> (rk : byte[176]) numbers the same wire at flat index 16*round + byte.
+ *
+ * key[0..15]: 16 GF(2⁸) key-byte wires.
+ * rk[0..10][0..15]: receives 11 round keys, 16 wire IDs each.
+ */
+void aes128_gf8_expand_key(voleith_gf8_circuit_t *c, const gf8_wire_id key[16],
+                           gf8_wire_id rk[11][16]);
+
+/*
+ * aes128_gf8_encrypt_rk - AES-128 encryption using a precomputed key
+ * schedule.
+ *
+ * Consumes 11 round keys (from a prior aes128_gf8_expand_key call) plus
+ * 16 plaintext wires, and emits the 16 ciphertext wires.  Adds 160
+ * witness wires (inv_in per data-path S-box) and 320 assert_product
+ * constraints.  No key-schedule gates emitted.
+ *
+ * rk[0..10][0..15]: 11 round keys, 16 wires each (round-major).
+ * plaintext[0..15]: 16 plaintext-byte wires.
+ * output[0..15]:    receives 16 ciphertext-byte wires.
+ */
+void aes128_gf8_encrypt_rk(voleith_gf8_circuit_t *c,
+                           const gf8_wire_id rk[11][16],
+                           const gf8_wire_id plaintext[16],
+                           gf8_wire_id output[16]);
 
 /*
  * aes256_gf8_circuit - AES-256 encryption as a GF(2⁸) element circuit.
@@ -173,6 +223,45 @@ void aes256_gf8_encrypt_rk(voleith_gf8_circuit_t *c,
 void aes128_gf8_build_witness(const uint8_t key[16],
                               const uint8_t plaintext[16], uint8_t witness[216],
                               uint8_t ciphertext[16]);
+
+/*
+ * aes128_gf8_expand_key_witness - byte-level key schedule for
+ * aes128_gf8_expand_key.
+ *
+ * Computes the 40 inv_in values for the key-schedule SubWord S-boxes
+ * (in the same circuit-evaluation order the circuit consumes them) and
+ * returns the expanded round-key byte table.
+ *
+ * key[16]:    AES-128 key bytes.
+ * inv_out[AES128_GF8_KS_INVIN_BYTES]: receives the 40 inv_in bytes.
+ * rk_out[11][16]: receives the expanded round keys (needed by
+ *                 aes128_gf8_encrypt_rk_witness).
+ *
+ * Caller-supplied buffers.  Internal working state is securely zeroed
+ * on return.
+ */
+void aes128_gf8_expand_key_witness(const uint8_t key[16],
+                                   uint8_t inv_out[AES128_GF8_KS_INVIN_BYTES],
+                                   uint8_t rk_out[11][16]);
+
+/*
+ * aes128_gf8_encrypt_rk_witness - byte-level data path for
+ * aes128_gf8_encrypt_rk.
+ *
+ * Computes the 160 inv_in values for the data-path SubBytes S-boxes
+ * (in circuit-evaluation order) given the round-key table from
+ * aes128_gf8_expand_key_witness.  Optionally returns the resulting
+ * ciphertext.
+ *
+ * rk[11][16]:     expanded AES-128 round keys (round-major).
+ * plaintext[16]:  plaintext bytes.
+ * inv_out[AES128_GF8_ENC_INVIN_BYTES]: receives the 160 inv_in bytes.
+ * ciphertext[16]: if non-NULL, receives AES-128(key, plaintext).
+ */
+void aes128_gf8_encrypt_rk_witness(const uint8_t rk[11][16],
+                                   const uint8_t plaintext[16],
+                                   uint8_t inv_out[AES128_GF8_ENC_INVIN_BYTES],
+                                   uint8_t ciphertext[16]);
 
 /*
  * aes256_gf8_build_witness - construct the full witness vector for AES-256.

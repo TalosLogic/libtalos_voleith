@@ -1,0 +1,73 @@
+# Anonymous group MEMBERSHIP statement (a secret-direction Merkle inclusion
+# proof).  This is one building block, not a full KVAC credential system: it
+# proves inclusion only.  KVAC-style lifecycle management (issuing members,
+# revoking them, proving non-membership) is shown in example_shipshape_kvac.
+#
+# Claim proved: "I know a credential that is a leaf of the public group tree,
+# without revealing which leaf."  The prover demonstrates that a secret 32-byte
+# member credential hashes into a leaf whose Merkle authentication path leads to
+# the public group root, but never discloses the leaf, the path, or the index.
+#
+# Privacy model: the leaf credential, the sibling path, and the per-level
+# directions are ALL witness (private).  Only the group root is public
+# (INSTANCE).  Because the directions are secret, the path SHAPE leaks nothing,
+# so distinct membership proofs are unlinkable: nothing but the root is revealed.
+#
+# Hash choice: merkle/path_secret[hirose_fixed_32] uses 32-byte nodes giving
+# 128-bit collision resistance.  The fixed 32-byte single-block leaf record keeps
+# proving cost minimal (no variable-length leaf padding iterations).
+#
+# Tree shape: depth 8 (256-leaf group).  ext (declaration order) =
+#   leaf(32) | siblings(8 * 32 = 256) | dirs(8) = 296 bytes.
+# dirs[k] in {0,1} is bit k of the secret leaf index, LSB first; the secret-dir
+# mux enforces booleanity in-circuit.
+#
+# Scaling: the node width is fixed at 32 bytes by hirose_fixed_32, so to model a
+# tree of depth D you change only two widths here: %sib becomes byte[D * 32] and
+# %dirs becomes byte[D].  %leaf, %root, and the 32 ASSERT_EQUAL lines never
+# change (the root is one 32-byte node regardless of depth).  Proving cost grows
+# linearly in D (one hirose inode hash per level), which is why the cheap fixed
+# 32-byte leaf and 32-byte node matter.
+.shipshape 1
+field GF(2^8) irreducible 0x11B
+stdlib crypto-v2
+
+WITNESS  -> %leaf : byte[32]
+WITNESS  -> %sib  : byte[256]
+WITNESS  -> %dirs : byte[8]
+INSTANCE -> %root : byte[32]
+
+stdlib/crypto/merkle/path_secret[hirose_fixed_32](%leaf, %sib, %dirs) -> %computed
+
+ASSERT_EQUAL %computed[0] %root[0]
+ASSERT_EQUAL %computed[1] %root[1]
+ASSERT_EQUAL %computed[2] %root[2]
+ASSERT_EQUAL %computed[3] %root[3]
+ASSERT_EQUAL %computed[4] %root[4]
+ASSERT_EQUAL %computed[5] %root[5]
+ASSERT_EQUAL %computed[6] %root[6]
+ASSERT_EQUAL %computed[7] %root[7]
+ASSERT_EQUAL %computed[8] %root[8]
+ASSERT_EQUAL %computed[9] %root[9]
+ASSERT_EQUAL %computed[10] %root[10]
+ASSERT_EQUAL %computed[11] %root[11]
+ASSERT_EQUAL %computed[12] %root[12]
+ASSERT_EQUAL %computed[13] %root[13]
+ASSERT_EQUAL %computed[14] %root[14]
+ASSERT_EQUAL %computed[15] %root[15]
+ASSERT_EQUAL %computed[16] %root[16]
+ASSERT_EQUAL %computed[17] %root[17]
+ASSERT_EQUAL %computed[18] %root[18]
+ASSERT_EQUAL %computed[19] %root[19]
+ASSERT_EQUAL %computed[20] %root[20]
+ASSERT_EQUAL %computed[21] %root[21]
+ASSERT_EQUAL %computed[22] %root[22]
+ASSERT_EQUAL %computed[23] %root[23]
+ASSERT_EQUAL %computed[24] %root[24]
+ASSERT_EQUAL %computed[25] %root[25]
+ASSERT_EQUAL %computed[26] %root[26]
+ASSERT_EQUAL %computed[27] %root[27]
+ASSERT_EQUAL %computed[28] %root[28]
+ASSERT_EQUAL %computed[29] %root[29]
+ASSERT_EQUAL %computed[30] %root[30]
+ASSERT_EQUAL %computed[31] %root[31]

@@ -25,6 +25,8 @@
  *  17:  assert_equal: passes when wires match, fails otherwise
  *  18:  assert_product: passes for correct product, fails for wrong
  *  19:  Instance wires evaluated from instance array
+ *  20:  Incremental resource caps (set_limits): wire_cap / gate_cap bound the
+ *       circuit, default 0 == unlimited, over-cap append => INVALID + !ok
  */
 
 #include "../proof/gf8_circuit.h"
@@ -723,6 +725,72 @@ test_instance_wires(void)
 }
 
 /* ================================================================
+ * Test 20: Incremental resource caps (voleith_gf8_circuit_set_limits)
+ * ================================================================ */
+static void
+test_resource_caps(void)
+{
+    /* Default: a circuit with no caps is unlimited (0 == unlimited). */
+    {
+        voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+        gf8_wire_id a = voleith_gf8_add_witness(c);
+        gf8_wire_id b = voleith_gf8_add_witness(c);
+
+        for (int i = 0; i < 100; i++)
+            voleith_gf8_add_xor(c, a, b);
+        check("caps: default circuit is unlimited",
+              voleith_gf8_circuit_ok(c) == 1 &&
+                  voleith_gf8_circuit_wire_count(c) == 102);
+        voleith_gf8_circuit_free(c);
+    }
+
+    /* wire_cap bounds the total wire count, inputs included. */
+    {
+        voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+        gf8_wire_id w0, w1, w2, over;
+
+        voleith_gf8_circuit_set_limits(c, 3, 0);
+        w0 = voleith_gf8_add_witness(c);
+        w1 = voleith_gf8_add_witness(c);
+        w2 = voleith_gf8_add_witness(c);
+        check("caps: wires up to wire_cap succeed",
+              w0 == 0 && w1 == 1 && w2 == 2 && voleith_gf8_circuit_ok(c) == 1);
+        over = voleith_gf8_add_xor(c, w0, w1);
+        check("caps: wire past wire_cap => INVALID + !ok",
+              over == GF8_WIRE_ID_INVALID && voleith_gf8_circuit_ok(c) == 0);
+        check("caps: wire_count pinned at wire_cap",
+              voleith_gf8_circuit_wire_count(c) == 3);
+        voleith_gf8_circuit_free(c);
+    }
+
+    /* gate_cap bounds gate (non-input) wires only; inputs are exempt. */
+    {
+        voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+        gf8_wire_id a, b, k, g0, g1, g2;
+
+        voleith_gf8_circuit_set_limits(c, 0, 2);
+        a = voleith_gf8_add_witness(c);
+        b = voleith_gf8_add_instance(c);
+        k = voleith_gf8_add_const(c, 0x01);
+        check("caps: inputs do not count toward gate_cap",
+              a != GF8_WIRE_ID_INVALID && b != GF8_WIRE_ID_INVALID &&
+                  k != GF8_WIRE_ID_INVALID && voleith_gf8_circuit_ok(c) == 1);
+        g0 = voleith_gf8_add_xor(c, a, b);
+        g1 = voleith_gf8_add_xor(c, a, b);
+        check("caps: gates up to gate_cap succeed",
+              g0 != GF8_WIRE_ID_INVALID && g1 != GF8_WIRE_ID_INVALID &&
+                  voleith_gf8_circuit_ok(c) == 1 &&
+                  voleith_gf8_circuit_gate_count(c) == 2);
+        g2 = voleith_gf8_add_xor(c, a, b);
+        check("caps: gate past gate_cap => INVALID + !ok",
+              g2 == GF8_WIRE_ID_INVALID && voleith_gf8_circuit_ok(c) == 0);
+        check("caps: gate_count pinned at gate_cap",
+              voleith_gf8_circuit_gate_count(c) == 2);
+        voleith_gf8_circuit_free(c);
+    }
+}
+
+/* ================================================================
  * main
  * ================================================================ */
 int
@@ -749,6 +817,7 @@ main(void)
     test_assert_equal();
     test_assert_product();
     test_instance_wires();
+    test_resource_caps();
 
     printf("  %d / %d passed\n", pass_count, test_count);
     return (pass_count == test_count) ? 0 : 1;

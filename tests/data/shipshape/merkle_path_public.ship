@@ -1,0 +1,42 @@
+# Merkle path verification with statically-resolved PUBLIC directions.
+# The bundled structural stdlib is empty in v1 (ISA 4), so the node
+# compression is composed in user space: H(L,R) = AES_L(R), a keyed
+# compression returning the 16-byte ciphertext.  The direction at each
+# level is known at circuit-build time, so the (left,right) order is fixed
+# in the call: level 0 dir=0 (leaf is left), level 1 dir=1 (subtree is right).
+.shipshape 1
+field GF(2^8) irreducible 0x11B
+stdlib crypto-v1
+
+# Keyed compression H(left, right) = AES_left(right).
+subcircuit user/compress (%left : byte[16], %right : byte[16]) -> (%out : byte[16]) {
+stdlib/crypto/aes/encrypt_128(%left, %right) -> %out
+}
+
+WITNESS -> %leaf : byte[16]
+WITNESS -> %sib0 : byte[16]
+WITNESS -> %sib1 : byte[16]
+INSTANCE -> %root : byte[16]
+
+# level 0 (dir = 0): leaf is the left input
+user/compress(%leaf, %sib0) -> %n0
+# level 1 (dir = 1): the level-0 node is the right input
+user/compress(%sib1, %n0) -> %n1
+
+# the computed root must equal the public root
+ASSERT_EQUAL %n1[0] %root[0]
+ASSERT_EQUAL %n1[1] %root[1]
+ASSERT_EQUAL %n1[2] %root[2]
+ASSERT_EQUAL %n1[3] %root[3]
+ASSERT_EQUAL %n1[4] %root[4]
+ASSERT_EQUAL %n1[5] %root[5]
+ASSERT_EQUAL %n1[6] %root[6]
+ASSERT_EQUAL %n1[7] %root[7]
+ASSERT_EQUAL %n1[8] %root[8]
+ASSERT_EQUAL %n1[9] %root[9]
+ASSERT_EQUAL %n1[10] %root[10]
+ASSERT_EQUAL %n1[11] %root[11]
+ASSERT_EQUAL %n1[12] %root[12]
+ASSERT_EQUAL %n1[13] %root[13]
+ASSERT_EQUAL %n1[14] %root[14]
+ASSERT_EQUAL %n1[15] %root[15]

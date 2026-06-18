@@ -5,6 +5,98 @@ All notable changes to libtalos_voleith are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] 2026-06-18
+
+Adds the Shipshape (`.ship`) native GF(2^8) circuit toolchain: a text format
+for arithmetic circuits that lowers directly to `voleith_gf8_circuit_t`, a
+generic witness generator, and the parse to witness to prove to verify
+pipeline. Self-describing inputs (named WITNESS / INSTANCE / CONST wires),
+Tier 1 gate set with sugar, `user/*` subcircuit inlining, and a frozen Tier
+2a `stdlib/crypto/*` registry. See docs/specs/SHIPSHAPE_SPEC.md and
+docs/DESIGN.md.
+
+### Added
+
+- `circuits/aes_gf8_circuit.{c,h}`: split AES-128 GF(2^8) builders
+  `aes128_gf8_expand_key` / `aes128_gf8_encrypt_rk` (plus witness helpers and
+  the `AES128_GF8_KS_INVIN_BYTES` / `AES128_GF8_ENC_INVIN_BYTES` constants),
+  bringing AES-128 to parity with AES-256. `aes128_gf8_circuit` is now a thin
+  wrapper; its fingerprint is unchanged (regression-pinned).
+- `proof/gf8_circuit.{c,h}`: `voleith_gf8_circuit_gate_count` (produced,
+  non-input wires); the Shipshape parser enforces `MAX_GATES` against it via a
+  new `budget_gates` check at each gate-emission site. `voleith_gf8_circuit_set_limits`
+  arms optional incremental wire/gate ceilings (0 = unlimited, default) that
+  abort a bulk emitter the moment a ceiling is crossed; the parser uses it so
+  Tier 2a registry bodies are bounded as they emit, not after.
+- `tools/shipshape_registry_freeze`: regenerates the checked-in
+  `parsers/shipshape_registry_table.c` (FQN, kind, signature, parameter
+  bounds, body hashes) from the C builders; output is deterministic. A fresh
+  checkout builds without running it.
+- `parsers/shipshape.{c,h}`: Shipshape v1 parser. `voleith_shipshape_parse_file`
+  / `voleith_shipshape_parse_buffer` / `voleith_shipshape_parsed_free`,
+  returning the built circuit, a file-order declaration table, and a region
+  side table. Validates the `.shipshape 1` magic on every parse; the
+  filename is never trusted.
+- Tier 2a registry: `stdlib/crypto/*` calls inline the hand-written C
+  builders (AES, CMAC, Grostl) with byte-identical structure, gated by the
+  exact `stdlib crypto-v1` header line.
+- `tests/test_shipshape_parser.c`: entry / limit / lexer / header /
+  declaration / gate / subcircuit / registry coverage, one malformed input
+  per error code.
+- `tests/test_shipshape_conformance.c`: ISA 5.5 cross-parser corpus. Every
+  sugar form, literal encoding, region placement, and gate-ordering edge
+  case checked against the fingerprint of the hand-built circuit, plus
+  parse-then-reparse idempotence. Disagreement is a release-blocker.
+- `parsers/shipshape_witness.{c,h}`: generic Tier 1 witness generator.
+  `voleith_shipshape_witness_gen` completes the full witness array from the
+  external input alone, evaluating the lowered circuit and filling
+  gadget-internal `INV` inverses; reproduces `circuits/*_build_witness`
+  byte-for-byte. See docs/specs/SHIPSHAPE_SPEC.md §2.4.
+- `fuzz/`: libFuzzer harnesses for the Shipshape and Bristol parser entry
+  points (`-DVOLEITH_FUZZ=ON`, Clang) with a seed corpus.
+- `tests/data/shipshape/` + `examples/example_shipshape_parse_prove.c`:
+  example `.ship` corpus (AES / CMAC key knowledge, public- and
+  secret-direction Merkle paths) and an end-to-end parse / witness / prove /
+  verify program.
+- Equivalence and regression suites: adversarial corpus, registry
+  equivalence (FIXED entries and the parametric grid), witness-vs-builder
+  equivalence, and a prove/verify round-trip on parsed circuits.
+- `stdlib crypto-v2` registry (additive over crypto-v1): adds a bracket
+  node-hash-type selector and the node-hash-type registry
+  (`parsers/shipshape_node_hash_types.{c,h}`), supporting `aes_dm`,
+  `aes_cmac_128`, four Grostl variants, and Hirose as selector values.
+- Three hash-parametric secret-direction crypto extensions (phase 1):
+  `stdlib/crypto/merkle/path_secret[H]`,
+  `stdlib/crypto/indexed_merkle/nonmember_secret[H]`, and
+  `stdlib/crypto/ring_sig/v1[H]`; each inlines the existing C vt builders
+  selected by node-hash type, with the region name serving as the
+  witness-backend dispatch key. See docs/specs/SHIPSHAPE_SPEC.md §7.7 and
+  docs/DESIGN.md.
+- Tier 2a witness dispatch: opt-in native witness backends for the crypto-v1
+  AES / CMAC / Grostl entries and the three crypto-v2 constructions
+  (`voleith_shipshape_witgen_register_*`), filling a region's internal
+  inverses in one `circuits/*_build_witness` call instead of the per-wire
+  scan. Prover-side, fail-closed, byte-identical to the generic evaluator.
+- `.ship` crypto-v2 examples over `hirose_fixed_32`:
+  `example_shipshape_anon_membership` (secret-dir Merkle membership),
+  `example_shipshape_kvac` (membership + indexed-Merkle revocation lifecycle),
+  and `example_shipshape_ring_sig` (`ring_sig/v1` with Fiat-Shamir message
+  binding).
+
+### Changed
+
+- `.gitlab-ci.yml`: new `registry-diff` job rebuilds the freeze tool,
+  regenerates the table, and fails on any divergence from the checked-in
+  copy; `fuzz-short` (MR pipelines) and a scheduled `fuzz-long` run the
+  parser fuzz harnesses.
+- `CMakeLists.txt`: parser, registry, and witness-generator sources compiled
+  into `voleith_core`; the freeze tool and fuzz harnesses build as opt-in
+  targets.
+- `docs/DESIGN.md`: reviews the published quantum collision attacks on
+  Hirose-AES-256 (Baek/Cho/Kim 2022 full-round free-start; round-reduced ToSC
+  2021/2024) and why `cr_bits = 128` holds as a classical bound. See
+  "Hirose-AES-256 double-block-length hash".
+
 ## [1.5.0] 2026-06-11
 
 Adds a Bristol Fashion circuit parser: load boolean circuits in the

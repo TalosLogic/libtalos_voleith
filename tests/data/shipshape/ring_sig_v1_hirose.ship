@@ -1,0 +1,50 @@
+# RSv1 ring SIGNATURE statement (anonymous "I am one of N enrolled members").
+#
+# Statement proved: "I am one of N enrolled members in the ring whose public
+# root is R (a depth-d secret-direction Merkle tree under hirose_fixed_32), and
+# I am binding the message m to this signature via Fiat-Shamir."  The signer's
+# index is hidden (the per-level directions are secret), so the proof reveals
+# nothing about which member produced it.  This is what makes the construction a
+# ring signature rather than a named one: any of the N members could have made
+# it, and the verifier cannot tell which.
+#
+# Message binding is a PROOF-LAYER concern, not a circuit concern.  The message m
+# is NOT a wire here.  Instead the proof's Fiat-Shamir seed is derived from m
+# (fs_seed = first 16 bytes of sha3_256(m)), so a proof produced for message m
+# does not verify under a seed derived from any other message m'.  That binding
+# is what makes this a signature (non-malleable over m) and not a bare
+# membership proof.  See example_shipshape_ring_sig.c and the C-API equivalent
+# example_ring_sig_v1_gf8.c.
+#
+# Privacy model: the secret key sk, the per-level directions dirs, and the
+# sibling authentication path sib are ALL witness (private).  Only the ring root
+# is public (INSTANCE).  The root is asserted internally by the construction
+# (assertion-only entry, like the revocation non-membership construction), so
+# there is NO ASSERT_EQUAL block here.
+#
+# Hash choice: ring_sig/v1[hirose_fixed_32] uses 32-byte nodes giving 128-bit
+# collision resistance.  The secret key sk IS the signer's leaf record: skb is
+# FROZEN at 32 (fixed_leaf_bytes = 32), and node_bytes = 32.  The construction
+# hashes sk into the signer's leaf node internally.
+#
+# Tree shape: depth 5 (32-member ring).  ext (declaration order) =
+#   sk(32) | dirs(5) | siblings(5 * 32 = 160) = 197 bytes.
+# The root (32 bytes) is the INSTANCE and is NOT part of ext.  dirs[k] in {0,1}
+# is bit k of the secret signer index, LSB first; the secret-dir mux enforces
+# booleanity in-circuit.
+#
+# Scaling: the node width is fixed at 32 bytes by hirose_fixed_32, so to model a
+# ring of depth D you change only two widths here: %sib becomes byte[D * 32] and
+# %dirs becomes byte[D].  %sk and %root are depth-independent (both are one
+# 32-byte record).  Proving cost grows linearly in D (one hirose inode hash per
+# level).
+.shipshape 1
+field GF(2^8) irreducible 0x11B
+stdlib crypto-v2
+
+WITNESS  -> %sk   : byte[32]
+WITNESS  -> %dirs : byte[5]
+WITNESS  -> %sib  : byte[160]
+INSTANCE -> %root : byte[32]
+
+stdlib/crypto/ring_sig/v1[hirose_fixed_32](%sk, %dirs, %sib, %root)

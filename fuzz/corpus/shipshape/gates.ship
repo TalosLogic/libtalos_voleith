@@ -1,0 +1,10 @@
+.shipshape 1
+field GF(2^8) irreducible 0x11B
+stdlib crypto-v1
+WITNESS -> %a : byte
+WITNESS -> %b : byte
+ADD %a %b -> %s
+MUL %a %b -> %p
+SUM %a %b %s -> %t
+ADD_CONST %a 0x1b -> %u
+ASSERT_EQUAL %s %t

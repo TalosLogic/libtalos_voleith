@@ -143,6 +143,19 @@ voleith_gf8_circuit_t *voleith_gf8_circuit_new(void);
  */
 void voleith_gf8_circuit_free(voleith_gf8_circuit_t *c);
 
+/*
+ * Set incremental resource ceilings on a circuit: at most `max_wires` total
+ * wires and `max_gates` gate (non-input) wires.  A value of 0 means unlimited,
+ * which is the default for a newly created circuit, so circuits built without
+ * calling this behave exactly as before (identical wire/constraint tables and
+ * fingerprint).  When a ceiling is set, the builder's add_* calls fail
+ * (returning GF8_WIRE_ID_INVALID and clearing voleith_gf8_circuit_ok()) the
+ * moment an append would cross it, bounding a bulk emitter's allocation rather
+ * than detecting the overflow only after the fact.
+ */
+void voleith_gf8_circuit_set_limits(voleith_gf8_circuit_t *c, size_t max_wires,
+                                    size_t max_gates);
+
 /* ================================================================
  * Builder API - add wires and gates
  *
@@ -256,6 +269,10 @@ size_t voleith_gf8_circuit_witness_count(const voleith_gf8_circuit_t *c);
 
 /* Number of instance (public input) wires */
 size_t voleith_gf8_circuit_instance_count(const voleith_gf8_circuit_t *c);
+
+/* Number of gate (produced, non-input) wires: wire_count minus the WITNESS,
+ * INSTANCE, and CONST input wires. */
+size_t voleith_gf8_circuit_gate_count(const voleith_gf8_circuit_t *c);
 
 /* Number of MUL gates (add_mul calls; determines VOLE slot count) */
 size_t voleith_gf8_circuit_mul_count(const voleith_gf8_circuit_t *c);

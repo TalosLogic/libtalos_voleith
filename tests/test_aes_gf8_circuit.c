@@ -21,16 +21,40 @@
  *       wrapper in witness/assert counts and ciphertext
  *  12:  AES-256 split witness builders produce byte-identical inv_in
  *       and ciphertext to aes256_gf8_build_witness
+ *  13:  AES-128 split (expand_key + encrypt_rk) matches monolithic
+ *       wrapper in witness/assert counts and ciphertext
+ *  14:  AES-128 split witness builders produce byte-identical inv_in
+ *       and ciphertext to aes128_gf8_build_witness
+ *  15:  AES-128 composed split equals monolithic wrapper byte-for-byte
+ *       (circuit fingerprints agree)
+ *  16:  AES-128 expand_key round keys match FIPS 197 Appendix A.1
+ *  17:  AES-128 encrypt_rk ciphertext from precomputed round keys
+ *       matches FIPS 197 Appendix C.1
+ *  18:  AES-128 monolithic circuit fingerprint regression pin (golden)
  */
 
 #include "../circuits/aes_gf8_circuit.h"
 #include "../proof/gf8_circuit.h"
+#include "../proof/gf8_circuit_fingerprint.h"
 #include "../core/field.h"
 #include "../core/aes.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
+
+/*
+ * Golden 16-byte fingerprint of aes128_gf8_circuit (test 18 regression
+ * pin).  Capture once from a build of this commit: run the test, copy
+ * the 16 bytes it prints under "AES-128 circuit fingerprint:", and
+ * replace the comma-separated list below.  Until pinned, test 18 fails
+ * by design (the all-zero placeholder will not match).
+ */
+#ifndef AES128_GF8_FP_GOLDEN_BYTES
+#define AES128_GF8_FP_GOLDEN_BYTES                                             \
+    0x0c, 0x81, 0x5c, 0x89, 0x7e, 0x6f, 0x88, 0xe5, 0xe0, 0xed, 0xa5, 0x56,    \
+        0xb8, 0xb2, 0x21, 0xad
+#endif
 
 static int test_count = 0;
 static int pass_count = 0;
@@ -556,6 +580,287 @@ test_aes256_split_witness_equivalence(void)
 }
 
 /* ================================================================
+ * Test 13: AES-128 split functions (expand_key + encrypt_rk) emit the
+ * same circuit and same ciphertext as the monolithic wrapper.
+ * ================================================================ */
+static void
+test_aes128_split_circuit_equivalence(void)
+{
+    static const uint8_t KEY[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+                                    0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+                                    0x0c, 0x0d, 0x0e, 0x0f};
+    static const uint8_t PT[16] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+                                   0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb,
+                                   0xcc, 0xdd, 0xee, 0xff};
+    static const uint8_t EXPECTED[16] = {0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b,
+                                         0x04, 0x30, 0xd8, 0xcd, 0xb7, 0x80,
+                                         0x70, 0xb4, 0xc5, 0x5a};
+
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    gf8_wire_id key[16], pt[16], ct[16];
+    gf8_wire_id rk[11][16];
+    for (int i = 0; i < 16; i++)
+        key[i] = voleith_gf8_add_witness(c);
+    for (int i = 0; i < 16; i++)
+        pt[i] = voleith_gf8_add_instance(c);
+    aes128_gf8_expand_key(c, key, rk);
+    aes128_gf8_encrypt_rk(c, rk, pt, ct);
+
+    check("AES-128 split: witness_count = 216",
+          voleith_gf8_circuit_witness_count(c) == 216);
+    check("AES-128 split: assert_product_count = 400",
+          voleith_gf8_circuit_assert_product_count(c) == 400);
+    check("AES-128 split: mul_count = 0",
+          voleith_gf8_circuit_mul_count(c) == 0);
+
+    uint8_t witness[216];
+    aes128_gf8_build_witness(KEY, PT, witness, NULL);
+    size_t n = voleith_gf8_circuit_wire_count(c);
+    uint8_t *vals = calloc(n, 1);
+    voleith_gf8_circuit_eval(c, witness, PT, vals);
+    uint8_t got[16];
+    for (int i = 0; i < 16; i++)
+        got[i] = vals[ct[i]];
+    check("AES-128 split: ciphertext matches FIPS 197 C.1",
+          memcmp(got, EXPECTED, 16) == 0);
+
+    free(vals);
+    voleith_gf8_circuit_free(c);
+}
+
+/* ================================================================
+ * Test 14: AES-128 split witness builders produce byte-identical
+ * inv_in and ciphertext to aes128_gf8_build_witness.
+ * ================================================================ */
+static void
+test_aes128_split_witness_equivalence(void)
+{
+    static const uint8_t KEY[16] = {0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe,
+                                    0xba, 0xbe, 0x01, 0x23, 0x45, 0x67,
+                                    0x89, 0xab, 0xcd, 0xef};
+    static const uint8_t PT[16] = {0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x2c,
+                                   0x20, 0x57, 0x6f, 0x72, 0x6c, 0x64,
+                                   0x21, 0x00, 0x00, 0x00};
+
+    uint8_t w_mono[216], ct_mono[16];
+    aes128_gf8_build_witness(KEY, PT, w_mono, ct_mono);
+
+    uint8_t inv_ks[AES128_GF8_KS_INVIN_BYTES];
+    uint8_t inv_enc[AES128_GF8_ENC_INVIN_BYTES];
+    uint8_t rk[11][16], ct_split[16];
+    aes128_gf8_expand_key_witness(KEY, inv_ks, rk);
+    aes128_gf8_encrypt_rk_witness(rk, PT, inv_enc, ct_split);
+
+    check("AES-128 split witness: KS inv_in matches monolithic",
+          memcmp(inv_ks, w_mono + 16, AES128_GF8_KS_INVIN_BYTES) == 0);
+    check("AES-128 split witness: data-path inv_in matches monolithic",
+          memcmp(inv_enc, w_mono + 16 + AES128_GF8_KS_INVIN_BYTES,
+                 AES128_GF8_ENC_INVIN_BYTES) == 0);
+    check("AES-128 split witness: ciphertext matches monolithic",
+          memcmp(ct_split, ct_mono, 16) == 0);
+}
+
+/* ================================================================
+ * Test 15: the monolithic aes128_gf8_circuit wrapper emits a circuit
+ * byte-for-byte identical to the manual expand_key + encrypt_rk
+ * composition.  Circuit fingerprints agree iff the canonical wire and
+ * constraint tables agree byte-for-byte (collision probability 2^-128).
+ * ================================================================ */
+static void
+test_aes128_composed_equals_monolithic(void)
+{
+    /* Manual composition. */
+    voleith_gf8_circuit_t *c_split = voleith_gf8_circuit_new();
+    gf8_wire_id key_s[16], pt_s[16], ct_s[16], rk_s[11][16];
+    for (int i = 0; i < 16; i++)
+        key_s[i] = voleith_gf8_add_witness(c_split);
+    for (int i = 0; i < 16; i++)
+        pt_s[i] = voleith_gf8_add_instance(c_split);
+    aes128_gf8_expand_key(c_split, key_s, rk_s);
+    aes128_gf8_encrypt_rk(c_split, rk_s, pt_s, ct_s);
+
+    /* Monolithic wrapper. */
+    voleith_gf8_circuit_t *c_mono;
+    gf8_wire_id key_m[16], pt_m[16], ct_m[16];
+    build_aes128_circuit(&c_mono, key_m, pt_m, ct_m);
+
+    uint8_t fp_split[VOLEITH_GF8_CIRCUIT_FINGERPRINT_BYTES];
+    uint8_t fp_mono[VOLEITH_GF8_CIRCUIT_FINGERPRINT_BYTES];
+    int r1 = voleith_gf8_circuit_fingerprint(c_split, fp_split);
+    int r2 = voleith_gf8_circuit_fingerprint(c_mono, fp_mono);
+
+    check("AES-128 composed/monolithic: fingerprints computed",
+          r1 == 0 && r2 == 0);
+    check("AES-128 composed split equals monolithic byte-for-byte",
+          memcmp(fp_split, fp_mono, VOLEITH_GF8_CIRCUIT_FINGERPRINT_BYTES) ==
+              0);
+
+    voleith_gf8_circuit_free(c_split);
+    voleith_gf8_circuit_free(c_mono);
+}
+
+/* ================================================================
+ * Test 16: AES-128 expand_key round keys match FIPS 197 Appendix A.1.
+ * Key:    2b 7e 15 16 28 ae d2 a6 ab f7 15 88 09 cf 4f 3c
+ * w[0..3] (round key 0) = the key itself.
+ * w[40..43] (round key 10) = d0 14 f9 a8 c9 ee 25 89 e1 3f 0c c8 b6 63 0c a6
+ * ================================================================ */
+static void
+test_aes128_expand_key_fips197(void)
+{
+    static const uint8_t KEY[16] = {0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae,
+                                    0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88,
+                                    0x09, 0xcf, 0x4f, 0x3c};
+    static const uint8_t RK10[16] = {0xd0, 0x14, 0xf9, 0xa8, 0xc9, 0xee,
+                                     0x25, 0x89, 0xe1, 0x3f, 0x0c, 0xc8,
+                                     0xb6, 0x63, 0x0c, 0xa6};
+
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    gf8_wire_id key[16], rk[11][16];
+    for (int i = 0; i < 16; i++)
+        key[i] = voleith_gf8_add_witness(c);
+    aes128_gf8_expand_key(c, key, rk);
+
+    /* Key-schedule-only circuit: 16 key + 40 inv_in witnesses, no data path. */
+    check("AES-128 expand_key: witness_count = 56",
+          voleith_gf8_circuit_witness_count(c) == 56);
+    check("AES-128 expand_key: assert_product_count = 80",
+          voleith_gf8_circuit_assert_product_count(c) == 80);
+
+    /* Witness = key bytes followed by the 40 key-schedule inv_in bytes. */
+    uint8_t witness[56];
+    uint8_t rk_bytes[11][16];
+    memcpy(witness, KEY, 16);
+    aes128_gf8_expand_key_witness(KEY, witness + 16, rk_bytes);
+
+    size_t n = voleith_gf8_circuit_wire_count(c);
+    uint8_t *vals = calloc(n, 1);
+    int ok = voleith_gf8_circuit_eval(c, witness, NULL, vals);
+    check("AES-128 expand_key: constraints satisfied", ok == 1);
+
+    uint8_t got0[16], got10[16];
+    for (int i = 0; i < 16; i++) {
+        got0[i] = vals[rk[0][i]];
+        got10[i] = vals[rk[10][i]];
+    }
+    check("AES-128 expand_key: round key 0 equals the key",
+          memcmp(got0, KEY, 16) == 0);
+    check("AES-128 expand_key: round key 10 matches FIPS 197 A.1",
+          memcmp(got10, RK10, 16) == 0);
+
+    /* The byte-level witness builder's round-key table agrees too. */
+    check("AES-128 expand_key_witness: round key 10 matches FIPS 197 A.1",
+          memcmp(rk_bytes[10], RK10, 16) == 0);
+
+    free(vals);
+    voleith_gf8_circuit_free(c);
+}
+
+/* ================================================================
+ * Test 17: AES-128 encrypt_rk produces the FIPS 197 Appendix C.1
+ * ciphertext when fed the precomputed round keys for the C.1 key.
+ * ================================================================ */
+static void
+test_aes128_encrypt_rk_fips197(void)
+{
+    static const uint8_t KEY[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+                                    0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+                                    0x0c, 0x0d, 0x0e, 0x0f};
+    static const uint8_t PT[16] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+                                   0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb,
+                                   0xcc, 0xdd, 0xee, 0xff};
+    static const uint8_t EXPECTED[16] = {0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b,
+                                         0x04, 0x30, 0xd8, 0xcd, 0xb7, 0x80,
+                                         0x70, 0xb4, 0xc5, 0x5a};
+
+    /* Round keys as plain instance wires (the schedule is not re-derived). */
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    gf8_wire_id rk[11][16], pt[16], ct[16];
+    for (int r = 0; r < 11; r++)
+        for (int b = 0; b < 16; b++)
+            rk[r][b] = voleith_gf8_add_instance(c);
+    for (int i = 0; i < 16; i++)
+        pt[i] = voleith_gf8_add_instance(c);
+    aes128_gf8_encrypt_rk(c, rk, pt, ct);
+
+    /* Data-path-only circuit: 160 inv_in witnesses, no key bytes. */
+    check("AES-128 encrypt_rk: witness_count = 160",
+          voleith_gf8_circuit_witness_count(c) == 160);
+    check("AES-128 encrypt_rk: assert_product_count = 320",
+          voleith_gf8_circuit_assert_product_count(c) == 320);
+
+    /* Build the round-key table and the data-path inv_in witnesses. */
+    uint8_t rk_bytes[11][16];
+    uint8_t inv_ks[AES128_GF8_KS_INVIN_BYTES];
+    uint8_t inv_enc[AES128_GF8_ENC_INVIN_BYTES];
+    aes128_gf8_expand_key_witness(KEY, inv_ks, rk_bytes);
+    aes128_gf8_encrypt_rk_witness(rk_bytes, PT, inv_enc, NULL);
+
+    /* Instance layout: rk[0..10] (176 bytes) then pt (16 bytes). */
+    uint8_t instance[176 + 16];
+    for (int r = 0; r < 11; r++)
+        memcpy(instance + 16 * r, rk_bytes[r], 16);
+    memcpy(instance + 176, PT, 16);
+
+    size_t n = voleith_gf8_circuit_wire_count(c);
+    uint8_t *vals = calloc(n, 1);
+    int ok = voleith_gf8_circuit_eval(c, inv_enc, instance, vals);
+    check("AES-128 encrypt_rk: constraints satisfied", ok == 1);
+
+    uint8_t got[16];
+    for (int i = 0; i < 16; i++)
+        got[i] = vals[ct[i]];
+    check("AES-128 encrypt_rk: ciphertext matches FIPS 197 C.1",
+          memcmp(got, EXPECTED, 16) == 0);
+
+    free(vals);
+    voleith_gf8_circuit_free(c);
+}
+
+/* ================================================================
+ * Test 18: regression pin for the AES-128 monolithic circuit
+ * fingerprint.  The split refactor is gate-for-gate identical to the
+ * pre-split builder, so this 16-byte golden must stay constant across
+ * the refactor and any future change to the AES-128 lowering.
+ *
+ * GOLDEN is captured once from a build of this commit (see the printf
+ * below) and pinned here.  A failure means the AES-128 circuit shape
+ * changed: if intentional, re-pin; if not, it is a regression.
+ * ================================================================ */
+static const uint8_t
+    AES128_GF8_FP_GOLDEN[VOLEITH_GF8_CIRCUIT_FINGERPRINT_BYTES] = {
+        AES128_GF8_FP_GOLDEN_BYTES};
+
+static void
+test_aes128_fingerprint_pin(void)
+{
+    voleith_gf8_circuit_t *c;
+    gf8_wire_id key[16], pt[16], ct[16];
+    build_aes128_circuit(&c, key, pt, ct);
+
+    uint8_t fp[VOLEITH_GF8_CIRCUIT_FINGERPRINT_BYTES];
+    int r = voleith_gf8_circuit_fingerprint(c, fp);
+    check("AES-128 fingerprint: computed", r == 0);
+
+    printf("  AES-128 circuit fingerprint:");
+    for (int i = 0; i < VOLEITH_GF8_CIRCUIT_FINGERPRINT_BYTES; i++)
+        printf(" %02x", fp[i]);
+    printf("\n");
+
+    uint8_t zero[VOLEITH_GF8_CIRCUIT_FINGERPRINT_BYTES] = {0};
+    if (memcmp(AES128_GF8_FP_GOLDEN, zero,
+               VOLEITH_GF8_CIRCUIT_FINGERPRINT_BYTES) == 0)
+        printf("  NOTE: AES128_GF8_FP_GOLDEN_BYTES is unset; pin the bytes "
+               "printed above.\n");
+
+    check("AES-128 circuit fingerprint matches golden pin",
+          memcmp(fp, AES128_GF8_FP_GOLDEN,
+                 VOLEITH_GF8_CIRCUIT_FINGERPRINT_BYTES) == 0);
+
+    voleith_gf8_circuit_free(c);
+}
+
+/* ================================================================
  * main
  * ================================================================ */
 int
@@ -575,6 +880,12 @@ main(void)
     test_aes256_matches_core_aes();
     test_aes256_split_circuit_equivalence();
     test_aes256_split_witness_equivalence();
+    test_aes128_split_circuit_equivalence();
+    test_aes128_split_witness_equivalence();
+    test_aes128_composed_equals_monolithic();
+    test_aes128_expand_key_fips197();
+    test_aes128_encrypt_rk_fips197();
+    test_aes128_fingerprint_pin();
 
     printf("  %d / %d passed\n", pass_count, test_count);
     return (pass_count == test_count) ? 0 : 1;

@@ -1,0 +1,8 @@
+.shipshape 1
+field GF(2^8) irreducible 0x11B
+stdlib crypto-v1
+WITNESS -> %key : byte[16]
+WITNESS -> %pt : byte[16]
+stdlib/crypto/aes/encrypt_128(%key, %pt) -> %ct
+INSTANCE -> %tag : byte
+ASSERT_EQUAL %ct[0] %tag

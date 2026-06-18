@@ -1,0 +1,27 @@
+# AES-128 key-knowledge proof: prove you know a key K such that
+# AES_K(pt) = ct, with pt and ct public.  Demonstrates a Tier 2a registry
+# call and indexed equality against a public instance vector.
+.shipshape 1
+field GF(2^8) irreducible 0x11B
+stdlib crypto-v1
+
+WITNESS -> %key : byte[16]
+INSTANCE -> %pt : byte[16]
+INSTANCE -> %ct : byte[16]
+stdlib/crypto/aes/encrypt_128(%key, %pt) -> %out
+ASSERT_EQUAL %out[0] %ct[0]
+ASSERT_EQUAL %out[1] %ct[1]
+ASSERT_EQUAL %out[2] %ct[2]
+ASSERT_EQUAL %out[3] %ct[3]
+ASSERT_EQUAL %out[4] %ct[4]
+ASSERT_EQUAL %out[5] %ct[5]
+ASSERT_EQUAL %out[6] %ct[6]
+ASSERT_EQUAL %out[7] %ct[7]
+ASSERT_EQUAL %out[8] %ct[8]
+ASSERT_EQUAL %out[9] %ct[9]
+ASSERT_EQUAL %out[10] %ct[10]
+ASSERT_EQUAL %out[11] %ct[11]
+ASSERT_EQUAL %out[12] %ct[12]
+ASSERT_EQUAL %out[13] %ct[13]
+ASSERT_EQUAL %out[14] %ct[14]
+ASSERT_EQUAL %out[15] %ct[15]

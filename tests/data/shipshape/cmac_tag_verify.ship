@@ -1,0 +1,27 @@
+# AES-CMAC key knowledge over a 32-byte public message: prove you know
+# the CMAC key K such that CMAC_K(msg) = tag.  Demonstrates a PARAMETRIC
+# registry call (n inferred from the message vector length).
+.shipshape 1
+field GF(2^8) irreducible 0x11B
+stdlib crypto-v1
+
+WITNESS -> %key : byte[16]
+INSTANCE -> %msg : byte[32]
+INSTANCE -> %tag : byte[16]
+stdlib/crypto/cmac/aes_128(%key, %msg) -> %t
+ASSERT_EQUAL %t[0] %tag[0]
+ASSERT_EQUAL %t[1] %tag[1]
+ASSERT_EQUAL %t[2] %tag[2]
+ASSERT_EQUAL %t[3] %tag[3]
+ASSERT_EQUAL %t[4] %tag[4]
+ASSERT_EQUAL %t[5] %tag[5]
+ASSERT_EQUAL %t[6] %tag[6]
+ASSERT_EQUAL %t[7] %tag[7]
+ASSERT_EQUAL %t[8] %tag[8]
+ASSERT_EQUAL %t[9] %tag[9]
+ASSERT_EQUAL %t[10] %tag[10]
+ASSERT_EQUAL %t[11] %tag[11]
+ASSERT_EQUAL %t[12] %tag[12]
+ASSERT_EQUAL %t[13] %tag[13]
+ASSERT_EQUAL %t[14] %tag[14]
+ASSERT_EQUAL %t[15] %tag[15]

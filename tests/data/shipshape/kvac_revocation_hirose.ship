@@ -1,0 +1,49 @@
+# Revocation (NON-MEMBERSHIP) statement of a KVAC credential lifecycle.
+#
+# Claim proved: "My secret 12-byte revocation value is NOT present in the
+# public revocation tree (root %root), so my credential has not been revoked."
+# The prover demonstrates non-membership via an adjacent record whose half-open
+# interval [low, hi) strictly straddles the target: low < target < hi.  The
+# record sits at a secret position in the indexed Merkle tree, authenticated by
+# the sibling path %sib and the secret per-level directions %dirs.
+#
+# Lifecycle: while the value is absent, some adjacent record straddles it and a
+# non-revocation proof exists.  Once the value is inserted (revoked), the IMT is
+# split exactly at the target, so the target becomes a record value and NO
+# adjacent interval strictly straddles it anymore: the non-revocation proof
+# becomes impossible.  A stale pre-revocation witness no longer matches the new
+# root and is rejected.  See example_shipshape_kvac for the full arc and
+# example_shipshape_anon_membership for the membership building block.
+#
+# Indexed leaf layout (hirose_fixed_32): each IMT leaf record is
+#   value(12) || next_value(12) || next_index(8) = 32 bytes,
+# exactly the fixed 32-byte single-block hirose leaf.  That FREEZES the field
+# widths: value/next_value are 12 bytes and next_index is 8 bytes here, NOT 32.
+# Comparisons are little-endian (byte 0 = LSB) per the assert_lt convention, so
+# the target must be strictly between the empty set bounds (not all 0x00, not
+# all 0xFF).
+#
+# Privacy model: target, low, hi, nidx, the sibling path, and the per-level
+# directions are ALL witness (private).  Only the revocation root is public
+# (INSTANCE).  The construction takes the root as an INSTANCE input and asserts
+# the path internally (like ring_sig/v1): there is no ASSERT_EQUAL block.
+#
+# Tree shape: depth 8 (256-record IMT).  Node width is fixed at 32 bytes by
+# hirose_fixed_32, so depth scales by changing only %sib (byte[D * 32]) and
+# %dirs (byte[D]); the value/index widths and %root stay fixed.  ext
+# (declaration order) =
+#   target(12) | low(12) | hi(12) | nidx(8) | sib(8 * 32 = 256) | dirs(8)
+#   = 308 bytes;  instance = root(32).
+.shipshape 1
+field GF(2^8) irreducible 0x11B
+stdlib crypto-v2
+
+WITNESS  -> %target : byte[12]
+WITNESS  -> %low    : byte[12]
+WITNESS  -> %hi     : byte[12]
+WITNESS  -> %nidx   : byte[8]
+WITNESS  -> %sib    : byte[256]
+WITNESS  -> %dirs   : byte[8]
+INSTANCE -> %root   : byte[32]
+
+stdlib/crypto/indexed_merkle/nonmember_secret[hirose_fixed_32](%target, %low, %hi, %nidx, %sib, %dirs, %root)

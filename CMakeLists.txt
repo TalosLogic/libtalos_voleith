@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 cmake_minimum_required(VERSION 3.16)
-project(libvoleith VERSION 1.5.0 LANGUAGES C)
+project(libvoleith VERSION 1.6.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -18,6 +18,8 @@ option(VOLEITH_BUILD_EXAMPLES "Build example programs" ON)
 option(VOLEITH_BUILD_SHARED "Build shared library (libvoleith.so/.dylib) in addition to static" OFF)
 option(VOLEITH_BUILD_DUDECT "Build dudect timing-validation harness (tools/dudect)" OFF)
 option(VOLEITH_BUILD_BENCH "Build FS-hash microbenchmarks (tools/bench_fs_hash)" OFF)
+option(VOLEITH_BUILD_REGISTRY_FREEZE "Build the crypto-v1 registry freeze tool (tools/shipshape_registry_freeze)" OFF)
+option(VOLEITH_FUZZ "Build libFuzzer parser harnesses (clang only; fuzz/)" OFF)
 option(VOLEITH_LEGACY_VERIFY "Accept pre-header proofs in voleith_verify (legacy fallback)" ON)
 
 # Propagate VOLEITH_LEGACY_VERIFY as a compile definition for every
@@ -29,6 +31,23 @@ if(VOLEITH_LEGACY_VERIFY)
     message(STATUS "voleith: legacy (pre-header) proof verification = ENABLED")
 else()
     message(STATUS "voleith: legacy (pre-header) proof verification = DISABLED")
+endif()
+
+# When fuzzing is enabled, instrument the whole library (the parsers under
+# test included) for coverage-guided fuzzing plus AddressSanitizer and
+# UndefinedBehaviorSanitizer.  The fuzz/ executables additionally link the
+# libFuzzer runtime (-fsanitize=fuzzer).  These directory-scoped options must
+# be set before any target is defined so voleith_core picks them up.  Clang
+# only.  See fuzz/README.md and docs/SHIPSHAPE_IMPLEMENTATION_PLAN.md W4.
+if(VOLEITH_FUZZ)
+    if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR
+            "VOLEITH_FUZZ requires Clang (libFuzzer). Re-run with CC=clang.")
+    endif()
+    add_compile_options(-fsanitize=fuzzer-no-link,address,undefined
+        -fno-omit-frame-pointer -g -O1)
+    add_link_options(-fsanitize=address,undefined)
+    message(STATUS "voleith: libFuzzer parser harnesses = ENABLED (fuzz/)")
 endif()
 
 # Report which AES backend will be active.  Done after the AES-NI
@@ -227,6 +246,15 @@ set(VOLEITH_CORE_SOURCES
 
 set(VOLEITH_PARSERS_SOURCES
     parsers/bristol.c
+    parsers/shipshape.c
+    parsers/shipshape_node_hash_types.c
+    parsers/shipshape_registry_build.c
+    parsers/shipshape_registry_table.c
+    parsers/shipshape_witness.c
+    parsers/shipshape_witgen_dispatch.c
+    parsers/shipshape_witgen_aes.c
+    parsers/shipshape_witgen_cmac_grostl.c
+    parsers/shipshape_witgen_construction.c
 )
 list(APPEND VOLEITH_CORE_SOURCES ${VOLEITH_PARSERS_SOURCES})
 
@@ -328,4 +356,12 @@ endif()
 
 if(VOLEITH_BUILD_BENCH)
     add_subdirectory(tools/bench_fs_hash)
+endif()
+
+if(VOLEITH_BUILD_REGISTRY_FREEZE)
+    add_subdirectory(tools/shipshape_registry_freeze)
+endif()
+
+if(VOLEITH_FUZZ)
+    add_subdirectory(fuzz)
 endif()

@@ -205,6 +205,53 @@ the test corpus.
 
 ---
 
+## Loading native circuits (Shipshape)
+
+For GF(2⁸) element-level circuits the library also reads **Shipshape**
+(`.ship`), a native text format designed for this proof system.  Unlike
+Bristol, a Shipshape file is self-describing: it declares its own `WITNESS` /
+`INSTANCE` / `CONST` wires, offers the full Tier 1 gate set with sugar
+(`SUM`, `FROBENIUS_K`, `MUX`, `INV`, `ASSERT_*`), supports `user/*`
+subcircuit definitions and inlining, and calls a frozen Tier 2a
+`stdlib/crypto/*` registry of cryptographic primitives (AES-128/256, AES-CMAC,
+Grøstl-256/512) that lower to the hand-written C builders byte-for-byte.
+
+`parsers/shipshape.h` exposes `voleith_shipshape_parse_file` /
+`voleith_shipshape_parse_buffer`, which build a `voleith_gf8_circuit_t`.
+`parsers/shipshape_witness.h` then generates the full witness from just the
+external input (the generic Tier 1 evaluator completes gadget-internal
+witnesses such as the `INV` inverses), and the result feeds
+`voleith_gf8_prove_v2` / `voleith_gf8_verify_v2`.  Circuit identity is the
+16-byte `voleith_gf8_circuit_fingerprint`: any two conformant parsers lower a
+file to a byte-identical circuit and the same fingerprint, so a proof binds
+to its `.ship` source through the metadata header with no extra machinery.
+
+A worked corpus lives under `tests/data/shipshape/` (AES and CMAC key
+knowledge, public- and secret-direction Merkle paths), and
+`examples/example_shipshape_parse_prove.c` runs the full parse to witness to
+prove to verify pipeline on one of them.
+
+The additive `stdlib crypto-v2` registry extends crypto-v1 with three
+hash-parametric crypto extensions (secret-direction Merkle path, indexed-Merkle
+non-membership, and ring-signature membership), each selectable by node-hash
+type via a bracket selector (`path_secret[H]`, `nonmember_secret[H]`,
+`ring_sig/v1[H]`).  See [`docs/specs/SHIPSHAPE_SPEC.md` §7.7](docs/specs/SHIPSHAPE_SPEC.md)
+for the format and [`docs/DESIGN.md`](docs/DESIGN.md) for the rationale.
+
+Three runnable `.ship` examples exercise these constructions over the 128-bit
+`hirose_fixed_32` node hash: `example_shipshape_anon_membership` (anonymous
+group membership), `example_shipshape_kvac` (a membership plus indexed-Merkle
+revocation credential lifecycle), and `example_shipshape_ring_sig` (a ring
+signature with Fiat-Shamir message binding).  A registered witness backend can
+fill each construction's witness natively: an opt-in, fail-closed prover-side
+speed-up over the generic evaluator (see [`docs/DESIGN.md`](docs/DESIGN.md)).
+
+See [`docs/specs/SHIPSHAPE_SPEC.md`](docs/specs/SHIPSHAPE_SPEC.md) for the
+format and witness layout (§2.4), and [`docs/DESIGN.md`](docs/DESIGN.md) for
+the design rationale.
+
+---
+
 ## Fiat-Shamir transform
 
 `voleith_prove` / `voleith_verify` and `voleith_gf8_prove` /

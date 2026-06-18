@@ -1,6 +1,13 @@
 # Build directory
 build/
 
+# registry-diff CI job scratch (tools/shipshape_registry_freeze)
+build-registry/
+shipshape_registry_table.gen.c
+
+# Fuzz directory
+build-fuzz/
+
 # CMake generated files (if accidentally created in source dir)
 CMakeCache.txt
 CMakeFiles/
