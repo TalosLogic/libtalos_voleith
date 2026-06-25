@@ -35,6 +35,8 @@
  *   voleith_node_hash_grostl256_t27         27        108         1920  (1 compression)
  *   voleith_node_hash_grostl512             64        256         8960  (2 compressions)
  *   voleith_node_hash_grostl512_t59         59        236         5376  (1 compression)
+ *   voleith_node_hash_grostl256_fixed       32        128         1920  (1 compression)
+ *   voleith_node_hash_grostl512_fixed       64        256         5376  (1 compression)
  *
  * The _T27 and _T59 truncations land each inode in a single Grøstl
  * compression block (block sizes 64 and 128 bytes respectively; need
@@ -43,6 +45,18 @@
  * per-inode S-box count roughly in half at the cost of 20 bits of
  * collision resistance.  Both remaining CR bounds (2^108, 2^236) sit
  * well above any practical adversary.
+ *
+ * DEPRECATED: the four variants above (grostl256, grostl256_t27,
+ * grostl512, grostl512_t59) are superseded by the fixed-input variants
+ * grostl256_fixed / grostl512_fixed, which deliver FULL collision
+ * resistance (2^128 / 2^256) at the same single-compression cost as the
+ * _T27 / _T59 truncations (1920 / 5376 inode S-boxes), by dropping the
+ * Merkle-Damgaard padding and moving leaf/inode domain separation into
+ * the IV instead of a prefix byte.  See node_hash_grostl_gf8.c and
+ * docs/DESIGN.md "Grostl fixed-input node hashes".  The four older vts
+ * are RETAINED as frozen wire-format commitments (existing proofs and
+ * Shipshape selectors keep working) but are not recommended for new
+ * circuits.
  */
 
 #ifndef VOLEITH_NODE_HASH_GROSTL_GF8_H

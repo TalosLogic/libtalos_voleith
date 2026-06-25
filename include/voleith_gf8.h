@@ -77,10 +77,12 @@
  *   voleith_node_hash_aes_dm        - AES-128 Davies-Meyer    (16B, 2⁶⁴  CR)
  *   voleith_node_hash_aes_cmac128   - AES-128-CMAC            (16B, 2⁶⁴  CR)
  *   voleith_node_hash_aes_cmac256   - AES-256-CMAC            (16B, 2⁶⁴  CR)
- *   voleith_node_hash_grostl256     - Grøstl-256              (32B, 2¹²⁸ CR)
- *   voleith_node_hash_grostl256_t27 - Grøstl-256 truncated 27 (27B, 2¹⁰⁸ CR)
- *   voleith_node_hash_grostl512     - Grøstl-512              (64B, 2²⁵⁶ CR)
- *   voleith_node_hash_grostl512_t59 - Grøstl-512 truncated 59 (59B, 2²³⁶ CR)
+ *   voleith_node_hash_grostl256     - Grøstl-256              (32B, 2¹²⁸ CR) [deprecated]
+ *   voleith_node_hash_grostl256_t27 - Grøstl-256 truncated 27 (27B, 2¹⁰⁸ CR) [deprecated]
+ *   voleith_node_hash_grostl512     - Grøstl-512              (64B, 2²⁵⁶ CR) [deprecated]
+ *   voleith_node_hash_grostl512_t59 - Grøstl-512 truncated 59 (59B, 2²³⁶ CR) [deprecated]
+ *   voleith_node_hash_grostl256_fixed - Grøstl-256 fixed-input (32B, 2¹²⁸ CR)
+ *   voleith_node_hash_grostl512_fixed - Grøstl-512 fixed-input (64B, 2²⁵⁶ CR)
  *   voleith_node_hash_hirose        - Hirose-AES-256 variable (32B, 2¹²⁸ CR)
  *   voleith_node_hash_hirose_fixed32- Hirose-AES-256 fixed-32 (32B, 2¹²⁸ CR)
  *
@@ -164,9 +166,9 @@
 /* Library version */
 #ifndef VOLEITH_VERSION_MAJOR
 #define VOLEITH_VERSION_MAJOR 1
-#define VOLEITH_VERSION_MINOR 6
+#define VOLEITH_VERSION_MINOR 7
 #define VOLEITH_VERSION_PATCH 0
-#define VOLEITH_VERSION_STRING "1.6.0"
+#define VOLEITH_VERSION_STRING "1.7.0"
 #endif
 
 /* GF(2⁸) proof system: circuit builder and prove/verify API */
@@ -180,6 +182,7 @@
 #include "kdf_ctr_cmac_gf8_circuit.h"
 #include "merkle_gf8_circuit.h"
 #include "indexed_merkle_gf8_circuit.h"
+#include "range_gf8_circuit.h"
 #include "grostl_gf8_circuit.h"
 #include "merkle_grostl_gf8_circuit.h"
 #include "indexed_merkle_grostl_gf8_circuit.h"

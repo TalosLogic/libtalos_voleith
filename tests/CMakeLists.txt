@@ -105,11 +105,13 @@ voleith_add_test(test_indexed_merkle_circuit test_indexed_merkle_circuit.c)
 voleith_add_test(test_gf8_circuit test_gf8_circuit.c)
 voleith_add_test(test_aes_gf8_circuit test_aes_gf8_circuit.c)
 voleith_add_test(test_grostl_gf8_circuit test_grostl_gf8_circuit.c)
+voleith_add_test(test_grostl_fixed_node_circuit test_grostl_fixed_node_circuit.c)
 voleith_add_test(test_aes_cmac_gf8_circuit test_aes_cmac_gf8_circuit.c)
 voleith_add_test(test_kdf_ctr_cmac_gf8_circuit test_kdf_ctr_cmac_gf8_circuit.c)
 voleith_add_test(test_merkle_gf8_circuit test_merkle_gf8_circuit.c)
 voleith_add_test(test_merkle_grostl_gf8_circuit test_merkle_grostl_gf8_circuit.c)
 voleith_add_test(test_indexed_merkle_gf8_circuit test_indexed_merkle_gf8_circuit.c)
+voleith_add_test(test_range_gf8_circuit test_range_gf8_circuit.c)
 voleith_add_test(test_indexed_merkle_grostl_gf8_circuit test_indexed_merkle_grostl_gf8_circuit.c)
 voleith_add_test(test_merkle_vt_gf8_equivalence test_merkle_vt_gf8_equivalence.c)
 voleith_add_test(test_merkle_vt_gf8_helpers test_merkle_vt_gf8_helpers.c)
@@ -149,7 +151,7 @@ voleith_add_test(test_shipshape_crypto_v2_parse test_shipshape_crypto_v2_parse.c
 # MR4: crypto-v2 equivalence and prove/verify soundness tests.
 voleith_add_test(test_shipshape_crypto_v2_equiv test_shipshape_crypto_v2_equiv.c)
 voleith_add_test(test_shipshape_crypto_v2_proof test_shipshape_crypto_v2_proof.c)
-# MR5: W8 region-name contract -- bracketed FQN asserted across all 8 types.
+# MR5: W8 region-name contract -- bracketed FQN asserted across all 10 types.
 voleith_add_test(test_shipshape_crypto_v2_region_name test_shipshape_crypto_v2_region_name.c)
 # W8.2: Tier 2a dispatch registry + dispatch loop mechanism test.
 voleith_add_test(test_shipshape_witgen_dispatch test_shipshape_witgen_dispatch.c)

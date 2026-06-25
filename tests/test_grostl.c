@@ -328,6 +328,100 @@ test_incremental_512(void)
 }
 
 /* ================================================================
+ * Fixed-input single-compression node hashes.
+ *
+ * No standard KAT exists for this construction; correctness is pinned
+ * by the circuit-vs-oracle test (T2.1).  Here we check the contract:
+ * determinism, NULL rejection, that distinct chaining values (iv)
+ * yield distinct outputs (domain separation is carried by iv), and
+ * that distinct blocks yield distinct outputs.
+ * ================================================================ */
+
+static void
+test_node_256_contract(void)
+{
+    uint8_t iv_a[64], iv_b[64], block[64], block2[64];
+    uint8_t out_a[32], out_a2[32], out_b[32], out_blk2[32];
+
+    TEST("grostl256_compress_node: contract");
+
+    for (int i = 0; i < 64; i++) {
+        iv_a[i] = (uint8_t)i;
+        iv_b[i] = (uint8_t)(i ^ 0x5a); /* distinct chaining value */
+        block[i] = (uint8_t)(0xff - i);
+        block2[i] = block[i];
+    }
+    block2[7] ^= 0x01; /* single-byte difference */
+
+    if (voleith_grostl256_compress_node(iv_a, block, out_a) != 0 ||
+        voleith_grostl256_compress_node(iv_a, block, out_a2) != 0 ||
+        voleith_grostl256_compress_node(iv_b, block, out_b) != 0 ||
+        voleith_grostl256_compress_node(iv_a, block2, out_blk2) != 0) {
+        FAIL("unexpected nonzero return");
+        return;
+    }
+    if (voleith_grostl256_compress_node(NULL, block, out_a) >= 0) {
+        FAIL("NULL iv not rejected");
+        return;
+    }
+    if (memcmp(out_a, out_a2, 32) != 0) {
+        FAIL("not deterministic");
+        return;
+    }
+    if (memcmp(out_a, out_b, 32) == 0) {
+        FAIL("distinct iv gave same output");
+        return;
+    }
+    if (memcmp(out_a, out_blk2, 32) == 0) {
+        FAIL("distinct block gave same output");
+        return;
+    }
+    PASS();
+}
+
+static void
+test_node_512_contract(void)
+{
+    uint8_t iv_a[128], iv_b[128], block[128], block2[128];
+    uint8_t out_a[64], out_a2[64], out_b[64], out_blk2[64];
+
+    TEST("grostl512_compress_node: contract");
+
+    for (int i = 0; i < 128; i++) {
+        iv_a[i] = (uint8_t)i;
+        iv_b[i] = (uint8_t)(i ^ 0x5a);
+        block[i] = (uint8_t)(0xff - i);
+        block2[i] = block[i];
+    }
+    block2[7] ^= 0x01;
+
+    if (voleith_grostl512_compress_node(iv_a, block, out_a) != 0 ||
+        voleith_grostl512_compress_node(iv_a, block, out_a2) != 0 ||
+        voleith_grostl512_compress_node(iv_b, block, out_b) != 0 ||
+        voleith_grostl512_compress_node(iv_a, block2, out_blk2) != 0) {
+        FAIL("unexpected nonzero return");
+        return;
+    }
+    if (voleith_grostl512_compress_node(iv_a, NULL, out_a) >= 0) {
+        FAIL("NULL block not rejected");
+        return;
+    }
+    if (memcmp(out_a, out_a2, 64) != 0) {
+        FAIL("not deterministic");
+        return;
+    }
+    if (memcmp(out_a, out_b, 64) == 0) {
+        FAIL("distinct iv gave same output");
+        return;
+    }
+    if (memcmp(out_a, out_blk2, 64) == 0) {
+        FAIL("distinct block gave same output");
+        return;
+    }
+    PASS();
+}
+
+/* ================================================================
  * Test suite entry point.
  * ================================================================ */
 
@@ -348,6 +442,10 @@ run_dispatched_tests(void)
     printf("\n    Incremental absorb consistency\n");
     test_incremental_256();
     test_incremental_512();
+
+    printf("\n    Fixed-input single-compression node hash\n");
+    test_node_256_contract();
+    test_node_512_contract();
 }
 
 int

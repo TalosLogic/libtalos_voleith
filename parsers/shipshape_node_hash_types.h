@@ -19,7 +19,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "node_hash_vt.h" /* voleith_node_hash_vt + the 8 extern vts */
+#include "node_hash_vt.h" /* voleith_node_hash_vt + the extern node-hash vts */
 
 /* Frozen, append-only node-hash type ids (crypto-v2).  Never renumber. */
 #define VOLEITH_SHIPSHAPE_NHT_AES_DM 0
@@ -30,6 +30,8 @@
 #define VOLEITH_SHIPSHAPE_NHT_GROSTL_512_T59 5
 #define VOLEITH_SHIPSHAPE_NHT_HIROSE 6
 #define VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32 7
+#define VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED 8
+#define VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED 9
 
 typedef struct {
     const char *name; /* surface name, snake_case */

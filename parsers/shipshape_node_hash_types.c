@@ -17,7 +17,7 @@
 #include <string.h>
 
 /*
- * Frozen table.  Entries are in strict type_id order (0..7).
+ * Frozen table.  Entries are in strict type_id order (0..9).
  * The .name field is the surface name used in .ship bracket selectors,
  * e.g. merkle/path_secret[aes_dm].  The .vt pointer references the
  * extern vt declared in node_hash_vt.h.
@@ -37,6 +37,10 @@ const voleith_shipshape_node_hash_type_t voleith_shipshape_node_hash_types[] = {
     {"hirose", VOLEITH_SHIPSHAPE_NHT_HIROSE, &voleith_node_hash_hirose},
     {"hirose_fixed_32", VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32,
      &voleith_node_hash_hirose_fixed32},
+    {"grostl_256_fixed", VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED,
+     &voleith_node_hash_grostl256_fixed},
+    {"grostl_512_fixed", VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED,
+     &voleith_node_hash_grostl512_fixed},
 };
 
 const size_t voleith_shipshape_node_hash_types_count =

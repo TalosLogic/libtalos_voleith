@@ -616,7 +616,7 @@ voleith_shipshape_registry_body_hash(
  * Crypto-v2 hash-parametric descriptors (REG_HASH_PARAM).
  *
  * Three entries: merkle/path_secret, indexed_merkle/nonmember_secret,
- * ring_sig/v1.  Each admits all 8 node-hash type ids and carries a
+ * ring_sig/v1.  Each admits all node-hash type ids (all_type_ids) and carries a
  * multi-dimensional parameter grid whose body hashes are frozen by the
  * regenerated parsers/shipshape_registry_table.c.
  *
@@ -677,13 +677,19 @@ typedef struct {
 #define RS_SKB 0
 #define RS_DEPTH 1
 
-/* ---- all 8 type ids admitted by every hash-parametric entry ---- */
+/* ---- all 10 type ids admitted by every hash-parametric entry ---- */
 
 static const uint16_t all_type_ids[] = {
-    VOLEITH_SHIPSHAPE_NHT_AES_DM,     VOLEITH_SHIPSHAPE_NHT_AES_CMAC_128,
-    VOLEITH_SHIPSHAPE_NHT_GROSTL_256, VOLEITH_SHIPSHAPE_NHT_GROSTL_256_T27,
-    VOLEITH_SHIPSHAPE_NHT_GROSTL_512, VOLEITH_SHIPSHAPE_NHT_GROSTL_512_T59,
-    VOLEITH_SHIPSHAPE_NHT_HIROSE,     VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32,
+    VOLEITH_SHIPSHAPE_NHT_AES_DM,
+    VOLEITH_SHIPSHAPE_NHT_AES_CMAC_128,
+    VOLEITH_SHIPSHAPE_NHT_GROSTL_256,
+    VOLEITH_SHIPSHAPE_NHT_GROSTL_256_T27,
+    VOLEITH_SHIPSHAPE_NHT_GROSTL_512,
+    VOLEITH_SHIPSHAPE_NHT_GROSTL_512_T59,
+    VOLEITH_SHIPSHAPE_NHT_HIROSE,
+    VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32,
+    VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED,
+    VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED,
 };
 
 /* ================================================================
@@ -822,18 +828,21 @@ cost_ring_sig_v1(const voleith_node_hash_vt *vt, const uint32_t *p,
  * Each grid entry is (type_id, params[n_params]).
  * node_bytes per type: aes_dm=16, aes_cmac_128=16, grostl_256=32,
  *   grostl_256_t27=27, grostl_512=64, grostl_512_t59=59,
- *   hirose=32, hirose_fixed_32=32.
+ *   hirose=32, hirose_fixed_32=32, grostl_256_fixed=32, grostl_512_fixed=64.
+ *
+ * Fixed-leaf types (hirose_fixed_32, grostl_256_fixed, grostl_512_fixed)
+ * require the leaf width to equal fixed_leaf_bytes (= node_bytes): 32 for the
+ * two 32-byte ones, 64 for grostl_512_fixed.  For the variable-leaf and
+ * truncated types the representative leaf widths are 0 and node_bytes.
  *
  * merkle/path_secret params: [depth, L].
- *   Representative depths: 2, 8, 20.
- *   Representative L values: 0, 16, 32.
- *   hirose_fixed_32: L must equal fixed_leaf_bytes=32; skip L=0 and L=16.
- *   Total without hirose_fixed_32 restriction: 3 types * 3 depths * 3 L = 27 pts
- *   Plus hirose_fixed_32 with depth 2,8,20 and L=32 only: 3 pts
- *   Representative set: pick a smaller grid to stay within MAX_GRID=64.
- *   Use 3 types * 3 depths * 2 L values + hirose variants = keep it manageable.
- *   Grid below: for all 8 types, depth in {2, 8}, L in {0, 16} except
- *   hirose_fixed_32 uses L=32 only.  8 types * 2 depths * 2 L (minus 4 illegal) = 28.
+ *   Variable/truncated types: depth in {2, 8}, L in {0, node_bytes}.
+ *   Fixed-leaf types: depth in {2, 8}, L = fixed_leaf_bytes only.
+ * indexed_merkle/nonmember_secret params: [tb, ib, depth]; leaf record =
+ *   2*tb + ib must equal fixed_leaf_bytes for the fixed-leaf types
+ *   (2*12+8=32, 2*28+8=64).
+ * ring_sig/v1 params: [skb, depth]; skb = fixed_leaf_bytes for fixed-leaf types.
+ * All grids stay within MAX_GRID=64.
  * ================================================================ */
 
 #define GHASH_GRID(arr) (arr), (sizeof(arr) / sizeof((arr)[0]))
@@ -881,6 +890,12 @@ static const ss_reg_hash_grid_pt_t grid_merkle_path[] = {
     /* hirose_fixed_32 (node=32, fixed_leaf_bytes=32): L must be 32 */
     {VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32, {2, 32}, 2},
     {VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32, {8, 32}, 2},
+    /* grostl_256_fixed (node=32, fixed_leaf_bytes=32): L must be 32 */
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED, {2, 32}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED, {8, 32}, 2},
+    /* grostl_512_fixed (node=64, fixed_leaf_bytes=64): L must be 64 */
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED, {2, 64}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED, {8, 64}, 2},
 };
 
 /*
@@ -913,6 +928,12 @@ static const ss_reg_hash_grid_pt_t grid_indexed_nonmember[] = {
     /* hirose_fixed_32: leaf record 2*12+8=32 = fixed_leaf_bytes */
     {VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32, {12, 8, 2}, 3},
     {VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32, {12, 8, 8}, 3},
+    /* grostl_256_fixed: leaf record 2*12+8=32 = fixed_leaf_bytes */
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED, {12, 8, 2}, 3},
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED, {12, 8, 8}, 3},
+    /* grostl_512_fixed: leaf record 2*28+8=64 = fixed_leaf_bytes */
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED, {28, 8, 2}, 3},
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED, {28, 8, 8}, 3},
 };
 
 /*
@@ -944,6 +965,12 @@ static const ss_reg_hash_grid_pt_t grid_ring_sig[] = {
     /* hirose_fixed_32: skb must equal fixed_leaf_bytes=32 */
     {VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32, {32, 2}, 2},
     {VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32, {32, 8}, 2},
+    /* grostl_256_fixed: skb must equal fixed_leaf_bytes=32 */
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED, {32, 2}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED, {32, 8}, 2},
+    /* grostl_512_fixed: skb must equal fixed_leaf_bytes=64 */
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED, {64, 2}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED, {64, 8}, 2},
 };
 
 /* ================================================================

@@ -5,6 +5,37 @@ All notable changes to libtalos_voleith are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] 2026-06-25
+
+### Added
+
+- `voleith_node_hash_grostl256_fixed` / `_grostl512_fixed`: fixed-input
+  single-compression Grøstl node-hash vts (32B/2^128 CR, 64B/2^256 CR). Full
+  collision resistance at single-compression cost (1,920 / 5,376 inode
+  S-boxes): drops Merkle-Damgård padding, with IV-based leaf/inode domain
+  separation instead of a prefix byte.
+- `core/grostl.{c,h}`: `voleith_grostl{256,512}_compress_node`, the single-block
+  compression-plus-output-transform oracle backing the new vts.
+- `circuits/grostl_gf8_circuit.{c,h}`: `grostl{256,512}_gf8_node_circuit` plus
+  `*_node_invin_bytes` / `*_node_build_witness`, siblings of the full-hash
+  builders (the frozen full-hash entry points are unchanged).
+- Shipshape crypto-v2: registered `grostl_256_fixed` (type id 8) and
+  `grostl_512_fixed` (type id 9) as node-hash types, usable as the bracket
+  selector in all three parametric constructions (`merkle/path_secret`,
+  `indexed_merkle/nonmember_secret`, `ring_sig/v1`). Append-only; ids 0-7
+  unchanged. Regenerates the frozen `parsers/shipshape_registry_table.c`.
+- `circuits/range_gf8_circuit.{c,h}`: `assert_in_range_gf8(value, low, high,
+  n_bytes)`, a bounded-range primitive (`low <= value <= high`, inclusive,
+  little-endian byte vectors) composed of existing Tier 1 gates. Layer 4 C
+  builder, no Shipshape opcode; pre-positions ring-sig V3.
+
+### Deprecated
+
+- Grøstl node-hash vts `grostl256`, `grostl256_t27`, `grostl512`,
+  `grostl512_t59`: superseded by `grostl*_fixed` (same-or-lower cost at full
+  CR). Retained as frozen wire-format commitments, not recommended for new
+  circuits.
+
 ## [1.6.0] 2026-06-18
 
 Adds the Shipshape (`.ship`) native GF(2^8) circuit toolchain: a text format

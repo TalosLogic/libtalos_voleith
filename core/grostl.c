@@ -340,3 +340,57 @@ voleith_grostl512(uint8_t out[64], const uint8_t *msg, size_t msg_len)
     voleith_grostl_finalize(&ctx, out);
     voleith_grostl_clear(&ctx);
 }
+
+/* ================================================================
+ * Public API: fixed-input single-compression node hashes.
+ *
+ * H = Omega(f(iv, block)): one compression under the caller-supplied
+ * chaining value iv, then the output transformation, truncated to the
+ * node width (the low n bytes, matching voleith_grostl_finalize).  No
+ * padding: the input is exactly one fixed-width block.  Dispatch is
+ * initialized here because compress_512 / output_transform_256
+ * dereference voleith_grostl_ops directly (compress_block, which
+ * normally performs the CAS init, is bypassed).
+ * ================================================================ */
+
+int
+voleith_grostl256_compress_node(const uint8_t iv[64], const uint8_t block[64],
+                                uint8_t out[32])
+{
+    uint8_t state[GROSTL_STATE_BYTES_256];
+
+    if (iv == NULL || block == NULL || out == NULL)
+        return -1;
+
+    if (atomic_load_explicit(&voleith_grostl_ops, memory_order_acquire) == NULL)
+        voleith_grostl_dispatch_init();
+
+    memcpy(state, iv, GROSTL_STATE_BYTES_256);
+    compress_512(state, block);
+    output_transform_256(state);
+    memcpy(out, state + (GROSTL_STATE_BYTES_256 - 32), 32);
+
+    voleith_secure_zero(state, sizeof(state));
+    return 0;
+}
+
+int
+voleith_grostl512_compress_node(const uint8_t iv[128], const uint8_t block[128],
+                                uint8_t out[64])
+{
+    uint8_t state[GROSTL_STATE_BYTES_512];
+
+    if (iv == NULL || block == NULL || out == NULL)
+        return -1;
+
+    if (atomic_load_explicit(&voleith_grostl_ops, memory_order_acquire) == NULL)
+        voleith_grostl_dispatch_init();
+
+    memcpy(state, iv, GROSTL_STATE_BYTES_512);
+    compress_1024(state, block);
+    output_transform_512(state);
+    memcpy(out, state + (GROSTL_STATE_BYTES_512 - 64), 64);
+
+    voleith_secure_zero(state, sizeof(state));
+    return 0;
+}

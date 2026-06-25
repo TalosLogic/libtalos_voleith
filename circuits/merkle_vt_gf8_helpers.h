@@ -63,7 +63,7 @@ int voleith_merkle_vt_build(const voleith_node_hash_vt *vt,
  * each level along the path from leaf_index to the root.
  *
  * Sibling ordering matches the secret-dir Merkle path circuit
- * convention (see CLAUDE.md, merkle_vt_gf8_circuit.h): siblings_out[k]
+ * convention (merkle_vt_gf8_circuit.h): siblings_out[k]
  * is the sibling at level k counted from the leaf upward, with k = 0
  * at leaf level and k = depth - 1 at the level just below the root.
  * For leaf_index i, the sibling at level k sits at position

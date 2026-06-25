@@ -6,13 +6,13 @@
  *
  * Four test groups:
  *
- *   1. by_name for all 8 surface names: returns the right type_id and a
+ *   1. by_name for all surface names: returns the right type_id and a
  *      non-NULL vt whose node_bytes matches the DESIGN §2 table.
  *
  *   2. by_name for "grostl256", "aes-dm", "", and a truncated slice
  *      returns NULL (no prefix or fuzzy matching).
  *
- *   3. by_id round-trips 0..7; by_id(8) returns NULL.
+ *   3. by_id round-trips 0..9; by_id(10) returns NULL.
  *
  *   4. GOLDEN ORDER: voleith_shipshape_node_hash_types[i].type_id == i
  *      and .name at each index equals the expected literal, so any
@@ -46,14 +46,16 @@ check(const char *name, int cond)
  * Expected surface names, in type_id order.  Index == type_id.
  */
 static const char *expected_names[] = {
-    "aes_dm",          /* 0 */
-    "aes_cmac_128",    /* 1 */
-    "grostl_256",      /* 2 */
-    "grostl_256_t27",  /* 3 */
-    "grostl_512",      /* 4 */
-    "grostl_512_t59",  /* 5 */
-    "hirose",          /* 6 */
-    "hirose_fixed_32", /* 7 */
+    "aes_dm",           /* 0 */
+    "aes_cmac_128",     /* 1 */
+    "grostl_256",       /* 2 */
+    "grostl_256_t27",   /* 3 */
+    "grostl_512",       /* 4 */
+    "grostl_512_t59",   /* 5 */
+    "hirose",           /* 6 */
+    "hirose_fixed_32",  /* 7 */
+    "grostl_256_fixed", /* 8 */
+    "grostl_512_fixed", /* 9 */
 };
 
 /*
@@ -71,9 +73,11 @@ static const size_t expected_node_bytes[] = {
     59, /* grostl_512_t59 */
     32, /* hirose */
     32, /* hirose_fixed_32 */
+    32, /* grostl_256_fixed */
+    64, /* grostl_512_fixed */
 };
 
-#define N_TYPES 8
+#define N_TYPES 10
 
 static void
 test_by_name_all(void)
@@ -156,9 +160,9 @@ test_by_id_roundtrip(void)
         check(label, strcmp(e->name, expected_names[i]) == 0);
     }
 
-    /* id 8 is out of range */
-    e = voleith_shipshape_node_hash_type_by_id(8);
-    check("by_id(8) == NULL", e == NULL);
+    /* id 10 is out of range */
+    e = voleith_shipshape_node_hash_type_by_id(10);
+    check("by_id(10) == NULL", e == NULL);
 }
 
 static void
@@ -167,7 +171,7 @@ test_golden_order(void)
     char label[64];
     size_t i;
 
-    check("count == 8", voleith_shipshape_node_hash_types_count == N_TYPES);
+    check("count == 10", voleith_shipshape_node_hash_types_count == N_TYPES);
 
     for (i = 0; i < N_TYPES; i++) {
         snprintf(label, sizeof(label), "table[%zu].type_id == %zu", i, i);

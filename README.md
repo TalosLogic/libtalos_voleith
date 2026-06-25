@@ -160,10 +160,11 @@ for further composition.
 | KDF-CTR (NIST SP 800-108r1 §4.1) | `kdf_ctr_cmac_circuit` / `kdf_ctr_cmac_gf8_circuit` | AES-CMAC as PRF; 32-bit BE counter wired as circuit constants. |
 | Merkle path (Davies-Meyer / CMAC nodes, 16-byte, 2⁶⁴ CR) | `merkle_circuit` / `merkle_gf8_circuit` | Public-dir and secret-dir variants. |
 | Merkle path (Grøstl wide nodes) | `merkle_grostl_gf8_circuit` | Four node variants (`GROSTL_{256, 256_T27, 512, 512_T59}`) covering 2¹⁰⁸ to 2²⁵⁶ CR.  Public-dir and secret-dir. |
-| Merkle path (any hash, hash-agnostic) | `merkle_vt_gf8_path_circuit` (+ `_secret_dir`) | Generic body parameterised by `voleith_node_hash_vt`; ships with vts for AES-DM, AES-128-CMAC, the four Grøstl variants, and Hirose-AES-256. |
+| Merkle path (any hash, hash-agnostic) | `merkle_vt_gf8_path_circuit` (+ `_secret_dir`) | Generic body parameterised by `voleith_node_hash_vt`; ships with vts for AES-DM, AES-128-CMAC, the four Grøstl variants, the two fixed-input Grøstl variants (`grostl256_fixed` / `grostl512_fixed`: full 2¹²⁸ / 2²⁵⁶ CR at single-compression cost), and Hirose-AES-256. |
 | Indexed Merkle non-membership | `indexed_merkle_circuit` / `indexed_merkle_gf8_nonmember_circuit` / `indexed_merkle_grostl_gf8_nonmember_circuit` | DM/CMAC or Grøstl-node; public-dir and secret-dir. |
 | Indexed Merkle non-membership (any hash, hash-agnostic) | `merkle_vt_gf8_indexed_nonmember_circuit` (+ `_secret_dir`) | Same vt coverage as the generic Merkle path. |
 | Ring signatures (RSv1) | `voleith_rsv1_sign` / `_verify`, `voleith_rs_membership_build_circuit`, `voleith_ring_sig_pack` / `_unpack` | Anonymous-member signature over a published ring with optional revocation.  Parameterised over any `voleith_node_hash_vt`; composes the OWF leaf hash, the secret-dir Merkle path, and the secret-dir indexed-Merkle non-member branch into one circuit. |
+| Bounded-range assertion | `assert_in_range_gf8` | Constrains `low <= value <= high` (inclusive) over little-endian byte-vector wires; builds on the indexed-Merkle comparison routine. |
 
 For each building block, see [`docs/DESIGN.md`](docs/DESIGN.md): concrete
 AND-gate / mul-slot cost formulas, the public-dir-vs-secret-dir choice,

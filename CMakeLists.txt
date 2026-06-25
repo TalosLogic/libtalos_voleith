@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 cmake_minimum_required(VERSION 3.16)
-project(libvoleith VERSION 1.6.0 LANGUAGES C)
+project(libvoleith VERSION 1.7.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -234,6 +234,7 @@ set(VOLEITH_CORE_SOURCES
     circuits/indexed_merkle_circuit.c
     circuits/indexed_merkle_gf8_circuit.c
     circuits/indexed_merkle_grostl_gf8_circuit.c
+    circuits/range_gf8_circuit.c
     circuits/node_hash_hirose_gf8.c
     circuits/node_hash_aes_gf8.c
     circuits/node_hash_grostl_gf8.c

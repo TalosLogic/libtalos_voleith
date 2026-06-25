@@ -112,6 +112,34 @@ void voleith_grostl_finalize(voleith_grostl_ctx_t *ctx, uint8_t *out);
 void voleith_grostl_clear(voleith_grostl_ctx_t *ctx);
 
 /*
+ * Fixed-input single-compression node hashes.
+ *
+ * Compute H = Omega(f(iv, block)): one Grøstl compression of a single
+ * full-width block under a caller-supplied chaining value iv, followed by
+ * the Grøstl output transformation Omega, truncated to the node width.
+ * No Merkle-Damgård padding is applied: the input is exactly one block of
+ * fixed width, so the padding (0x80 + length) does no security work and is
+ * omitted, which keeps the cost at a single compression.  Domain separation
+ * between leaf and internal-node hashing is the caller's responsibility and
+ * is carried entirely by iv (use distinct iv values).
+ *
+ * iv is NOT the standard Grøstl init IV; it is the fixed public chaining
+ * value chosen by the node-hash construction.  These functions back the
+ * grostl256_fixed / grostl512_fixed node-hash circuits and exist so the
+ * software oracle and the in-circuit builder share one definition.
+ *
+ * grostl256_compress_node: 64-byte iv, 64-byte block, 32-byte output.
+ * grostl512_compress_node: 128-byte iv, 128-byte block, 64-byte output.
+ *
+ * Return 0 on success, negative on a NULL argument.  The full-hash API
+ * (voleith_grostl256 etc.) is unaffected.
+ */
+int voleith_grostl256_compress_node(const uint8_t iv[64],
+                                    const uint8_t block[64], uint8_t out[32]);
+int voleith_grostl512_compress_node(const uint8_t iv[128],
+                                    const uint8_t block[128], uint8_t out[64]);
+
+/*
  * Return a short string naming the active SubBytes backend: "aesni",
  * "armv8", or "soft".  Triggers dispatch initialization if not yet done.
  */

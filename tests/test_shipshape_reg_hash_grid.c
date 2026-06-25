@@ -135,11 +135,13 @@ main(void)
         }
 
         /*
-         * For hirose_fixed_32 rows (type_id == 7, fixed_leaf_bytes == 32):
-         * verify that the effective leaf width is 32.
+         * Fixed-leaf types (fixed_leaf_bytes != 0: hirose_fixed_32,
+         * grostl_256_fixed, grostl_512_fixed): verify the effective leaf
+         * width in every grid row equals that type's fixed_leaf_bytes.
          *
-         * merkle/path_secret and ring_sig/v1: params[leaf_param] == 32.
-         * indexed_merkle/nonmember_secret (n_params==3): 2*tb + ib == 32.
+         * merkle/path_secret and ring_sig/v1: eff_leaf = params[leaf_param].
+         * indexed_merkle/nonmember_secret (n_params==3): leaf record =
+         * 2*tb + ib.
          */
         {
             uint8_t n_params_e = 0, leaf_param = 0;
@@ -148,11 +150,17 @@ main(void)
                 NULL, NULL, NULL, NULL);
 
             for (g = 0; g < fe->n_bodies; g++) {
+                const voleith_shipshape_node_hash_type_t *te;
                 uint32_t eff_leaf;
+                size_t fixed_leaf;
 
-                if (fe->bodies[g].type_id !=
-                    VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32)
-                    continue;
+                te = voleith_shipshape_node_hash_type_by_id(
+                    fe->bodies[g].type_id);
+                if (te == NULL || te->vt == NULL ||
+                    te->vt->fixed_leaf_bytes == 0)
+                    continue; /* variable-leaf type: no constraint */
+                fixed_leaf = te->vt->fixed_leaf_bytes;
+
                 if (n_params_e == 3) {
                     /* indexed_merkle: leaf record = 2*tb + ib */
                     eff_leaf =
@@ -161,10 +169,10 @@ main(void)
                     eff_leaf = fe->bodies[g].params[leaf_param];
                 }
                 snprintf(label, sizeof(label),
-                         "entry %zu (%s) grid[%zu] hirose_fixed_32: "
-                         "effective leaf width == 32",
-                         i, fqn ? fqn : "?", g);
-                check(label, eff_leaf == 32u);
+                         "entry %zu (%s) grid[%zu] %s: "
+                         "effective leaf width == %zu",
+                         i, fqn ? fqn : "?", g, te->name, fixed_leaf);
+                check(label, eff_leaf == (uint32_t)fixed_leaf);
             }
         }
     }

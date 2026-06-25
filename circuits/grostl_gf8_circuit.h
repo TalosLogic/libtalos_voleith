@@ -109,4 +109,62 @@ void grostl256_gf8_build_witness(const uint8_t *msg, size_t msg_bytes,
 void grostl512_gf8_build_witness(const uint8_t *msg, size_t msg_bytes,
                                  uint8_t *witness);
 
+/*
+ * Fixed-input single-compression node circuit: H = Omega(f(iv, block)).
+ *
+ * One Grøstl compression of a single full-width block under the
+ * caller-supplied public chaining value iv, then the output transform
+ * Omega, truncated to the node width (the last out_bytes of the state,
+ * matching voleith_grostl_finalize and core/grostl.c
+ * voleith_grostl{256,512}_compress_node, the matching software oracle).
+ *
+ * No Merkle-Damgård padding: the input is exactly one block of fixed
+ * width, so no 0x80 marker, no zero pad, and no length block.  Domain
+ * separation between leaf and internal-node hashing is carried entirely
+ * by iv (the caller passes distinct iv values), NOT by a 1-byte
+ * in-message prefix; that is what keeps L || R to exactly one block and
+ * the cost to a single compression.
+ *
+ * This is a SIBLING of grostl{256,512}_gf8_circuit: it reuses the same
+ * internal P / Q / Omega builders but skips padding and IV setup.  The
+ * full-hash entry points are unchanged (they feed the frozen Shipshape
+ * witgen fingerprint).
+ *
+ *   c     : circuit to append to
+ *   iv    : 64 (256) / 128 (512) byte fixed public chaining value
+ *   block : 64 (256) / 128 (512) caller-declared input wire IDs
+ *   out   : receives 32 (256) / 64 (512) node-digest wire IDs
+ *
+ * Mul-gate cost = 1,920 (256) / 5,376 (512): one compression (P + Q)
+ * plus the output transform's P, no padding block.
+ */
+void grostl256_gf8_node_circuit(voleith_gf8_circuit_t *c, const uint8_t iv[64],
+                                const gf8_wire_id block[64],
+                                gf8_wire_id out[32]);
+void grostl512_gf8_node_circuit(voleith_gf8_circuit_t *c, const uint8_t iv[128],
+                                const gf8_wire_id block[128],
+                                gf8_wire_id out[64]);
+
+/*
+ * inv_in witness size (in bytes) for one node circuit.  Excludes the
+ * block input bytes, which the caller declares as its own witness
+ * wires before invoking grostl{256,512}_gf8_node_circuit (see
+ * feedback_gf8_witness_layout).  Returns 1,920 (256) / 5,376 (512).
+ */
+size_t grostl256_gf8_node_invin_bytes(void);
+size_t grostl512_gf8_node_invin_bytes(void);
+
+/*
+ * Fill inv_out with the grostl{256,512}_gf8_node_invin_bytes() inv_in
+ * values for one node hash of block under iv, in circuit-evaluation
+ * order (P then Q for the compression, then the output transform's P).
+ * Matches the S-box order grostl{256,512}_gf8_node_circuit emits.
+ */
+void grostl256_gf8_node_build_witness(const uint8_t iv[64],
+                                      const uint8_t block[64],
+                                      uint8_t *inv_out);
+void grostl512_gf8_node_build_witness(const uint8_t iv[128],
+                                      const uint8_t block[128],
+                                      uint8_t *inv_out);
+
 #endif /* VOLEITH_GROSTL_GF8_CIRCUIT_H */

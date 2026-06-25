@@ -296,10 +296,11 @@ static const witgen_construction_entry_t s_constructions[] = {
 /*
  * Static storage for the bracketed names.  register_construction borrows the
  * pointer, so the buffers must outlive every dispatch.  Sized for one name per
- * (construction, node-hash type) pair.  The 8-type table is frozen; the bound
- * below tracks voleith_shipshape_node_hash_types_count.
+ * (construction, node-hash type) pair.  The bound below must be >=
+ * voleith_shipshape_node_hash_types_count (10: the append-only type table);
+ * register_constructions returns -1 if the live count ever exceeds it.
  */
-#define N_NODE_HASH_TYPES_MAX 8u
+#define N_NODE_HASH_TYPES_MAX 10u
 #define BRACKETED_NAME_MAX 96u
 
 static char s_names[N_CONSTRUCTIONS * N_NODE_HASH_TYPES_MAX]

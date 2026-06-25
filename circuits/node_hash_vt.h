@@ -157,10 +157,32 @@ extern const voleith_node_hash_vt voleith_node_hash_aes_cmac128;
  *   grostl256_t27    : 27B node, 2^108 CR, 1920 inode S-boxes (1 compression)
  *   grostl512        : 64B node, 2^256 CR, 8960 inode S-boxes (2 compressions)
  *   grostl512_t59    : 59B node, 2^236 CR, 5376 inode S-boxes (1 compression)
+ *
+ * DEPRECATED: all four are superseded by grostl256_fixed /
+ * grostl512_fixed below (full CR at single-compression cost); retained
+ * as frozen wire-format commitments, not recommended for new circuits.
  */
 extern const voleith_node_hash_vt voleith_node_hash_grostl256;
 extern const voleith_node_hash_vt voleith_node_hash_grostl256_t27;
 extern const voleith_node_hash_vt voleith_node_hash_grostl512;
 extern const voleith_node_hash_vt voleith_node_hash_grostl512_t59;
+
+/*
+ * Fixed-input single-compression Grøstl vts.  H = Omega(f(IV, block))
+ * over exactly one block (no Merkle-Damgård padding), leaf vs inode
+ * domain-separated by distinct chaining values IV_leaf / IV_inode
+ * (NOT a 1-byte in-message prefix).  Fixed-leaf (fixed_leaf_bytes =
+ * node_bytes): the leaf payload is zero-padded to the block.  See
+ * circuits/node_hash_grostl_gf8.h and docs/DESIGN.md.
+ *
+ *   grostl256_fixed  : 32B node, 2^128 CR, 1920 inode S-boxes (1 compression)
+ *   grostl512_fixed  : 64B node, 2^256 CR, 5376 inode S-boxes (1 compression)
+ *
+ * Both deliver full collision resistance at the same S-box cost as the
+ * truncated _t27 / _t59 variants, dominating all four older Grøstl vts
+ * above (which are retained as frozen wire-format commitments).
+ */
+extern const voleith_node_hash_vt voleith_node_hash_grostl256_fixed;
+extern const voleith_node_hash_vt voleith_node_hash_grostl512_fixed;
 
 #endif /* VOLEITH_NODE_HASH_VT_H */

@@ -4,7 +4,7 @@
  *
  * test_proof.c - End-to-end tests for the VOLEitH proof system
  *
- * Tests (CLAUDE.md Phase 8 requirements):
+ * Tests:
  *   1. Correct proof verifies
  *   2. Proof with wrong witness is rejected
  *   3. Modifying any byte of a valid proof causes rejection

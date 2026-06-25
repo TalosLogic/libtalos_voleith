@@ -54,16 +54,24 @@
 #define DEPTH 3
 #define N_LEAVES (1u << DEPTH)
 /*
- * 32-byte leaves chosen so the same value satisfies every vt's
- * contract uniformly:
+ * Default leaf width for the leaf-based checks (leaf-circuit-vs-sw,
+ * domain separation, path e2e, booleanity).  32 bytes satisfies every
+ * vt's contract uniformly:
  *   - voleith_node_hash_hirose_fixed32 REQUIRES leaf_data_bytes == 32
  *     (the circuit reads leaf_data[0..31] regardless of the passed-in
  *     size argument), so a 16-byte test input would dereference past
  *     a 16-element wire array.  32 is the only safe choice for that
  *     vt, and works fine for every other vt.
  *   - Every variable-leaf vt handles 32 bytes (1+ compression block).
+ *
+ * The one exception is voleith_node_hash_grostl512_fixed: its leaf is
+ * a 64-byte value (CR256), so it must be tested at 64 bytes.  Each vt
+ * carries its own leaf_test_bytes (defaulting to this) and the
+ * leaf-based checks honor it; the leaf buffers are sized at
+ * MAX_LEAF_TEST_BYTES.  See vt_case_t.leaf_test_bytes.
  */
 #define LEAF_DATA_BYTES 32u
+#define MAX_LEAF_TEST_BYTES 64u
 
 static int total_tests = 0;
 static int total_pass = 0;
@@ -97,6 +105,14 @@ typedef struct {
     const size_t *valid_leaf_sizes;
     size_t n_valid_leaf_sizes;
     /*
+     * Leaf width (in bytes) used by the leaf-based checks
+     * (leaf-circuit-vs-sw, domain separation, path e2e, booleanity).
+     * 32 for every vt except grostl512_fixed (64-byte CR256 leaves);
+     * must not exceed MAX_LEAF_TEST_BYTES.  A fixed-leaf vt
+     * (fixed_leaf_bytes != 0) requires this to equal fixed_leaf_bytes.
+     */
+    size_t leaf_test_bytes;
+    /*
      * Whether to run the indexed-non-member e2e check for this vt.
      * The indexed test uses a 3-byte leaf record (target_bytes=1,
      * index_bytes=1).  Fixed-leaf-size vts (only fixed32 today) can
@@ -111,28 +127,45 @@ typedef struct {
 
 static const size_t LEAF_SIZES_VARIABLE[] = {0, 1, 16, 32, 64, 128};
 static const size_t LEAF_SIZES_FIXED32[] = {32};
+static const size_t LEAF_SIZES_FIXED64[] = {64};
 #define N_LEAF_SIZES_VARIABLE                                                  \
     (sizeof(LEAF_SIZES_VARIABLE) / sizeof(LEAF_SIZES_VARIABLE[0]))
 #define N_LEAF_SIZES_FIXED32                                                   \
     (sizeof(LEAF_SIZES_FIXED32) / sizeof(LEAF_SIZES_FIXED32[0]))
+#define N_LEAF_SIZES_FIXED64                                                   \
+    (sizeof(LEAF_SIZES_FIXED64) / sizeof(LEAF_SIZES_FIXED64[0]))
 
+/*
+ * Fields: label, vt, exp_node_bytes, exp_cr_bits, valid_leaf_sizes,
+ * n_valid_leaf_sizes, leaf_test_bytes, supports_indexed.
+ *
+ * The fixed-input Grøstl vts mirror hirose_fixed32: a fixed leaf width
+ * equal to node_bytes, swept at just that size, and supports_indexed=0
+ * (the indexed test's 3-byte leaf record cannot be widened to a 32/64
+ * byte fixed leaf).  grostl256_fixed runs the leaf-based tests at 32
+ * bytes; grostl512_fixed at its native 64 (CR256).
+ */
 static const vt_case_t CASES[] = {
     {"hirose-aes-256", &voleith_node_hash_hirose, 32, 128, LEAF_SIZES_VARIABLE,
-     N_LEAF_SIZES_VARIABLE, 1},
+     N_LEAF_SIZES_VARIABLE, LEAF_DATA_BYTES, 1},
     {"hirose-aes-256-fixed32", &voleith_node_hash_hirose_fixed32, 32, 128,
-     LEAF_SIZES_FIXED32, N_LEAF_SIZES_FIXED32, 0},
+     LEAF_SIZES_FIXED32, N_LEAF_SIZES_FIXED32, LEAF_DATA_BYTES, 0},
     {"aes-dm", &voleith_node_hash_aes_dm, 16, 64, LEAF_SIZES_VARIABLE,
-     N_LEAF_SIZES_VARIABLE, 1},
+     N_LEAF_SIZES_VARIABLE, LEAF_DATA_BYTES, 1},
     {"aes-cmac128", &voleith_node_hash_aes_cmac128, 16, 64, LEAF_SIZES_VARIABLE,
-     N_LEAF_SIZES_VARIABLE, 1},
+     N_LEAF_SIZES_VARIABLE, LEAF_DATA_BYTES, 1},
     {"grostl256", &voleith_node_hash_grostl256, 32, 128, LEAF_SIZES_VARIABLE,
-     N_LEAF_SIZES_VARIABLE, 1},
+     N_LEAF_SIZES_VARIABLE, LEAF_DATA_BYTES, 1},
     {"grostl256_t27", &voleith_node_hash_grostl256_t27, 27, 108,
-     LEAF_SIZES_VARIABLE, N_LEAF_SIZES_VARIABLE, 1},
+     LEAF_SIZES_VARIABLE, N_LEAF_SIZES_VARIABLE, LEAF_DATA_BYTES, 1},
     {"grostl512", &voleith_node_hash_grostl512, 64, 256, LEAF_SIZES_VARIABLE,
-     N_LEAF_SIZES_VARIABLE, 1},
+     N_LEAF_SIZES_VARIABLE, LEAF_DATA_BYTES, 1},
     {"grostl512_t59", &voleith_node_hash_grostl512_t59, 59, 236,
-     LEAF_SIZES_VARIABLE, N_LEAF_SIZES_VARIABLE, 1},
+     LEAF_SIZES_VARIABLE, N_LEAF_SIZES_VARIABLE, LEAF_DATA_BYTES, 1},
+    {"grostl256-fixed", &voleith_node_hash_grostl256_fixed, 32, 128,
+     LEAF_SIZES_FIXED32, N_LEAF_SIZES_FIXED32, 32u, 0},
+    {"grostl512-fixed", &voleith_node_hash_grostl512_fixed, 64, 256,
+     LEAF_SIZES_FIXED64, N_LEAF_SIZES_FIXED64, 64u, 0},
 };
 #define N_CASES (sizeof(CASES) / sizeof(CASES[0]))
 
@@ -266,29 +299,28 @@ static void
 check_leaf_circuit_matches_sw(const vt_case_t *cs)
 {
     const voleith_node_hash_vt *h = cs->vt;
-    uint8_t data[LEAF_DATA_BYTES];
-    for (size_t i = 0; i < LEAF_DATA_BYTES; i++)
+    size_t lb = cs->leaf_test_bytes;
+    uint8_t data[MAX_LEAF_TEST_BYTES];
+    for (size_t i = 0; i < lb; i++)
         data[i] = (uint8_t)(0xA0 + i);
 
     voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
-    gf8_wire_id leaf_w[LEAF_DATA_BYTES];
-    for (size_t i = 0; i < LEAF_DATA_BYTES; i++)
+    gf8_wire_id leaf_w[MAX_LEAF_TEST_BYTES];
+    for (size_t i = 0; i < lb; i++)
         leaf_w[i] = voleith_gf8_add_witness(c);
     gf8_wire_id out_w[MAX_NODE_BYTES];
-    h->leaf_circuit(c, leaf_w, LEAF_DATA_BYTES, out_w);
+    h->leaf_circuit(c, leaf_w, lb, out_w);
 
-    size_t inv = h->leaf_invin_bytes(LEAF_DATA_BYTES);
-    uint8_t *witness = calloc(LEAF_DATA_BYTES + inv, 1);
-    memcpy(witness, data, LEAF_DATA_BYTES);
-    MUST_OK(h->leaf_build_witness(data, LEAF_DATA_BYTES,
-                                  witness + LEAF_DATA_BYTES));
+    size_t inv = h->leaf_invin_bytes(lb);
+    uint8_t *witness = calloc(lb + inv, 1);
+    memcpy(witness, data, lb);
+    MUST_OK(h->leaf_build_witness(data, lb, witness + lb));
 
     uint8_t circ_out[MAX_NODE_BYTES];
-    eval_and_extract(c, witness, LEAF_DATA_BYTES + inv, out_w, h->node_bytes,
-                     circ_out);
+    eval_and_extract(c, witness, lb + inv, out_w, h->node_bytes, circ_out);
 
     uint8_t sw_out[MAX_NODE_BYTES];
-    MUST_OK(h->leaf_hash(data, LEAF_DATA_BYTES, sw_out));
+    MUST_OK(h->leaf_hash(data, lb, sw_out));
 
     char name[160];
     snprintf(name, sizeof(name), "[%s] leaf: circuit == sw helper", cs->label);
@@ -379,9 +411,9 @@ check_domain_separation(const vt_case_t *cs)
  * ================================================================ */
 
 static void
-build_software_tree(const voleith_node_hash_vt *h, size_t target_leaf,
-                    const uint8_t leaves[][LEAF_DATA_BYTES], uint8_t *root_out,
-                    uint8_t *siblings_out, uint8_t *dirs_out)
+build_software_tree(const voleith_node_hash_vt *h, size_t lb,
+                    size_t target_leaf, const uint8_t *leaves,
+                    uint8_t *root_out, uint8_t *siblings_out, uint8_t *dirs_out)
 {
     size_t W = h->node_bytes;
     uint8_t *layer[DEPTH + 1];
@@ -389,7 +421,7 @@ build_software_tree(const voleith_node_hash_vt *h, size_t target_leaf,
         layer[k] = calloc((N_LEAVES >> k) > 0 ? (N_LEAVES >> k) : 1, W);
 
     for (size_t i = 0; i < N_LEAVES; i++)
-        MUST_OK(h->leaf_hash(leaves[i], LEAF_DATA_BYTES, layer[0] + i * W));
+        MUST_OK(h->leaf_hash(leaves + i * lb, lb, layer[0] + i * W));
 
     for (size_t k = 0; k < DEPTH; k++) {
         size_t n_parents = N_LEAVES >> (k + 1);
@@ -423,23 +455,24 @@ check_path_e2e(const vt_case_t *cs, int secret_dir)
 {
     const voleith_node_hash_vt *h = cs->vt;
     size_t W = h->node_bytes;
+    size_t lb = cs->leaf_test_bytes;
     size_t target = 5;
 
-    uint8_t leaves[N_LEAVES][LEAF_DATA_BYTES];
+    uint8_t leaves[N_LEAVES * MAX_LEAF_TEST_BYTES];
     for (size_t i = 0; i < N_LEAVES; i++)
-        for (size_t j = 0; j < LEAF_DATA_BYTES; j++)
-            leaves[i][j] = (uint8_t)(i * 13 + j);
+        for (size_t j = 0; j < lb; j++)
+            leaves[i * lb + j] = (uint8_t)(i * 13 + j);
 
     uint8_t root_sw[MAX_NODE_BYTES];
     uint8_t *siblings = calloc(DEPTH, W);
     uint8_t dirs[DEPTH];
-    build_software_tree(h, target, leaves, root_sw, siblings, dirs);
+    build_software_tree(h, lb, target, leaves, root_sw, siblings, dirs);
 
     /* Build circuit: leaf_data | path_nodes | [dirs] | (internals). */
     voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
 
-    gf8_wire_id leaf_w[LEAF_DATA_BYTES];
-    for (size_t i = 0; i < LEAF_DATA_BYTES; i++)
+    gf8_wire_id leaf_w[MAX_LEAF_TEST_BYTES];
+    for (size_t i = 0; i < lb; i++)
         leaf_w[i] = voleith_gf8_add_witness(c);
 
     gf8_wire_id *path_w = calloc(DEPTH * W, sizeof(gf8_wire_id));
@@ -454,11 +487,11 @@ check_path_e2e(const vt_case_t *cs, int secret_dir)
     gf8_wire_id root_w[MAX_NODE_BYTES];
     int rc;
     if (secret_dir)
-        rc = merkle_vt_gf8_path_circuit_secret_dir(
-            c, h, leaf_w, LEAF_DATA_BYTES, path_w, dir_w, DEPTH, root_w);
+        rc = merkle_vt_gf8_path_circuit_secret_dir(c, h, leaf_w, lb, path_w,
+                                                   dir_w, DEPTH, root_w);
     else
-        rc = merkle_vt_gf8_path_circuit(c, h, leaf_w, LEAF_DATA_BYTES, path_w,
-                                        dirs, DEPTH, root_w);
+        rc = merkle_vt_gf8_path_circuit(c, h, leaf_w, lb, path_w, dirs, DEPTH,
+                                        root_w);
     (void)rc;
     assert(rc == 0);
 
@@ -466,8 +499,8 @@ check_path_e2e(const vt_case_t *cs, int secret_dir)
     size_t wn = voleith_gf8_circuit_witness_count(c);
     uint8_t *witness = calloc(wn > 0 ? wn : 1, 1);
     uint8_t *wp = witness;
-    memcpy(wp, leaves[target], LEAF_DATA_BYTES);
-    wp += LEAF_DATA_BYTES;
+    memcpy(wp, leaves + target * lb, lb);
+    wp += lb;
     memcpy(wp, siblings, DEPTH * W);
     wp += DEPTH * W;
     if (secret_dir) {
@@ -475,11 +508,11 @@ check_path_e2e(const vt_case_t *cs, int secret_dir)
             wp[k] = dirs[k];
         wp += DEPTH;
     }
-    MUST_OK(h->leaf_build_witness(leaves[target], LEAF_DATA_BYTES, wp));
-    wp += h->leaf_invin_bytes(LEAF_DATA_BYTES);
+    MUST_OK(h->leaf_build_witness(leaves + target * lb, lb, wp));
+    wp += h->leaf_invin_bytes(lb);
 
     uint8_t current[MAX_NODE_BYTES];
-    MUST_OK(h->leaf_hash(leaves[target], LEAF_DATA_BYTES, current));
+    MUST_OK(h->leaf_hash(leaves + target * lb, lb, current));
     for (size_t k = 0; k < DEPTH; k++) {
         const uint8_t *sib = siblings + k * W;
         uint8_t dir = dirs[k];
@@ -510,7 +543,7 @@ check_path_e2e(const vt_case_t *cs, int secret_dir)
     check(name, root_eq);
 
     /* Tamper: flip the first leaf-side inv_in byte; circuit must reject. */
-    size_t tamper_off = LEAF_DATA_BYTES + DEPTH * W + (secret_dir ? DEPTH : 0);
+    size_t tamper_off = lb + DEPTH * W + (secret_dir ? DEPTH : 0);
     if (tamper_off < wn) {
         witness[tamper_off] ^= 0x01;
         int bad = voleith_gf8_circuit_eval(c, witness, NULL, wire_vals);
@@ -713,21 +746,22 @@ check_secret_dir_booleanity(const vt_case_t *cs)
 {
     const voleith_node_hash_vt *h = cs->vt;
     size_t W = h->node_bytes;
+    size_t lb = cs->leaf_test_bytes;
     size_t target = 5;
 
-    uint8_t leaves[N_LEAVES][LEAF_DATA_BYTES];
+    uint8_t leaves[N_LEAVES * MAX_LEAF_TEST_BYTES];
     for (size_t i = 0; i < N_LEAVES; i++)
-        for (size_t j = 0; j < LEAF_DATA_BYTES; j++)
-            leaves[i][j] = (uint8_t)(i * 13 + j);
+        for (size_t j = 0; j < lb; j++)
+            leaves[i * lb + j] = (uint8_t)(i * 13 + j);
 
     uint8_t root_sw[MAX_NODE_BYTES];
     uint8_t *siblings = calloc(DEPTH, W);
     uint8_t dirs[DEPTH];
-    build_software_tree(h, target, leaves, root_sw, siblings, dirs);
+    build_software_tree(h, lb, target, leaves, root_sw, siblings, dirs);
 
     voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
-    gf8_wire_id leaf_w[LEAF_DATA_BYTES];
-    for (size_t i = 0; i < LEAF_DATA_BYTES; i++)
+    gf8_wire_id leaf_w[MAX_LEAF_TEST_BYTES];
+    for (size_t i = 0; i < lb; i++)
         leaf_w[i] = voleith_gf8_add_witness(c);
     gf8_wire_id *path_w = calloc(DEPTH * W, sizeof(gf8_wire_id));
     for (size_t i = 0; i < DEPTH * W; i++)
@@ -737,16 +771,16 @@ check_secret_dir_booleanity(const vt_case_t *cs)
         dir_w[k] = voleith_gf8_add_witness(c);
 
     gf8_wire_id root_w[MAX_NODE_BYTES];
-    int rc = merkle_vt_gf8_path_circuit_secret_dir(
-        c, h, leaf_w, LEAF_DATA_BYTES, path_w, dir_w, DEPTH, root_w);
+    int rc = merkle_vt_gf8_path_circuit_secret_dir(c, h, leaf_w, lb, path_w,
+                                                   dir_w, DEPTH, root_w);
     (void)rc;
     assert(rc == 0);
 
     size_t wn = voleith_gf8_circuit_witness_count(c);
     uint8_t *witness = calloc(wn > 0 ? wn : 1, 1);
     uint8_t *wp = witness;
-    memcpy(wp, leaves[target], LEAF_DATA_BYTES);
-    wp += LEAF_DATA_BYTES;
+    memcpy(wp, leaves + target * lb, lb);
+    wp += lb;
     memcpy(wp, siblings, DEPTH * W);
     wp += DEPTH * W;
     /* Plant a non-bit direction at level 1. */
@@ -756,8 +790,8 @@ check_secret_dir_booleanity(const vt_case_t *cs)
     for (size_t k = 0; k < DEPTH; k++)
         wp[k] = bad_dirs[k];
     wp += DEPTH;
-    MUST_OK(h->leaf_build_witness(leaves[target], LEAF_DATA_BYTES, wp));
-    wp += h->leaf_invin_bytes(LEAF_DATA_BYTES);
+    MUST_OK(h->leaf_build_witness(leaves + target * lb, lb, wp));
+    wp += h->leaf_invin_bytes(lb);
     /*
      * For the inode inv_in we still walk the *correct* path; the
      * booleanity check fires on the bad dir wire regardless of what
@@ -766,7 +800,7 @@ check_secret_dir_booleanity(const vt_case_t *cs)
      * downstream S-box mismatch.
      */
     uint8_t current[MAX_NODE_BYTES];
-    MUST_OK(h->leaf_hash(leaves[target], LEAF_DATA_BYTES, current));
+    MUST_OK(h->leaf_hash(leaves + target * lb, lb, current));
     for (size_t k = 0; k < DEPTH; k++) {
         const uint8_t *sib = siblings + k * W;
         uint8_t dir = dirs[k];

@@ -1119,6 +1119,8 @@ selector, not a wire. The closed set of defined type names is:
 | `grostl_512_t59` | 59 | Truncated to first 59 output bytes |
 | `hirose` | 32 | Hirose double-block-length (variable leaf width) |
 | `hirose_fixed_32` | 32 | Leaf-record width fixed to 32 bytes |
+| `grostl_256_fixed` | 32 | Fixed-input single-compression Grøstl-256; leaf-record width fixed to 32 bytes |
+| `grostl_512_fixed` | 64 | Fixed-input single-compression Grøstl-512; leaf-record width fixed to 64 bytes |
 
 The set is closed as of this version and is extensible only by a
 future registry version (planned additions: `rijndael_256`,

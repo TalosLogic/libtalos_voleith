@@ -6,7 +6,7 @@
  *
  * Pins that the parsed region name for every crypto-v2 construction entry
  * is exactly the bracketed FQN `stdlib/crypto/<name>[<type>]`, across all
- * 8 node-hash types (the MR3 smoke test covers only one type per entry).
+ * 10 node-hash types (the MR3 smoke test covers only one type per entry).
  * This ensures the bracket carries the type name verbatim and that W8
  * dispatch can key on `region.name` without any additional lookup.
  *
@@ -127,6 +127,14 @@ test_merkle_path_region_names(void)
     /* hirose_fixed_32: fixed_leaf_bytes=32; leaf=32 == node_bytes */
     check_merkle_path_name("hirose_fixed_32", "hirose_fixed_32", 32,
                            "stdlib/crypto/merkle/path_secret[hirose_fixed_32]");
+    /* grostl_256_fixed: fixed_leaf_bytes=32; leaf=32 == node_bytes */
+    check_merkle_path_name(
+        "grostl_256_fixed", "grostl_256_fixed", 32,
+        "stdlib/crypto/merkle/path_secret[grostl_256_fixed]");
+    /* grostl_512_fixed: fixed_leaf_bytes=64; leaf=64 == node_bytes */
+    check_merkle_path_name(
+        "grostl_512_fixed", "grostl_512_fixed", 64,
+        "stdlib/crypto/merkle/path_secret[grostl_512_fixed]");
 }
 
 /* ================================================================
@@ -197,6 +205,12 @@ test_ring_sig_region_names(void)
     /* hirose_fixed_32: fixed_leaf_bytes=32; skb=32 == node_bytes */
     check_ring_sig_name("hirose_fixed_32", "hirose_fixed_32", 32,
                         "stdlib/crypto/ring_sig/v1[hirose_fixed_32]");
+    /* grostl_256_fixed: fixed_leaf_bytes=32; skb=32 == node_bytes */
+    check_ring_sig_name("grostl_256_fixed", "grostl_256_fixed", 32,
+                        "stdlib/crypto/ring_sig/v1[grostl_256_fixed]");
+    /* grostl_512_fixed: fixed_leaf_bytes=64; skb=64 == node_bytes */
+    check_ring_sig_name("grostl_512_fixed", "grostl_512_fixed", 64,
+                        "stdlib/crypto/ring_sig/v1[grostl_512_fixed]");
 }
 
 /* ================================================================
@@ -281,6 +295,14 @@ test_indexed_merkle_region_names(void)
     check_indexed_name(
         "hirose_fixed_32", "hirose_fixed_32", 32, 12, 8,
         "stdlib/crypto/indexed_merkle/nonmember_secret[hirose_fixed_32]");
+    /* grostl_256_fixed: leaf record 2*12+8=32 = fixed_leaf_bytes */
+    check_indexed_name(
+        "grostl_256_fixed", "grostl_256_fixed", 32, 12, 8,
+        "stdlib/crypto/indexed_merkle/nonmember_secret[grostl_256_fixed]");
+    /* grostl_512_fixed: leaf record 2*28+8=64 = fixed_leaf_bytes */
+    check_indexed_name(
+        "grostl_512_fixed", "grostl_512_fixed", 64, 28, 8,
+        "stdlib/crypto/indexed_merkle/nonmember_secret[grostl_512_fixed]");
 }
 
 int

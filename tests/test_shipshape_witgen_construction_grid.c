@@ -271,10 +271,10 @@ run_grid_point(int kind, const char *type_name, size_t W, size_t D,
 {
     char src[SRC_CAP];
     char label[160];
-    /* ext capacity: largest layout is 3*tb + ib + D*W + D.  Across the grid the
-     * max is grostl_512 (W=64) at D=4 with the default record (276 bytes); the
-     * fixed-leaf type has W=32 so its wider record stays well under.  Round up. */
-    uint8_t ext[16 + 4 * 64 + 32];
+    /* ext capacity: largest layout is 3*tb + ib + D*W + D.  Max across the grid
+     * is indexed_merkle with grostl_512_fixed (fixed 64-byte leaf record:
+     * tb=12, ib=40, so 3*tb+ib=76) at D=4, W=64: 76 + 256 + 4 = 336.  Round up. */
+    uint8_t ext[384];
     size_t ext_len;
     int n;
 
@@ -338,9 +338,10 @@ run_grid_point(int kind, const char *type_name, size_t W, size_t D,
 }
 
 /*
- * The full grid: 3 constructions x 8 node-hash types x 3 depths = 72 cases.
- * Plus one extra merkle leaf-width point per type to exercise the leaf-width
- * axis explicitly (leaf = 32 at depth 2): + 8 cases.
+ * The full grid: 3 constructions x 10 node-hash types x 3 depths = 90 cases.
+ * Plus one extra merkle leaf-width point per variable-leaf type to exercise the
+ * leaf-width axis explicitly (leaf = 32 at depth 2): + 7 cases (the 3 fixed-leaf
+ * types are skipped, their leaf width being pinned).
  */
 static void
 test_grid(void)
@@ -364,16 +365,28 @@ test_grid(void)
         }
     }
 
-    /* Extra leaf-width axis point: merkle with a 32-byte leaf, depth 2. */
+    /*
+     * Extra leaf-width axis point: merkle with a 32-byte leaf, depth 2.
+     * Only for variable-leaf types: a fixed-leaf type has a single legal leaf
+     * width (already covered by the main grid), and feeding it a mismatching
+     * 32-byte leaf would be a parse error (e.g. grostl_512_fixed needs 64).
+     */
     for (ti = 0; ti < n_types; ti++) {
+        const voleith_node_hash_vt *vt =
+            voleith_shipshape_node_hash_types[ti].vt;
         const char *type_name = voleith_shipshape_node_hash_types[ti].name;
-        size_t W = voleith_shipshape_node_hash_types[ti].vt->node_bytes;
+        size_t W = vt->node_bytes;
         char src[SRC_CAP];
         char label[160];
         uint8_t ext[32 + 2 * 64 + 16];
         size_t D = 2, leaf = 32, ext_len = leaf + D * W + D;
-        int n = build_merkle_src(src, sizeof(src), type_name, leaf, W, D);
+        int n;
 
+        /* Variable-leaf types only (see note above). */
+        if (vt->fixed_leaf_bytes != 0)
+            continue;
+
+        n = build_merkle_src(src, sizeof(src), type_name, leaf, W, D);
         snprintf(label, sizeof(label),
                  "merkle/path_secret[%s] D=2 W=%zu leaf=32", type_name, W);
         if (n < 0) {

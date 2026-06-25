@@ -458,6 +458,54 @@ grostl512_gf8_circuit(voleith_gf8_circuit_t *c, const gf8_wire_id *msg,
 }
 
 /* ================================================================
+ * Fixed-input single-compression node circuits.
+ *
+ * H = Omega(f(iv, block)): inject iv as constant wires, run ONE
+ * compression (no padding), then the output transform, truncate to the
+ * node width.  Sibling of grostl{256,512}_gf8_circuit, reusing
+ * compress_wires / output_transform_wires; the full-hash path is
+ * untouched.  See grostl_gf8_circuit.h for the contract.
+ * ================================================================ */
+
+static void
+grostl_node_circuit_impl(voleith_gf8_circuit_t *c, const uint8_t *iv,
+                         const gf8_wire_id *block, int columns, int rounds,
+                         const uint8_t shift_p[ROWS],
+                         const uint8_t shift_q[ROWS], size_t out_bytes,
+                         gf8_wire_id *out)
+{
+    size_t n = (size_t)(ROWS * columns);
+    gf8_wire_id h[STATE_BYTES_512];
+
+    /* iv is public structural data: constant wires, zero VOLE slots. */
+    for (size_t i = 0; i < n; i++)
+        h[i] = voleith_gf8_add_const(c, iv[i]);
+
+    compress_wires(c, h, block, columns, rounds, shift_p, shift_q);
+    output_transform_wires(c, h, columns, rounds, shift_p);
+
+    /* trunc_n: last out_bytes of the state (matches core/grostl.c). */
+    for (size_t i = 0; i < out_bytes; i++)
+        out[i] = h[n - out_bytes + i];
+}
+
+void
+grostl256_gf8_node_circuit(voleith_gf8_circuit_t *c, const uint8_t iv[64],
+                           const gf8_wire_id block[64], gf8_wire_id out[32])
+{
+    grostl_node_circuit_impl(c, iv, block, COLS_256, ROUNDS_256, SHIFT_P512,
+                             SHIFT_Q512, 32, out);
+}
+
+void
+grostl512_gf8_node_circuit(voleith_gf8_circuit_t *c, const uint8_t iv[128],
+                           const gf8_wire_id block[128], gf8_wire_id out[64])
+{
+    grostl_node_circuit_impl(c, iv, block, COLS_512, ROUNDS_512, SHIFT_P1024,
+                             SHIFT_Q1024, 64, out);
+}
+
+/* ================================================================
  * Witness builder.
  *
  * Runs the byte-level Grøstl in lockstep with the circuit and
@@ -775,4 +823,56 @@ grostl512_gf8_build_witness(const uint8_t *msg, size_t msg_bytes,
 
     voleith_secure_zero(h, sizeof(h));
     voleith_secure_zero(block, sizeof(block));
+}
+
+/* ================================================================
+ * Node-circuit witness builders.
+ *
+ * One compression + output transform over (iv, block), capturing the
+ * inv_in in the same P-then-Q, then output-transform-P order the node
+ * circuit emits.  Excludes block bytes (caller-declared).
+ * ================================================================ */
+
+size_t
+grostl256_gf8_node_invin_bytes(void)
+{
+    /* One compression (P + Q = 1,280) + output transform P (640). */
+    return 1280u + 640u;
+}
+
+size_t
+grostl512_gf8_node_invin_bytes(void)
+{
+    /* One compression (14 * 128 * 2 = 3,584) + output transform P (1,792). */
+    return 3584u + 1792u;
+}
+
+void
+grostl256_gf8_node_build_witness(const uint8_t iv[64], const uint8_t block[64],
+                                 uint8_t *inv_out)
+{
+    uint8_t h[STATE_BYTES_256];
+    memcpy(h, iv, STATE_BYTES_256);
+
+    compress_bytes_capture(h, block, COLS_256, ROUNDS_256, SHIFT_P512,
+                           SHIFT_Q512, &inv_out);
+    output_transform_bytes_capture(h, COLS_256, ROUNDS_256, SHIFT_P512,
+                                   &inv_out);
+
+    voleith_secure_zero(h, sizeof(h));
+}
+
+void
+grostl512_gf8_node_build_witness(const uint8_t iv[128],
+                                 const uint8_t block[128], uint8_t *inv_out)
+{
+    uint8_t h[STATE_BYTES_512];
+    memcpy(h, iv, STATE_BYTES_512);
+
+    compress_bytes_capture(h, block, COLS_512, ROUNDS_512, SHIFT_P1024,
+                           SHIFT_Q1024, &inv_out);
+    output_transform_bytes_capture(h, COLS_512, ROUNDS_512, SHIFT_P1024,
+                                   &inv_out);
+
+    voleith_secure_zero(h, sizeof(h));
 }
