@@ -6,7 +6,7 @@
  *
  * Single forward pass over the lowered GF(2^8) wire table (wire ids are
  * canonical emission order, so every operand precedes its consumer).  See
- * docs/CIRC_WITNESS_GEN.md for the design; the per-wire rules are 3.2, the
+ * the witness-generation design; the per-wire rules are 3.2, the
  * external/internal partition and INV fill are 4.
  */
 

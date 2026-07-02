@@ -40,6 +40,7 @@
  */
 
 #include "gf8_prover.h"
+#include "gf8_prover_internal.h"
 #include "gf8_circuit.h"
 #include "../core/field.h"
 #include "../core/util.h"
@@ -290,12 +291,12 @@ voleith_gf8_qs_ellhat(const voleith_gf8_circuit_t *circuit, unsigned int lambda)
     return ell + (3u * lambda + UNIVERSAL_HASH_B_BITS + 7u) / 8u;
 }
 
-int
-voleith_gf8_qs_prove(const voleith_gf8_circuit_t *circuit,
-                     const uint8_t *witness, const uint8_t *instance,
-                     unsigned int lambda, const uint8_t *u, const uint8_t **V,
-                     const uint8_t *chall_2, uint8_t *d_out, uint8_t *a0_tilde,
-                     uint8_t *a1_tilde, uint8_t *a2_tilde)
+static int
+gf8_qs_prove_impl(const voleith_gf8_circuit_t *circuit, const uint8_t *witness,
+                  const uint8_t *instance, unsigned int lambda,
+                  const uint8_t *u, const uint8_t **V, const uint8_t *chall_2,
+                  uint8_t *d_out, uint8_t *a0_tilde, uint8_t *a1_tilde,
+                  uint8_t *a2_tilde, int reject_invalid)
 {
     if (!circuit || !witness || !u || !V || !chall_2 || !d_out || !a0_tilde ||
         !a1_tilde || !a2_tilde)
@@ -329,8 +330,8 @@ voleith_gf8_qs_prove(const voleith_gf8_circuit_t *circuit,
     if (!wire_vals)
         goto oom;
 
-    /* bit_tags: 8 GF(2^λ) elements per wire */
-    bit_tags = calloc(n_wires * 8 * nb, 1);
+    /* bit_tags: 8 GF(2^λ) elements per wire (two-arg calloc: overflow-checked) */
+    bit_tags = calloc(n_wires, (size_t)8 * nb);
     if (!bit_tags)
         goto oom;
 
@@ -352,8 +353,12 @@ voleith_gf8_qs_prove(const voleith_gf8_circuit_t *circuit,
     /* ------------------------------------------------------------------
      * Step 1: Evaluate the circuit to get wire_vals[w] for all wires.
      * ------------------------------------------------------------------ */
-    if (voleith_gf8_circuit_eval(circuit, witness, instance, wire_vals) != 1)
-        goto err;
+    {
+        int ev =
+            voleith_gf8_circuit_eval(circuit, witness, instance, wire_vals);
+        if (ev < 0 || (reject_invalid && ev != 1))
+            goto err;
+    }
 
     /* ------------------------------------------------------------------
      * Step 2: Propagate bit-tags through the circuit in topological order.
@@ -666,9 +671,32 @@ err:
 }
 
 int
-voleith_gf8_qs_compute_d(const voleith_gf8_circuit_t *circuit,
-                         const uint8_t *witness, const uint8_t *instance,
-                         const uint8_t *u, uint8_t *d_out)
+voleith_gf8_qs_prove(const voleith_gf8_circuit_t *circuit,
+                     const uint8_t *witness, const uint8_t *instance,
+                     unsigned int lambda, const uint8_t *u, const uint8_t **V,
+                     const uint8_t *chall_2, uint8_t *d_out, uint8_t *a0_tilde,
+                     uint8_t *a1_tilde, uint8_t *a2_tilde)
+{
+    return gf8_qs_prove_impl(circuit, witness, instance, lambda, u, V, chall_2,
+                             d_out, a0_tilde, a1_tilde, a2_tilde, 1);
+}
+
+int
+voleith_gf8_qs_prove_unchecked(const voleith_gf8_circuit_t *circuit,
+                               const uint8_t *witness, const uint8_t *instance,
+                               unsigned int lambda, const uint8_t *u,
+                               const uint8_t **V, const uint8_t *chall_2,
+                               uint8_t *d_out, uint8_t *a0_tilde,
+                               uint8_t *a1_tilde, uint8_t *a2_tilde)
+{
+    return gf8_qs_prove_impl(circuit, witness, instance, lambda, u, V, chall_2,
+                             d_out, a0_tilde, a1_tilde, a2_tilde, 0);
+}
+
+static int
+gf8_qs_compute_d_impl(const voleith_gf8_circuit_t *circuit,
+                      const uint8_t *witness, const uint8_t *instance,
+                      const uint8_t *u, uint8_t *d_out, int reject_invalid)
 {
     if (!circuit || !witness || !u || !d_out)
         return -1;
@@ -687,13 +715,20 @@ voleith_gf8_qs_compute_d(const voleith_gf8_circuit_t *circuit,
         return -1;
 
     /* Reject invalid witnesses: circuit_eval returns 1 = all constraints
-     * satisfied, 0 = some constraint violated, -1 = error. */
-    if (voleith_gf8_circuit_eval(circuit, witness, instance, wire_vals) != 1) {
-        /* G-3: wire_vals may already hold partial values from
-         * voleith_gf8_circuit_eval before it returned non-1. */
-        voleith_secure_zero(wire_vals, n_wires);
-        free(wire_vals);
-        return -1;
+     * satisfied, 0 = some constraint violated, -1 = error.  The unchecked
+     * test seam (reject_invalid == 0) proceeds on 0 so a forged witness
+     * can be carried through to the verifier; structural errors (< 0)
+     * still fail. */
+    {
+        int ev =
+            voleith_gf8_circuit_eval(circuit, witness, instance, wire_vals);
+        if (ev < 0 || (reject_invalid && ev != 1)) {
+            /* G-3: wire_vals may already hold partial values from
+             * voleith_gf8_circuit_eval before it returned non-1. */
+            voleith_secure_zero(wire_vals, n_wires);
+            free(wire_vals);
+            return -1;
+        }
     }
 
     memset(d_out, 0, ell);
@@ -716,4 +751,21 @@ voleith_gf8_qs_compute_d(const voleith_gf8_circuit_t *circuit,
     voleith_secure_zero(wire_vals, n_wires);
     free(wire_vals);
     return 0;
+}
+
+int
+voleith_gf8_qs_compute_d(const voleith_gf8_circuit_t *circuit,
+                         const uint8_t *witness, const uint8_t *instance,
+                         const uint8_t *u, uint8_t *d_out)
+{
+    return gf8_qs_compute_d_impl(circuit, witness, instance, u, d_out, 1);
+}
+
+int
+voleith_gf8_qs_compute_d_unchecked(const voleith_gf8_circuit_t *circuit,
+                                   const uint8_t *witness,
+                                   const uint8_t *instance, const uint8_t *u,
+                                   uint8_t *d_out)
+{
+    return gf8_qs_compute_d_impl(circuit, witness, instance, u, d_out, 0);
 }

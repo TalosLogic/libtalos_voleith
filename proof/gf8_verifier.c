@@ -49,7 +49,7 @@ static uint8_t *
 gf8v_transpose_matrix(const uint8_t **V, unsigned int lambda, unsigned int nb,
                       size_t n_cols)
 {
-    uint8_t *Q_T = calloc(n_cols * nb, 1);
+    uint8_t *Q_T = calloc(n_cols, nb); /* two-arg form: overflow-checked */
     if (!Q_T)
         return NULL;
     size_t row_bytes = (n_cols + 7) / 8;
@@ -243,11 +243,61 @@ voleith_gf8_qs_verify(const voleith_gf8_circuit_t *circuit,
     uint8_t *bit_keys = NULL; /* n_wires * 8 * nb bytes */
     uint8_t *Q_T = NULL;
 
-    bit_keys = calloc(n_wires * 8 * nb, 1);
+    /*
+     * H-3: validate every wire / constraint reference and guard the
+     * allocation-size arithmetic before touching the heap.  The proof
+     * layer runs voleith_gf8_circuit_validate upstream, but this
+     * primitive must stay memory-safe on its own - no OOB read of
+     * bit_keys, no size_t wrap on a 32-bit target - when handed a
+     * malformed circuit directly.  calloc(nmemb, size) is required to
+     * detect the product overflow and return NULL, so the per-wire
+     * 8*nb byte stride is passed as the element size.
+     */
+    for (size_t w = 0; w < n_wires; w++) {
+        const gf8_wire_entry_t *e = &wires[w];
+        switch (e->kind) {
+        case GF8_WIRE_XOR:
+        case GF8_WIRE_MUL:
+            if (e->a >= n_wires || e->b >= n_wires)
+                return -1;
+            break;
+        case GF8_WIRE_XOR_CONST:
+        case GF8_WIRE_LINEAR_MAP:
+        case GF8_WIRE_SQUARE:
+            if (e->a >= n_wires)
+                return -1;
+            break;
+        default:
+            break;
+        }
+    }
+    for (size_t ci = 0; ci < n_constraints; ci++) {
+        const gf8_constraint_entry_t *c = &constraints[ci];
+        switch (c->kind) {
+        case GF8_CONSTRAINT_PRODUCT:
+            if (c->a >= n_wires || c->b >= n_wires || c->c >= n_wires)
+                return -1;
+            break;
+        case GF8_CONSTRAINT_EQUAL:
+            if (c->a >= n_wires || c->b >= n_wires)
+                return -1;
+            break;
+        case GF8_CONSTRAINT_ZERO:
+            if (c->a >= n_wires)
+                return -1;
+            break;
+        }
+    }
+
+    /* ell * 8 must not wrap before it feeds the Q_T column count. */
+    if (ell > (SIZE_MAX - 2u * (size_t)lambda) / 8u)
+        return -1;
+    size_t n_bit_cols = ell * 8u + 2u * (size_t)lambda;
+
+    bit_keys = calloc(n_wires, (size_t)8 * nb);
     if (!bit_keys)
         goto oom;
 
-    size_t n_bit_cols = ell * 8 + 2 * (size_t)lambda;
     Q_T = gf8v_transpose_matrix(Q, lambda, nb, n_bit_cols);
     if (!Q_T)
         goto oom;

@@ -8,7 +8,7 @@
  * Under the W8.4 skip a registered backend is AUTHORITATIVE: the generic
  * forward pass no longer recomputes the inverse for a dispatched slot, so a
  * WRONG backend produces a wrong witness.  The fail-closed guarantee
- * (docs/CIRC_WITNESS_GEN.md SECTION 7) is that a wrong backend can only yield
+ * (the witness-generation design SECTION 7) is that a wrong backend can only yield
  * an INVALID proof, never a verifier accept:
  *
  *   1. With SELF_CHECK, witness_gen rejects the corrupted witness at gen time.

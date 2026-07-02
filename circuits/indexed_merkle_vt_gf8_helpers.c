@@ -6,7 +6,7 @@
  * indexed Merkle trees driven by voleith_node_hash_vt.
  *
  * See indexed_merkle_vt_gf8_helpers.h for the public contract and
- * docs/RSV1_IMPLEMENTATION_PLAN.md T5b for the use case driving this
+ * the RS-V1 implementation plan T5b for the use case driving this
  * module.
  */
 

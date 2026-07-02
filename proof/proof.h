@@ -64,7 +64,7 @@ typedef enum {
 
 typedef enum {
     VOLEITH_BAVC_STANDARD = 0,  /* default; FAEST v2.0 GGM tree */
-    VOLEITH_BAVC_HALF_TREE = 1, /* correlated GGM (HALF_TREE_IMPL_PLAN.md) */
+    VOLEITH_BAVC_HALF_TREE = 1, /* correlated GGM (the half-tree implementation plan) */
 } voleith_bavc_kind_t;
 
 typedef enum {
@@ -395,6 +395,12 @@ size_t voleith_commit_blob_size(const voleith_params_t *params,
 
 /*
  * Size of chall_1 in bytes: 5*(lambda/8) + 8.
+ *
+ * Single source of truth for the chall_1 length.  The two-phase respond
+ * functions read EXACTLY this many bytes from the caller-supplied chall_1
+ * pointer and cannot validate its length (a raw pointer carries none), so
+ * the caller MUST size the buffer with this helper; a shorter buffer is an
+ * out-of-bounds read.
  */
 static inline size_t
 voleith_chall1_bytes(unsigned int lambda)
@@ -423,7 +429,9 @@ int voleith_prove_commit(voleith_prover_commit_t **ctx_out,
  * Phase 2 (Prove): Complete the proof given the external Fiat-Shamir challenge.
  *
  * chall_1 must be voleith_chall1_bytes(params->lambda) bytes, derived from
- * the shared transcript (which must include the commitment blob).
+ * the shared transcript (which must include the commitment blob).  This
+ * function reads exactly that many bytes and does not check the length;
+ * a shorter buffer is an out-of-bounds read (caller's responsibility).
  * witness and instance must be the same as passed to voleith_prove_commit().
  *
  * On success, proof_out->data is malloc'd; caller must voleith_proof_free() it.
@@ -461,7 +469,9 @@ int voleith_verify_reconstruct(voleith_verifier_reconstruct_t **ctx_out,
 /*
  * Phase 2 (Verify): Complete verification given the external Fiat-Shamir challenge.
  *
- * chall_1 must be voleith_chall1_bytes(params->lambda) bytes.
+ * chall_1 must be voleith_chall1_bytes(params->lambda) bytes; this function
+ * reads exactly that many bytes and does not check the length, so a shorter
+ * buffer is an out-of-bounds read (caller's responsibility).
  * instance must be the same as used to prove.
  *
  * Call voleith_verifier_reconstruct_free(ctx) after this returns.

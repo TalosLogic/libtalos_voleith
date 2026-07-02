@@ -181,11 +181,19 @@ main(void)
      * Edit this cfg + signer indices to swap node hash, ring shape,
      * revocation depth, or signing members.  Everything downstream
      * derives from these.
+     *
+     * The node hash MUST be variable-leaf here: a revocation IMT record is
+     * value || next_value || next_index = 2*node_bytes + 8 bytes, which
+     * exceeds a single compression block, so a fixed-input vt (hirose_fixed32,
+     * grostl*_fixed) would reject it.  Variable-leaf options: Hirose (2^128,
+     * default), the full-hash Grostl vts (grostl256 2^128, grostl512 2^256),
+     * or AES-DM / AES-CMAC (2^64).
      */
     voleith_rs_membership_config_t cfg = {
-        .tree_hash = &voleith_node_hash_hirose_fixed32,
+        .tree_hash = &voleith_node_hash_hirose,
         .owf_hash = NULL,
-        .sk_bytes = 32, /* matches hirose_fixed32 node_bytes */
+        .sk_bytes =
+            32, /* Hirose leaf takes any sk width; 32 = 256-bit secret */
         .depth_m = 5,
         .depth_r = 5,
     };

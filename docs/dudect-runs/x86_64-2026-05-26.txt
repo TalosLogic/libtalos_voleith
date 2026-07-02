@@ -1,6 +1,7 @@
 ================================================================
 voleith dudect timing-validation evidence trail
 Architecture: x86_64
+Host:         Ubuntu 22.04 / gcc
 Date:         2026-05-26 (initial entries; updated as testing continues)
 ================================================================
 

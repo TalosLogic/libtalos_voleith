@@ -2,15 +2,15 @@
  * Copyright (c) 2026 Jason Crawford
  * SPDX-License-Identifier: AGPL-3.0-only
  *
- * ring_sig_v1_gf8_circuit.c - secret-dir Merkle membership circuit
+ * rs_membership_gf8_circuit.c - secret-dir Merkle membership circuit
  * builder.
  *
  * Implements voleith_rs_membership_build_circuit per the contract in
- * ring_sig_v1_gf8_circuit.h.  See docs/RSV1_DESIGN.md §4.1 (V1
+ * rs_membership_gf8_circuit.h.  See docs/RSV1_DESIGN.md §4.1 (V1
  * baseline) and docs/RING_SIGNATURE_DESIGN.md (variant matrix).
  */
 
-#include "ring_sig_v1_gf8_circuit.h"
+#include "rs_membership_gf8_circuit.h"
 
 #include "indexed_merkle_vt_gf8_circuit.h"
 #include "merkle_vt_gf8_circuit.h"

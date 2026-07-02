@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 #
 # Run the freeze tool twice and assert byte-identical output (D7
-# regeneration determinism, SHIPSHAPE_IMPLEMENTATION_PLAN.md W2.1).
+# regeneration determinism, the implementation plan W2.1).
 # Invoked as: cmake -DTOOL=<path> -P determinism_check.cmake
 
 execute_process(COMMAND ${TOOL} OUTPUT_VARIABLE out1 RESULT_VARIABLE r1)

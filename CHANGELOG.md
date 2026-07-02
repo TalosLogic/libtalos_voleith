@@ -5,6 +5,102 @@ All notable changes to libtalos_voleith are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] 2026-07-02
+
+Composable ring signatures (V2/V3/V4). One `voleith_rs_*` superset config
+where the linkable nullifier, attribute predicates, and claimable commitment
+are independently-enableable modules over the shared membership core. V1
+(`voleith_rsv1_*`, `"VRS1"`) stays frozen.
+
+### Added
+
+- `proof/rs_gf8.{c,h}`: composable `voleith_rs_config_t` (embeds the V1
+  membership config + V2 nullifier/spent-set, V3 attribute schema, V4
+  commitment), module bitmap, validator, and the composable cfg-fingerprint
+  (`"VOLEitH-RSc-cf"` domain tag).
+- `circuits/rs_gf8_circuit.{c,h}`: `voleith_rs_build_circuit` superset builder
+  emitting each enabled module in canonical wire order; `voleith_rs_layout_t`.
+- `circuits/rs_leaf_gf8_circuit.{c,h}`: leaf = OWF(sk || attributes).
+- V2 nullifier: in-circuit `T = AES-CMAC(sk, scope)`; optional spent-set IMT
+  non-membership on `T`. V2.LINK helpers `voleith_rs_nullifier_equal` /
+  `voleith_rs_nullifier`.
+- V2 nullifier width tracks the tree's collision-resistance strength
+  (`voleith_rs_nullifier_bytes`): 16-byte AES-CMAC for <= 128-bit-CR trees,
+  32-byte SP 800-108 KDF-CTR-CMAC (L = 256) for 256-bit-CR trees, so the
+  nullifier is never the weakest link (RS-3).
+- V3 attributes: per-field `EQ` / `RANGE` predicates (public per-signature
+  bounds) plus a `custom_predicate` escape hatch.
+- V4 commitment: claimable `C = H(id || rand)`; `voleith_rs_claim_produce` /
+  `voleith_rs_claim_verify`.
+- Composed Fiat-Shamir seed (`voleith_rs_compute_fs_seed`, version-tagged
+  module-bitmap absorb) and sign/verify (`voleith_rs_sign` / `_verify`).
+- `"VRSC"` serialization envelope (`voleith_rs_sig_pack` / `_unpack`, 41-byte
+  header binding cfg + params fingerprints).
+- Four examples: `example_rs_{v2_linkable,v3_attribute,v4_claimable,composite}_gf8`.
+- `voleith_node_hash_vt.leaf_block_bytes`: single-compression leaf-preimage
+  capacity, so fixed-input OWF vts carry sk || attributes up to the block
+  boundary (hirose-fixed32 = 32, grostl256_fixed = 64, grostl512_fixed = 128).
+- Docs: `docs/RING_SIGNATURES_DESIGN.md` (RSv1 + composable V2/V3/V4 design).
+- `tools/gen_vole_hash_kats.py`: independent VOLEHash KAT generator derived from
+  FAEST v2.0 Fig 4.4; reproduces the existing faest-ref vectors plus nine new
+  boundary-case vectors (ell = 8 / λ / 1000) for λ = 128/192/256.
+- `test_assert_product_forgery` plus a test-only prover seam
+  (`proof/gf8_prover_internal.h`, `*_unchecked`) that drives the verifier with
+  an inconsistent witness, regression-pinning the `assert_product`
+  `embed(val_c)` soundness invariant (S-6).
+- Docs: DESIGN.md security sections expanded (constant-time compiler boundary,
+  legacy-verify trade-off, vc-params bounds, GF(2^8)-verifier defense-in-depth,
+  assert_product forgery test).
+- `test_rs_revoked`: dedicated revocation-branch negative (non-revoked signer
+  accepted; tampered revocation root, wrong adjacent record, and a revoked
+  member rejected at lookup), closing the optional gap noted in RSV234_ASSESSMENT.
+- `VOLEITH_SANITIZE` CMake option: build the library, tests, and examples with
+  AddressSanitizer + UndefinedBehaviorSanitizer (GCC or Clang); see README
+  "Sanitizer builds".
+
+### Changed
+
+- Two-phase API: `chall_1` length single-sourced through `voleith_chall1_bytes()`
+  (was a hardcoded `5*nb+8` in eight call sites); the respond-function headers
+  now state the exact-length / out-of-bounds-read contract (H-5).
+- dudect harness: x86_64 timer now issues `_mm_lfence()` after `__rdtscp()`,
+  matching the aarch64 ISB serialisation and removing a sub-cycle measurement
+  bias that produced marginal `byte_combine_192/256` false positives on
+  uncontrolled hosts; documented the quiesced-host requirement for
+  release-quality x86_64 verdicts.
+
+### Security
+
+- (High): fixed-input node-hash leaves (`hirose_fixed32`,
+  `grostl256_fixed`, `grostl512_fixed`; present since their respective
+  releases, the last in 1.7.0) silently consumed only their single-compression
+  block, dropping any higher bytes of the preimage. For an indexed-Merkle
+  record (`value || next_value || next_index`, value = node_bytes) this left
+  `next_value` unbound by the leaf hash, so a prover could substitute it to
+  forge a non-membership proof (non-revocation / non-spent). Reachable in
+  released configurations: `example_ring_sig_v1_revocable_gf8` shipped with
+  `hirose_fixed32` over a revocation IMT. Fixed: `leaf_hash` /
+  `leaf_build_witness` now return -1 over capacity (`hirose_fixed32` 32,
+  `grostl256_fixed` 64, `grostl512_fixed` 128) instead of truncating;
+  wide-record IMTs require a variable-leaf vt, and the revocable example
+  switched to variable-leaf Hirose.
+- (Clean-room): reimplemented `proof/vole_hash.c` (VOLEHash) from FAEST v2.0
+  Figure 4.4, removing a labeled port of MIT `faest-ref/universal_hashing.c`
+  that violated the clean-room-only rule. No wire-format change (S-1).
+- (Hardening): the GF(2^8) QuickSilver verifier now bounds every wire /
+  constraint reference and sizes its key buffers with the overflow-checked
+  two-argument `calloc`, staying memory-safe on malformed circuits and 32-bit
+  size overflow even if the boundary validator is bypassed (H-3).
+- (Hardening): `voleith_vc_params_init` rejects `w_grind` outside `[0, λ)` and
+  per-vector depth `k > VOLEITH_MAX_K`, mirroring `voleith_params_validate`, so
+  direct callers cannot reach a negative shift or oversized allocation (S-3).
+- (Portability): `voleith_secure_zero` uses `memset_s` on macOS (which lacks
+  `explicit_bzero`) instead of degrading to the volatile-loop fallback (H-1).
+- Documented `VOLEITH_LEGACY_VERIFY` as security-relevant (the legacy verify
+  path skips header circuit/params identity binding) and the GCC/Clang-only
+  scope of constant-time field arithmetic, in the README, DESIGN.md, and the
+  CMake option help string (H-2, H-4).
+
 ## [1.7.0] 2026-06-25
 
 ### Added

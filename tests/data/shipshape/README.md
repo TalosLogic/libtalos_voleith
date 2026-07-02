@@ -1,9 +1,9 @@
 # Shipshape example corpus
 
-Hand-written `.ship` example files (W7.1 of
-`docs/SHIPSHAPE_IMPLEMENTATION_PLAN.md`), shipped as the structural
-compositions the empty v1 bundled stdlib set pushes into user space (ISA
-design §4). `tests/test_shipshape_examples.c` parses every file here; the
+Hand-written `.ship` example files, shipped as the structural compositions the
+empty v1 bundled stdlib set pushes into user space (see the Shipshape spec,
+`docs/specs/SHIPSHAPE_SPEC.md`). `tests/test_shipshape_examples.c` parses every
+file here; the
 end-to-end parse / witness / prove / verify of one of them is the W7.2
 example program.
 

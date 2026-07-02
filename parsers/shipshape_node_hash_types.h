@@ -9,8 +9,8 @@
  * Adding a new hash family requires a new id at the end of the table and
  * a matching VOLEITH_SHIPSHAPE_NHT_* macro below.
  *
- * See docs/private/SHIPSHAPE_CRYPTO_V2_DESIGN.md §2 for the design
- * rationale and docs/private/SHIPSHAPE_CRYPTO_V2_SECRETDIR_IMPL_PLAN.md
+ * See the crypto-v2 design §2 for the design
+ * rationale and the crypto-v2 implementation plan
  * MR1 for the implementation plan this file satisfies.
  */
 

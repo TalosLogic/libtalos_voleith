@@ -4,14 +4,14 @@
  *
  * test_shipshape_witness_proof.c - prove / verify round-trip for parsed
  * Shipshape circuits with generated witnesses (W6.3 of
- * docs/SHIPSHAPE_IMPLEMENTATION_PLAN.md; docs/CIRC_WITNESS_GEN.md §9).
+ * the implementation plan; the witness-generation design §9).
  *
  * Closes the loop: a `.ship` file is parsed (W3), its full witness is
  * generated from the external input (W6.2), and the parsed circuit plus the
  * generated witness go through voleith_gf8_prove_v2 / voleith_gf8_verify_v2.
  * A valid witness proves and verifies; a tampered proof is rejected; a wrong
  * witness is rejected at prove time; a wrong instance is rejected at verify
- * time (the fail-closed property of ISA §1.5 / CIRC_WITNESS_GEN.md §7).
+ * time (the fail-closed property of ISA §1.5).
  *
  * All circuits are deliberately tiny (ell = 2) so proving stays fast.
  */

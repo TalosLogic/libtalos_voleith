@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  *
  * test_shipshape_adversarial.c - Adversarial regression corpus for the
- * Shipshape (.ship) parser (W4.3 of docs/SHIPSHAPE_IMPLEMENTATION_PLAN.md;
+ * Shipshape (.ship) parser (W4.3 of the implementation plan;
  * ISA design 8.4 item 12).
  *
  * Deterministic ctest counterpart to the libFuzzer harness (fuzz/): every

@@ -10,7 +10,7 @@
  * a REAL satisfiable depth-2 tree.  Under the W8.4 interleaved skip a registered
  * backend is AUTHORITATIVE: the generic forward pass no longer recomputes the
  * inverse for a dispatched slot, so a WRONG construction backend produces a
- * wrong witness.  The fail-closed guarantee (docs/CIRC_WITNESS_GEN.md §7.1, §7.5)
+ * wrong witness.  The fail-closed guarantee (the witness-generation design §7.1, §7.5)
  * is that a wrong backend can only yield an INVALID proof, never a verifier
  * accept:
  *

@@ -6,7 +6,7 @@
  *
  * Covers W3.1 (entry-point checks), W3.2 (the lexer), W3.3 (the header),
  * and W3.4 (declarations, the wire table, types) of
- * docs/SHIPSHAPE_IMPLEMENTATION_PLAN.md.  The lexer groups reach the
+ * the implementation plan.  The lexer groups reach the
  * tokenizer directly through parsers/shipshape_internal.h; the declaration
  * groups drive the public parse_buffer entry point and inspect the built
  * circuit and the file-order declaration table.
@@ -1449,7 +1449,7 @@ test_registry_table(void)
     int ok;
 
     /* crypto-v1 is thirteen entries, frozen and live in lockstep
-     * (SHIPSHAPE_SPEC.md 7.2; canonical order, same FQN / kind / bounds). */
+     * (the Shipshape spec 7.2; canonical order, same FQN / kind / bounds). */
     ok = (n == 13) && (voleith_shipshape_registry_descriptor_count() == n);
     for (size_t i = 0; ok && i < n; i++) {
         const char *fqn = NULL;

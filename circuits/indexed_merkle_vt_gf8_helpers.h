@@ -30,7 +30,7 @@
  * is found among the records' values (member, not non-member) or when
  * no record straddles `target`.
  *
- * See docs/RSV1_IMPLEMENTATION_PLAN.md T5b for the use case driving
+ * See the RS-V1 implementation plan T5b for the use case driving
  * this module.
  */
 

@@ -491,6 +491,48 @@ test_path_e2e(const voleith_node_hash_vt *h, const char *label)
     voleith_gf8_circuit_free(c);
 }
 
+/* A leaf preimage wider than the single-compression capacity
+ * (leaf_block_bytes = 2*node_bytes: 64 for grostl256_fixed, 128 for
+ * grostl512_fixed) must be rejected (-1), not clamped.  Exactly the
+ * capacity succeeds. */
+static void
+test_leaf_rejects_oversize(const voleith_node_hash_vt *h, const char *label)
+{
+    size_t cap = h->leaf_block_bytes;
+    uint8_t data[256];
+    uint8_t out[64];
+    uint8_t *inv = calloc(h->leaf_invin_bytes(cap), 1);
+    char name[96];
+
+    for (size_t i = 0; i < sizeof(data); i++)
+        data[i] = (uint8_t)(0x20 + i);
+
+    snprintf(name, sizeof(name), "%s leaf_hash: %zu (cap) bytes accepted",
+             label, cap);
+    TEST(name);
+    if (h->leaf_hash(data, cap, out) == 0)
+        PASS();
+    else
+        FAIL("expected 0");
+
+    snprintf(name, sizeof(name), "%s leaf_hash: cap+1 bytes rejected", label);
+    TEST(name);
+    if (h->leaf_hash(data, cap + 1, out) == -1)
+        PASS();
+    else
+        FAIL("expected -1");
+
+    snprintf(name, sizeof(name), "%s leaf_build_witness: cap+1 bytes rejected",
+             label);
+    TEST(name);
+    if (h->leaf_build_witness(data, cap + 1, inv) == -1)
+        PASS();
+    else
+        FAIL("expected -1");
+
+    free(inv);
+}
+
 int
 main(void)
 {
@@ -510,6 +552,12 @@ main(void)
     printf("\n  Depth-3 Merkle path: prove + verify + tamper\n");
     test_path_e2e(&voleith_node_hash_grostl256_fixed, "grostl256_fixed");
     test_path_e2e(&voleith_node_hash_grostl512_fixed, "grostl512_fixed");
+
+    printf("\n  Oversize leaf preimage rejected (not clamped)\n");
+    test_leaf_rejects_oversize(&voleith_node_hash_grostl256_fixed,
+                               "grostl256_fixed");
+    test_leaf_rejects_oversize(&voleith_node_hash_grostl512_fixed,
+                               "grostl512_fixed");
 
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

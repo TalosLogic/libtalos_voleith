@@ -7,7 +7,7 @@
  *
  * Packages the level-by-level inode walk previously inlined in test
  * fixtures and the KVAC example.  See merkle_vt_gf8_helpers.h for the
- * public contract and docs/RSV1_IMPLEMENTATION_PLAN.md T5a for the use
+ * public contract and the RS-V1 implementation plan T5a for the use
  * case driving this module.
  */
 

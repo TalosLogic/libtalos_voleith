@@ -194,7 +194,9 @@ int voleith_gf8_prove_commit(voleith_gf8_prover_commit_t **ctx_out,
 /*
  * Phase 2 (Prove): Complete the proof given the external Fiat-Shamir challenge.
  *
- * chall_1 must be voleith_chall1_bytes(params->lambda) bytes.
+ * chall_1 must be voleith_chall1_bytes(params->lambda) bytes; this function
+ * reads exactly that many bytes and does not check the length, so a shorter
+ * buffer is an out-of-bounds read (caller's responsibility).
  * witness and instance must be the same as passed to voleith_gf8_prove_commit().
  * On success, proof_out->data is malloc'd; caller must voleith_proof_free() it.
  * Returns 0 on success, -1 on error.
@@ -224,7 +226,9 @@ int voleith_gf8_verify_reconstruct(voleith_gf8_verifier_reconstruct_t **ctx_out,
 /*
  * Phase 2 (Verify): Complete verification given the external Fiat-Shamir challenge.
  *
- * chall_1 must be voleith_chall1_bytes(params->lambda) bytes.
+ * chall_1 must be voleith_chall1_bytes(params->lambda) bytes; this function
+ * reads exactly that many bytes and does not check the length, so a shorter
+ * buffer is an out-of-bounds read (caller's responsibility).
  * Returns 0 if the proof is valid, -1 if invalid.
  */
 int voleith_gf8_verify_respond(voleith_gf8_verifier_reconstruct_t *ctx,

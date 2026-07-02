@@ -166,9 +166,9 @@
 /* Library version */
 #ifndef VOLEITH_VERSION_MAJOR
 #define VOLEITH_VERSION_MAJOR 1
-#define VOLEITH_VERSION_MINOR 7
+#define VOLEITH_VERSION_MINOR 8
 #define VOLEITH_VERSION_PATCH 0
-#define VOLEITH_VERSION_STRING "1.7.0"
+#define VOLEITH_VERSION_STRING "1.8.0"
 #endif
 
 /* GF(2⁸) proof system: circuit builder and prove/verify API */
@@ -194,8 +194,10 @@
 #include "merkle_vt_gf8_helpers.h"
 #include "indexed_merkle_vt_gf8_helpers.h"
 
-/* RSv1 ring signatures */
+/* Ring signatures: membership core + composable config + RSv1 wrappers */
+#include "rs_membership_gf8.h"
+#include "rs_membership_gf8_circuit.h"
+#include "rs_gf8.h"
 #include "ring_sig_v1_gf8.h"
-#include "ring_sig_v1_gf8_circuit.h"
 
 #endif /* VOLEITH_GF8_H */

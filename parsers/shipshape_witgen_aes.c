@@ -8,7 +8,7 @@
  * Each backend wraps the matching builder in circuits/aes_gf8_circuit.h.  Those
  * builders emit inv_in bytes in the exact circuit-evaluation order the generic
  * Tier 1 evaluator (parsers/shipshape_witness.c) fills, so wrapping them yields
- * byte-identical witness output (docs/CIRC_WITNESS_GEN.md SECTION 7).  No new
+ * byte-identical witness output (the witness-generation design SECTION 7).  No new
  * AES math lives here: the builder is both the implementation and the
  * equivalence oracle.
  *

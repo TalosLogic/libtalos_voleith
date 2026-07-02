@@ -18,7 +18,7 @@
  * resulting circuit's fingerprint is the entry's frozen body hash.
  *
  * Entry order here is canonical and MUST match the frozen table order
- * (SHIPSHAPE_SPEC.md §7.2).
+ * (the Shipshape spec §7.2).
  */
 
 #include <stdlib.h>
@@ -35,7 +35,7 @@
 #include "shipshape_node_hash_types.h"
 
 /*
- * Maximum inferred length parameter, from SHIPSHAPE_SPEC.md §3.7
+ * Maximum inferred length parameter, from the Shipshape spec §3.7
  * (MAX_VECTOR_LEN = 2^20).  The parser layer owns the canonical limit
  * constant (parsers/shipshape.h); duplicated here so the frozen table
  * records the bound without a forward dependency on the parser.
@@ -162,7 +162,7 @@ inl_grostl_256(voleith_gf8_circuit_t *c, const gf8_wire_id *in, uint32_t param,
 }
 
 /* T27: identical gate sequence; only the first 27 of 32 output wires
- * are exposed (SHIPSHAPE_SPEC.md §7.3). */
+ * are exposed (the Shipshape spec §7.3). */
 static int
 inl_grostl_256_t27(voleith_gf8_circuit_t *c, const gf8_wire_id *in,
                    uint32_t param, gf8_wire_id *out)
@@ -182,7 +182,7 @@ inl_grostl_512(voleith_gf8_circuit_t *c, const gf8_wire_id *in, uint32_t param,
     return 0;
 }
 
-/* T59: first 59 of 64 output wires (SHIPSHAPE_SPEC.md §7.3). */
+/* T59: first 59 of 64 output wires (the Shipshape spec §7.3). */
 static int
 inl_grostl_512_t59(voleith_gf8_circuit_t *c, const gf8_wire_id *in,
                    uint32_t param, gf8_wire_id *out)
@@ -195,7 +195,7 @@ inl_grostl_512_t59(voleith_gf8_circuit_t *c, const gf8_wire_id *in,
 }
 
 /* ================================================================
- * Cost formulas (SHIPSHAPE_SPEC.md §7.2): blocks is the derived block
+ * Cost formulas (the Shipshape spec §7.2): blocks is the derived block
  * count, invs the INV count == witness slots the body adds.  FIXED
  * entries carry their constant invs in the descriptor instead.
  * ================================================================ */
@@ -620,7 +620,7 @@ voleith_shipshape_registry_body_hash(
  * multi-dimensional parameter grid whose body hashes are frozen by the
  * regenerated parsers/shipshape_registry_table.c.
  *
- * See docs/private/SHIPSHAPE_CRYPTO_V2_SECRETDIR_IMPL_PLAN.md MR2.
+ * See the crypto-v2 implementation plan MR2.
  * ================================================================ */
 
 /* ---- fn-pointer typedefs for the hash-parametric inliner/cost ---- */

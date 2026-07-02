@@ -20,7 +20,7 @@
  *      lines 307 and 218), so a header declaring billions of wires requests
  *      a multi-gigabyte buffer.  That is out-of-scope-by-policy for the
  *      parser (the caller must impose limits, see
- *      docs/SECURITY_REVIEW_1_5_0.md); the caller here is this harness, so it
+ *      the 1.5.0 security review); the caller here is this harness, so it
  *      caps those header dimensions.  Without the cap the fuzzer trivially
  *      finds a giant-header input and reports a spurious OOM instead of
  *      exercising the parser.

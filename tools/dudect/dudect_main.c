@@ -1,7 +1,7 @@
 /* Copyright (c) 2026 Jason Crawford
  * SPDX-License-Identifier: AGPL-3.0-only
  *
- * dudect harness entry point.  See docs/DUDECT_TIMING_VALIDATION.md
+ * dudect harness entry point.  See the dudect timing-validation design
  * for methodology and acceptance criteria.
  */
 #include "dudect_platform.h"

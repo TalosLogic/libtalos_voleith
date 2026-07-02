@@ -14,7 +14,7 @@
  * fills as it walks the leaf_circuit then the per-level inode_circuit of the
  * vt-driven circuit body, so the output is byte-identical (the equivalence
  * oracle).  The composition mirrors voleith_rs_membership_pack_witness sections
- * 4 and 5 (proof/ring_sig_v1_gf8.c) verbatim.  No new crypto math lives here:
+ * 4 and 5 (proof/rs_membership_gf8.c) verbatim.  No new crypto math lives here:
  * the vt method IS the implementation and the equivalence oracle.
  *
  * The secret-dir mux and the per-level assert_product(dir, dir, dir) booleanity

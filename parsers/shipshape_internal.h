@@ -13,8 +13,8 @@
  * parsers/shipshape.h); the shapes and names may change between releases.
  * Application code must not include this header.
  *
- * Lexical layer reference: FORMAT (docs/CIRC_FORMAT.md) 2 and 7.1; bounds
- * from ISA (docs/GF8_CIRCUIT_ISA_DESIGN.md) 5.1.
+ * Lexical layer reference: FORMAT (the format spec) 2 and 7.1; bounds
+ * from ISA (the ISA design) 5.1.
  */
 
 #ifndef VOLEITH_PARSERS_SHIPSHAPE_INTERNAL_H

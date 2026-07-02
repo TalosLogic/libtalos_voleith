@@ -21,6 +21,7 @@
  */
 
 #include "gf8_prover.h"
+#include "gf8_prover_internal.h" /* test-only unchecked prove seam (S-6) */
 #include "gf8_verifier.h"
 #include "gf8_circuit.h"
 #include "aes_gf8_circuit.h"
@@ -424,6 +425,153 @@ test_assert_product_inversion(void)
 }
 
 /* =====================================================================
+ * Test 5b: assert_product soundness invariant (embed(val_c))
+ *
+ * Pins the requirement that a PRODUCT constraint a*b = c with a claimed
+ * c != a*b is rejected.  This is the invariant behind gf8_prover.c: the
+ * PRODUCT-constraint degree-2 term uses v2 = embed(val_c) (the *claimed*
+ * product), NOT embed(val_a*val_b).  Using the actual product would make
+ * the ZK hash consistent regardless of whether c = a*b, silently
+ * breaking soundness - a documented past regression.  The honest prover
+ * also rejects such a witness at its up-front circuit_eval gate; either
+ * path must yield rejection (prove_verify != 1), so this test fails
+ * loudly if either guard is removed.
+ *
+ * Unlike test_assert_product_inversion (a composite x/x^-1 circuit), this
+ * is a single bare PRODUCT constraint, so a failure points straight at
+ * the product check.
+ * ===================================================================== */
+
+static void
+test_assert_product_soundness(void)
+{
+    uint8_t a = 0x53, b = 0xca;
+    uint8_t prod = voleith_gf8_mul(a, b);
+    uint8_t cheat = (uint8_t)(prod ^ 0x01); /* guaranteed != a*b */
+
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    gf8_wire_id wa = voleith_gf8_add_witness(c);
+    gf8_wire_id wb = voleith_gf8_add_witness(c);
+    gf8_wire_id wc = voleith_gf8_add_witness(c);
+    voleith_gf8_assert_product(c, wa, wb, wc);
+
+    /* Positive control: c = a*b verifies. */
+    uint8_t w_ok[3] = {a, b, prod};
+    check("assert_product soundness: valid c=a*b accepted (128)",
+          prove_verify(c, w_ok, 3, NULL, 0, 128, 0x5b000001u) == 1);
+
+    /* Cheat: c != a*b rejected at all three security levels. */
+    uint8_t w_bad[3] = {a, b, cheat};
+    check("assert_product soundness: c!=a*b rejected (128)",
+          prove_verify(c, w_bad, 3, NULL, 0, 128, 0x5b000002u) != 1);
+    check("assert_product soundness: c!=a*b rejected (192)",
+          prove_verify(c, w_bad, 3, NULL, 0, 192, 0x5b000003u) != 1);
+    check("assert_product soundness: c!=a*b rejected (256)",
+          prove_verify(c, w_bad, 3, NULL, 0, 256, 0x5b000004u) != 1);
+
+    voleith_gf8_circuit_free(c);
+}
+
+/* =====================================================================
+ * Test 5c: assert_product soundness by FORGERY (embed(val_c) isolation)
+ *
+ * test_assert_product_soundness above only exercises the prover's
+ * up-front circuit_eval gate: the honest prover refuses to emit a proof
+ * for c != a*b, so the verifier-side check is never reached.  This test
+ * uses the prover's unchecked test seam (gf8_prover_internal.h) to emit
+ * a proof for the inconsistent witness anyway, then confirms the
+ * VERIFIER rejects it - the reconstructed a0 diverges from the prover's
+ * committed a0 because the forced degree-2 term key[a]*key[b] cannot
+ * equal key[c] when c != a*b.  That divergence is exactly what
+ * v2 = embed(val_c) (NOT embed(val_a*val_b)) guarantees, so this test
+ * fails if the embed invariant regresses, independent of the eval gate.
+ * ===================================================================== */
+
+/* Like prove_verify, but drives the unchecked prover seam so a
+ * constraint-violating witness is carried through to the verifier.
+ * Returns 1 = verifier accepts (a0 match), 0 = verifier rejects
+ * (mismatch), -2 = setup/prove error. */
+static int
+forge_verify(voleith_gf8_circuit_t *c, const uint8_t *witness,
+             unsigned int lambda, uint32_t prng_seed)
+{
+    size_t ell = voleith_gf8_qs_ell(c);
+    size_t ellhat_bytes = voleith_gf8_qs_ellhat(c, lambda);
+    unsigned int nb = lambda / 8;
+
+    vole_state_t vs;
+    if (vole_alloc(&vs, lambda, ellhat_bytes) < 0)
+        return -2;
+
+    prng_reset(prng_seed);
+    vole_fill(&vs);
+
+    uint8_t *d = calloc(ell, 1);
+    if (!d) {
+        vole_free(&vs);
+        return -2;
+    }
+    if (voleith_gf8_qs_compute_d_unchecked(c, witness, NULL, vs.u, d) < 0) {
+        free(d);
+        vole_free(&vs);
+        return -2;
+    }
+
+    uint8_t a0[32] = {0}, a1[32] = {0}, a2[32] = {0};
+    if (voleith_gf8_qs_prove_unchecked(c, witness, NULL, lambda, vs.u,
+                                       (const uint8_t **)vs.V_rows, vs.chall_2,
+                                       d, a0, a1, a2) != 0) {
+        free(d);
+        vole_free(&vs);
+        return -2;
+    }
+
+    uint8_t a0_v[32] = {0};
+    if (voleith_gf8_qs_verify(c, NULL, lambda, (const uint8_t **)vs.Q_rows, d,
+                              vs.delta, vs.chall_2, a1, a2, a0_v) != 0) {
+        free(d);
+        vole_free(&vs);
+        return -2;
+    }
+
+    int match = (memcmp(a0, a0_v, nb) == 0) ? 1 : 0;
+    free(d);
+    vole_free(&vs);
+    return match;
+}
+
+static void
+test_assert_product_forgery(void)
+{
+    uint8_t a = 0x53, b = 0xca;
+    uint8_t prod = voleith_gf8_mul(a, b);
+    uint8_t cheat = (uint8_t)(prod ^ 0x01); /* guaranteed != a*b */
+
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    gf8_wire_id wa = voleith_gf8_add_witness(c);
+    gf8_wire_id wb = voleith_gf8_add_witness(c);
+    gf8_wire_id wc = voleith_gf8_add_witness(c);
+    voleith_gf8_assert_product(c, wa, wb, wc);
+
+    /* Control: the unchecked seam still verifies an HONEST witness. */
+    uint8_t w_ok[3] = {a, b, prod};
+    check("forgery seam: honest witness still verifies (128)",
+          forge_verify(c, w_ok, 128, 0x5c000001u) == 1);
+
+    /* Forgery: c != a*b emitted past the eval gate must be REJECTED by
+     * the verifier (a0 mismatch) at all three security levels. */
+    uint8_t w_bad[3] = {a, b, cheat};
+    check("forgery: c!=a*b rejected by verifier (128)",
+          forge_verify(c, w_bad, 128, 0x5c000002u) == 0);
+    check("forgery: c!=a*b rejected by verifier (192)",
+          forge_verify(c, w_bad, 192, 0x5c000003u) == 0);
+    check("forgery: c!=a*b rejected by verifier (256)",
+          forge_verify(c, w_bad, 256, 0x5c000004u) == 0);
+
+    voleith_gf8_circuit_free(c);
+}
+
+/* =====================================================================
  * Test 6: assert_zero constraint
  * ===================================================================== */
 
@@ -617,6 +765,8 @@ main(void)
     test_soundness();
     test_tampered_a1();
     test_assert_product_inversion();
+    test_assert_product_soundness();
+    test_assert_product_forgery();
     test_assert_zero();
     test_assert_equal();
     test_xor_const_linear_map();

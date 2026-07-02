@@ -164,16 +164,19 @@ for further composition.
 | Indexed Merkle non-membership | `indexed_merkle_circuit` / `indexed_merkle_gf8_nonmember_circuit` / `indexed_merkle_grostl_gf8_nonmember_circuit` | DM/CMAC or Grøstl-node; public-dir and secret-dir. |
 | Indexed Merkle non-membership (any hash, hash-agnostic) | `merkle_vt_gf8_indexed_nonmember_circuit` (+ `_secret_dir`) | Same vt coverage as the generic Merkle path. |
 | Ring signatures (RSv1) | `voleith_rsv1_sign` / `_verify`, `voleith_rs_membership_build_circuit`, `voleith_ring_sig_pack` / `_unpack` | Anonymous-member signature over a published ring with optional revocation.  Parameterised over any `voleith_node_hash_vt`; composes the OWF leaf hash, the secret-dir Merkle path, and the secret-dir indexed-Merkle non-member branch into one circuit. |
+| Ring signatures (composable V2/V3/V4) | `voleith_rs_sign` / `_verify`, `voleith_rs_build_circuit`, `voleith_rs_sig_pack` / `_unpack` | Superset of RSv1 with independently-enableable modules: V2 linkable nullifier `T = AES-CMAC(sk, scope)` (+ optional in-circuit spent-set) , V3 hidden-attribute predicates (`EQ` / `RANGE` over `OWF(sk \|\| attributes)`), V4 claimable commitment `C = H(id \|\| rand)`.  One composed Fiat-Shamir transcript with a module-bitmap domain tag; `"VRSC"` wire format.  See [`docs/RING_SIGNATURES_DESIGN.md`](docs/RING_SIGNATURES_DESIGN.md). |
 | Bounded-range assertion | `assert_in_range_gf8` | Constrains `low <= value <= high` (inclusive) over little-endian byte-vector wires; builds on the indexed-Merkle comparison routine. |
 
-For each building block, see [`docs/DESIGN.md`](docs/DESIGN.md): concrete
-AND-gate / mul-slot cost formulas, the public-dir-vs-secret-dir choice,
-the Grøstl `_T27` / `_T59` truncation rationale, the Hirose-AES-256
+For each building block, see [`docs/CIRCUIT_DESIGN.md`](docs/CIRCUIT_DESIGN.md):
+concrete AND-gate / mul-slot cost formulas, the public-dir-vs-secret-dir
+choice, the Grøstl `_T27` / `_T59` truncation rationale, the Hirose-AES-256
 construction, the `voleith_node_hash_vt` interface, the indexed-Merkle
 non-membership trust assumption (and the record-array validator that
-catches the common operational foot-guns), the RSv1 protocol and
-Fiat-Shamir message-binding construction, and worked gate-count
-examples.
+catches the common operational foot-guns), and worked gate-count examples.
+The ring-signature protocols (RSv1 and the composable V2/V3/V4 superset)
+and their Fiat-Shamir message-binding construction are in
+[`docs/RING_SIGNATURES_DESIGN.md`](docs/RING_SIGNATURES_DESIGN.md); the proof
+system and layered architecture are in [`docs/DESIGN.md`](docs/DESIGN.md).
 
 Each building block has at least one runnable example in `examples/` (see
 the Examples table below).
@@ -304,9 +307,22 @@ Merkle trust model, and the future-work roadmap.
   `voleith_const_memcmp()`, never `memcmp`.
 - **Secure zeroing.** All contexts holding key material, VOLE correlations,
   witness data, or transient cryptographic state are zeroed on free with
-  `voleith_secure_zero()` (`explicit_bzero` on POSIX, volatile loop otherwise).
+  `voleith_secure_zero()` (`explicit_bzero` on Linux/BSD, `memset_s` on macOS,
+  volatile-pointer loop otherwise).
 - **No secret-dependent branches or table lookups** in any circuit path.  The
   AES S-box uses a purely algebraic tower-field decomposition.
+- **Constant-time field arithmetic requires GCC or Clang.** The software
+  GF(2^k) multiply keeps its masked, branch-free reduction constant-time with
+  an inline-asm optimizer barrier.  The build hard-errors (`#error` in
+  `core/field_scalar.c`) on compilers that lack it (e.g. MSVC) rather than
+  silently emitting a variable-time path, so the constant-time guarantees here
+  apply to GCC/Clang targets only.
+- **`VOLEITH_LEGACY_VERIFY` is security-relevant.** This CMake option (default
+  `ON`) lets `voleith_verify` accept pre-header "legacy" proofs.  The legacy
+  path does **not** bind circuit/parameter identity (it skips the header
+  `check_identity` step), so any deployment that also accepts v1 (headered)
+  proofs should build with `-DVOLEITH_LEGACY_VERIFY=OFF` to avoid a
+  downgrade-shaped surface.
 - **Soundness-critical paths implemented exactly per spec.** The QuickSilver
   multiplication check, VOLEHash, and Fiat-Shamir transcript composition are
   not optimised in any way that deviates from the FAEST v2.0 specification.
@@ -379,6 +395,7 @@ floor.
 | `VOLEITH_CLMUL`        | ON  | Compile the x86_64 CLMUL field-multiply backend |
 | `VOLEITH_PMULL`        | ON  | Compile the aarch64 PMULL field-multiply backend |
 | `VOLEITH_BUILD_SHARED` | OFF | Build shared library (`libtalos_voleith.so`/`.dylib`) in addition to the static library |
+| `VOLEITH_SANITIZE`     | OFF | Instrument the library, tests, and examples with ASan + UBSan (dev/CI; see [Sanitizer builds](#sanitizer-builds-asan--ubsan)) |
 
 A lean build deployed to a hardware-capable host emits a one-shot stderr
 notice naming the missing backend and the configure flag that re-enables
@@ -387,6 +404,39 @@ machinery, lean-build trade-offs, the `VOLEITH_FORCE_BACKEND` testing
 override, and the constant-time guarantees across every compiled-in
 backend are documented in
 [`docs/DESIGN.md` → Runtime Hardware Dispatch](docs/DESIGN.md#runtime-hardware-dispatch-single-binary-fat-builds).
+
+### Sanitizer builds (ASan / UBSan)
+
+`-DVOLEITH_SANITIZE=ON` instruments the library, tests, and examples with
+AddressSanitizer and UndefinedBehaviorSanitizer (GCC or Clang). Use a
+**dedicated build directory** so the instrumented binaries never land in a
+release artifact:
+
+```sh
+cmake -B build-san -DVOLEITH_SANITIZE=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build-san -j$(nproc)
+
+cd build-san
+UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+ASAN_OPTIONS=abort_on_error=1:detect_leaks=1 \
+ctest --output-on-failure
+```
+
+Notes:
+
+- The build aborts on the first UBSan finding (`-fno-sanitize-recover=all`), so
+  a violation fails the offending `ctest` case instead of printing a warning the
+  run otherwise ignores.
+- Each test is registered twice (hardware dispatch and a `VOLEITH_FORCE_BACKEND`
+  software-forced `_sw` variant), so a single `ctest` run sanitizes both the
+  hardware AES-NI / CLMUL paths and the portable constant-time floor.
+- LeakSanitizer (bundled with ASan) is on by default. Some test harnesses leak
+  scratch allocations on an early failed check; for a first pass focused on
+  memory-safety and UB, add `detect_leaks=0` to `ASAN_OPTIONS`, then re-run with
+  leak detection on.
+- `VOLEITH_SANITIZE` is ignored when `VOLEITH_FUZZ=ON`, which already applies the
+  same sanitizers plus libFuzzer. Always configure into a fresh build directory;
+  reusing one with different flags picks up a stale CMake cache.
 
 ### Minimal example
 
@@ -454,6 +504,10 @@ block in both proof-system variants, plus the Bristol Fashion parser:
 | `example_hirose_leaf_gf8.c`                       | Knowledge of a 32-byte preimage under the Hirose-AES-256 fixed-32 leaf hash (the leaf side of the Hirose Merkle node vt) |
 | `example_hirose_inode_gf8.c`                      | Knowledge of children (L, R) under the Hirose-AES-256 inode hash (the inode side of the Hirose Merkle node vt) |
 | `example_bristol_aes128.c`                        | AES-128 key knowledge from a circuit loaded via the Bristol Fashion parser |
+| `example_rs_v2_linkable_gf8.c`                    | Composable ring signature with a linkable nullifier: same signer+scope links, different scope does not |
+| `example_rs_v3_attribute_gf8.c`                   | Composable ring signature proving a hidden attribute is in a public range (`age in [18,120]`) |
+| `example_rs_v4_claimable_gf8.c`                   | Composable ring signature with a claimable commitment: sign anonymously, later claim authorship |
+| `example_rs_composite_gf8.c`                      | All composable modules in one proof (membership + revocation + nullifier + spent-set + attribute + commitment) |
 
 Each example builds the circuit, generates a valid witness, produces a proof,
 verifies it, and prints circuit statistics (AND-gate count, ell, proof size)

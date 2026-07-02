@@ -10,7 +10,7 @@
 #   ./build/tools/shipshape_registry_freeze/shipshape_registry_freeze \
 #       > parsers/shipshape_registry_table.c
 #
-# docs/CIRC_STDLIB.md §3, D7; docs/SHIPSHAPE_IMPLEMENTATION_PLAN.md W2.1.
+# the stdlib spec §3, D7; the implementation plan W2.1.
 
 add_executable(shipshape_registry_freeze shipshape_registry_freeze.c)
 target_link_libraries(shipshape_registry_freeze PRIVATE voleith_core)

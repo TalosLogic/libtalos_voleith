@@ -29,12 +29,19 @@ voleith_vc_params_init(voleith_vc_params_t *params, int lambda, int tau,
         return -1;
     if (T_open <= 0)
         return -1;
-
-    params->lambda = lambda;
-    params->tau = tau;
-    params->n_leafcom = n_leafcom;
-    params->w_grind = w_grind;
-    params->T_open = T_open;
+    /*
+     * S-3: bound w_grind and the derived per-vector depth k before any
+     * shift uses them.  These mirror the guards in
+     * proof.c:voleith_params_validate so a direct caller of this
+     * exported initializer cannot trigger UB:
+     *   - w_grind < 0 or w_grind >= lambda makes effective = lambda -
+     *     w_grind non-positive (or exceeds lambda), driving k to a
+     *     non-positive value and `1 << (k - 1)` into a negative shift.
+     *   - k > VOLEITH_MAX_K overruns the v_ptrs[VOLEITH_MAX_K] stack
+     *     array in vole/convert.c and risks `1 << k` past size_t width.
+     */
+    if (w_grind < 0 || w_grind >= lambda)
+        return -1;
 
     /*
      * FAEST spec Table 5.1:
@@ -44,7 +51,16 @@ voleith_vc_params_init(voleith_vc_params_t *params, int lambda, int tau,
      *   L    = tau1 * 2^k + tau0 * 2^{k-1}
      */
     int effective = lambda - w_grind;
-    params->k = effective / tau + 1;
+    int k = effective / tau + 1;
+    if (k > VOLEITH_MAX_K)
+        return -1;
+
+    params->lambda = lambda;
+    params->tau = tau;
+    params->n_leafcom = n_leafcom;
+    params->w_grind = w_grind;
+    params->T_open = T_open;
+    params->k = k;
     params->tau1 = effective % tau;
     params->tau0 = tau - params->tau1;
 

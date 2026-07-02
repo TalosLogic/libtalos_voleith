@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  *
  * test_shipshape_crypto_v2_equiv.c - Equivalence tests for hash-parametric
- * registry entries (MR4 / 4a of SHIPSHAPE_CRYPTO_V2_SECRETDIR_IMPL_PLAN.md).
+ * registry entries (MR4 / 4a of the crypto-v2 implementation plan).
  *
  * For each tested entry + type combination, a minimal `stdlib crypto-v2`
  * `.ship` file is parsed and its lowered circuit is compared

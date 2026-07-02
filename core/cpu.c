@@ -212,6 +212,15 @@ voleith_cpu_features(void)
     return atomic_load_explicit(&g_features, memory_order_acquire);
 }
 
+/*
+ * Test / diagnostic hook: force the feature mask to a fixed value.
+ *
+ * H-6: this is a plain atomic store that races the compare-and-swap init
+ * in voleith_cpu_features().  It is NOT safe to call concurrently with the
+ * first use of voleith_cpu_features() (the two can interleave so the probe
+ * result overwrites the override or vice versa).  Intended to be called
+ * once, single-threaded, before any feature query.
+ */
 void
 voleith_cpu_features_override(unsigned mask)
 {

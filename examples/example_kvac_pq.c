@@ -5,7 +5,7 @@
  * example_kvac_pq.c - PQ side of Signal hybrid KVAC group authentication
  *
  * Implements the VOLEitH proof component of the PQ Hybrid KVAC Protocol
- * (see docs/specs/PQ_Hybrid_KVAC_Protocol_Specification.md, Section 3.4
+ * (see the PQ Hybrid KVAC protocol spec, Section 3.4
  * "Step 2: PQ Presentation").
  *
  * The prover demonstrates knowledge of (pq_key, uid) such that:

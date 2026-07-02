@@ -436,6 +436,31 @@ test_fixed32_leaf_circuit_matches_software(void)
     voleith_gf8_circuit_free(c);
 }
 
+/* A preimage wider than the 32-byte single-compression capacity must be
+ * rejected (return -1), not silently truncated.  Exactly 32 succeeds. */
+static void
+test_fixed32_leaf_rejects_oversize(void)
+{
+    uint8_t data[64];
+    uint8_t out[32];
+    uint8_t inv[1000];
+
+    for (size_t i = 0; i < sizeof(data); i++)
+        data[i] = (uint8_t)(0x20 + i);
+
+    check("fixed-32 leaf_hash: 32 bytes accepted",
+          merkle_hirose_fixed32_leaf_hash(data, 32, out) == 0);
+    check("fixed-32 leaf_hash: 33 bytes rejected",
+          merkle_hirose_fixed32_leaf_hash(data, 33, out) == -1);
+    check("fixed-32 leaf_hash: 64 bytes rejected",
+          merkle_hirose_fixed32_leaf_hash(data, 64, out) == -1);
+
+    check("fixed-32 leaf_build_witness: 32 bytes accepted",
+          merkle_hirose_gf8_fixed32_leaf_build_witness(data, 32, inv) == 0);
+    check("fixed-32 leaf_build_witness: 33 bytes rejected",
+          merkle_hirose_gf8_fixed32_leaf_build_witness(data, 33, inv) == -1);
+}
+
 static void
 test_inode_circuit_matches_software(void)
 {
@@ -675,6 +700,7 @@ main(void)
     /* Step 9.4 conformance. */
     test_invin_size_accessors();
     test_fixed32_leaf_circuit_matches_software();
+    test_fixed32_leaf_rejects_oversize();
     test_inode_circuit_matches_software();
     test_variable_leaf_circuit_matches_software();
     test_domain_separation();

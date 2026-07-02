@@ -10,8 +10,8 @@
  * This ensures the bracket carries the type name verbatim and that W8
  * dispatch can key on `region.name` without any additional lookup.
  *
- * See: docs/private/SHIPSHAPE_CRYPTO_V2_SECRETDIR_IMPL_PLAN.md MR5
- * See: docs/private/SHIPSHAPE_CRYPTO_V2_SECRETDIR_DESIGN.md §7
+ * See: the crypto-v2 implementation plan MR5
+ * See: the crypto-v2 secret-dir design §7
  */
 
 #include "shipshape.h"

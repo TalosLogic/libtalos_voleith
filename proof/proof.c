@@ -216,7 +216,7 @@ check_grinding(const uint8_t *chall_3, unsigned int lambda,
  * Validate a voleith_params_t at the public API boundary.  All fields
  * are `unsigned int`, so the relevant checks differ from the signed-int
  * checks in voleith_vc_params_init (no `>= 0` is meaningful).  See
- * docs/SECURITY_REVIEW.md X-7.
+ * the security review X-7.
  */
 int
 voleith_params_validate(const voleith_params_t *params)
@@ -573,7 +573,7 @@ voleith_prove_respond(voleith_proof_t *proof_out, voleith_prover_commit_t *ctx,
     {
         voleith_transcript_t t;
         voleith_transcript_init(&t, lambda, VOLEITH_FS_H2_2);
-        voleith_transcript_absorb(&t, chall_1, 5 * nb + 8);
+        voleith_transcript_absorb(&t, chall_1, voleith_chall1_bytes(lambda));
         voleith_transcript_absorb(&t, u_tilde, utilde_bytes);
 
         uint8_t v_tilde[32 + VOLEITH_VOLE_HASH_B];
@@ -863,7 +863,7 @@ voleith_verify_respond(voleith_verifier_reconstruct_t *ctx,
     {
         voleith_transcript_t t;
         voleith_transcript_init(&t, lambda, VOLEITH_FS_H2_2);
-        voleith_transcript_absorb(&t, chall_1, 5 * nb + 8);
+        voleith_transcript_absorb(&t, chall_1, voleith_chall1_bytes(lambda));
         voleith_transcript_absorb(&t, ctx->u_tilde_copy, utilde_bytes);
 
         uint8_t q_tilde[32 + VOLEITH_VOLE_HASH_B];
@@ -989,7 +989,7 @@ voleith_prove(voleith_proof_t *proof, const voleith_params_t *params,
         if (n_instance > 0)
             voleith_transcript_absorb(&t, inst, instance_bytes);
         voleith_transcript_absorb(&t, blob, blob_size);
-        voleith_transcript_squeeze(&t, chall_1, 5 * nb + 8);
+        voleith_transcript_squeeze(&t, chall_1, voleith_chall1_bytes(lambda));
         voleith_transcript_clear(&t);
     }
     free(blob);
@@ -1076,7 +1076,7 @@ voleith_verify(const voleith_proof_t *proof, const voleith_params_t *params,
         if (n_instance > 0)
             voleith_transcript_absorb(&t, inst, instance_bytes);
         voleith_transcript_absorb(&t, blob, blob_size);
-        voleith_transcript_squeeze(&t, chall_1, 5 * nb + 8);
+        voleith_transcript_squeeze(&t, chall_1, voleith_chall1_bytes(lambda));
         voleith_transcript_clear(&t);
     }
     free(blob);

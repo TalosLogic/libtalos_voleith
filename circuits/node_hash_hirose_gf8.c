@@ -188,9 +188,10 @@ static const uint8_t HIROSE_C_INODE[16] = {
 size_t
 merkle_hirose_gf8_fixed32_leaf_invin_bytes(size_t leaf_data_bytes)
 {
-    /* fixed-32 vt's contract: caller must pass leaf_data_bytes == 32.
-     * Returning the constant regardless makes the function a pure
-     * size accessor without a branch on the (uninspected) input. */
+    /* fixed-32 vt's contract: leaf_data_bytes in [0, 32] (the leaf is a
+     * single 32-byte / 2-iteration block; a shorter preimage is
+     * zero-padded to 32).  Cost is the 2 iterations regardless, so this
+     * is a pure size accessor with no branch on the input. */
     (void)leaf_data_bytes;
     return 2 * HIROSE_GF8_ITERATION_WITNESS_BYTES; /* 1000 */
 }
@@ -219,19 +220,29 @@ int
 merkle_hirose_fixed32_leaf_hash(const uint8_t *leaf_data,
                                 size_t leaf_data_bytes, uint8_t *out)
 {
-    /* Contract: leaf_data_bytes must be 32.  Silently consume only
-     * the first 32 bytes if the caller violates the contract; this
-     * keeps the vt's signature pure and matches the no-padding
-     * semantics of the fixed-32 vt. */
-    (void)leaf_data_bytes;
-
+    /* Preimage sk || attrs occupies the low leaf_data_bytes of the
+     * 32-byte fixed leaf; the rest is zero-padded.  At leaf_data_bytes ==
+     * 32 this is byte-identical to the V1 leaf.  Reject (do not silently
+     * truncate) a preimage wider than the single-compression capacity:
+     * a caller that overflows it (e.g. an IMT record wider than the block)
+     * must fail loudly, not lose the high bytes. */
+    size_t n = leaf_data_bytes;
+    uint8_t block[32];
     uint8_t G[16], H[16];
+
+    if (leaf_data_bytes > 32)
+        return -1;
+
+    memcpy(block, leaf_data, n);
+    memset(block + n, 0, 32 - n);
+
     memcpy(G, HIROSE_IV_LEAF + 0, 16);
     memcpy(H, HIROSE_IV_LEAF + 16, 16);
-    voleith_hirose_iteration(G, H, leaf_data + 0, HIROSE_C_LEAF_FIXED32, G, H);
-    voleith_hirose_iteration(G, H, leaf_data + 16, HIROSE_C_LEAF_FIXED32, G, H);
+    voleith_hirose_iteration(G, H, block + 0, HIROSE_C_LEAF_FIXED32, G, H);
+    voleith_hirose_iteration(G, H, block + 16, HIROSE_C_LEAF_FIXED32, G, H);
     memcpy(out + 0, G, 16);
     memcpy(out + 16, H, 16);
+    voleith_secure_zero(block, sizeof(block));
     voleith_secure_zero(G, sizeof(G));
     voleith_secure_zero(H, sizeof(H));
     return 0;
@@ -295,18 +306,30 @@ merkle_hirose_gf8_fixed32_leaf_build_witness(const uint8_t *leaf_data,
                                              size_t leaf_data_bytes,
                                              uint8_t *inv_out)
 {
-    (void)leaf_data_bytes; /* caller must pass 32 */
-
+    /* Mirror the in-circuit fixed32 leaf: low leaf_data_bytes are data,
+     * the rest zero-padded to 32.  Byte-identical at leaf_data_bytes == 32.
+     * Reject an over-capacity preimage rather than truncate (see
+     * merkle_hirose_fixed32_leaf_hash). */
+    size_t n = leaf_data_bytes;
+    uint8_t block[32];
     uint8_t G[16], H[16];
+
+    if (leaf_data_bytes > 32)
+        return -1;
+
+    memcpy(block, leaf_data, n);
+    memset(block + n, 0, 32 - n);
+
     memcpy(G, HIROSE_IV_LEAF + 0, 16);
     memcpy(H, HIROSE_IV_LEAF + 16, 16);
 
-    hirose_gf8_iteration_build_witness(G, H, leaf_data + 0,
-                                       HIROSE_C_LEAF_FIXED32, inv_out, G, H);
+    hirose_gf8_iteration_build_witness(G, H, block + 0, HIROSE_C_LEAF_FIXED32,
+                                       inv_out, G, H);
     hirose_gf8_iteration_build_witness(
-        G, H, leaf_data + 16, HIROSE_C_LEAF_FIXED32,
+        G, H, block + 16, HIROSE_C_LEAF_FIXED32,
         inv_out + HIROSE_GF8_ITERATION_WITNESS_BYTES, G, H);
 
+    voleith_secure_zero(block, sizeof(block));
     voleith_secure_zero(G, sizeof(G));
     voleith_secure_zero(H, sizeof(H));
     return 0;
@@ -379,7 +402,14 @@ merkle_hirose_gf8_fixed32_leaf_circuit(voleith_gf8_circuit_t *c,
                                        size_t leaf_data_bytes,
                                        gf8_wire_id *out_node)
 {
-    (void)leaf_data_bytes; /* caller must pass 32 */
+    /* Preimage sk || attrs occupies the low leaf_data_bytes of the
+     * 32-byte (2-iteration) fixed leaf; the rest is zero-padded.  At
+     * leaf_data_bytes == 32 no pad wire is emitted and the gate stream
+     * is byte-identical to the V1 leaf.  An over-capacity preimage is
+     * clamped here only to bound the 32-wire msg buffer; the matching
+     * leaf_hash / leaf_build_witness reject it outright, so no valid proof
+     * is ever built over a truncated leaf. */
+    size_t n = leaf_data_bytes < 32 ? leaf_data_bytes : 32;
 
     /* IV_LEAF as 32 constant wires (free). */
     gf8_wire_id G[16], H[16];
@@ -388,11 +418,21 @@ merkle_hirose_gf8_fixed32_leaf_circuit(voleith_gf8_circuit_t *c,
     for (int i = 0; i < 16; i++)
         H[i] = voleith_gf8_add_const(c, HIROSE_IV_LEAF[16 + i]);
 
-    /* 2 iterations: M0 = data[0..15], M1 = data[16..31]. */
-    hirose_gf8_iteration_circuit(c, G, H, &leaf_data[0], HIROSE_C_LEAF_FIXED32,
-                                 G, H);
-    hirose_gf8_iteration_circuit(c, G, H, &leaf_data[16], HIROSE_C_LEAF_FIXED32,
-                                 G, H);
+    /* 32-byte message: data wires, then zero-pad constants only when the
+     * preimage is short (keeps the V1 n == 32 gate stream untouched). */
+    gf8_wire_id msg[32];
+    for (size_t i = 0; i < n; i++)
+        msg[i] = leaf_data[i];
+    if (n < 32) {
+        gf8_wire_id c00 = voleith_gf8_add_const(c, 0x00);
+        for (size_t i = n; i < 32; i++)
+            msg[i] = c00;
+    }
+
+    /* 2 iterations: M0 = msg[0..15], M1 = msg[16..31]. */
+    hirose_gf8_iteration_circuit(c, G, H, &msg[0], HIROSE_C_LEAF_FIXED32, G, H);
+    hirose_gf8_iteration_circuit(c, G, H, &msg[16], HIROSE_C_LEAF_FIXED32, G,
+                                 H);
 
     for (int i = 0; i < 16; i++) {
         out_node[i] = G[i];
@@ -483,6 +523,7 @@ const voleith_node_hash_vt voleith_node_hash_hirose_fixed32 = {
     .node_bytes = 32,
     .cr_bits = 128,
     .fixed_leaf_bytes = 32,
+    .leaf_block_bytes = 32,
     .leaf_invin_bytes = merkle_hirose_gf8_fixed32_leaf_invin_bytes,
     .inode_invin_bytes = merkle_hirose_gf8_inode_invin_bytes,
     .leaf_circuit = merkle_hirose_gf8_fixed32_leaf_circuit,

@@ -13,7 +13,7 @@
  * one byte-multiply at a time.
  *
  * This component is purely a speed layer.  It is prover-side only and
- * fail-closed (docs/CIRC_WITNESS_GEN.md §7.1): a wrong backend yields an
+ * fail-closed (the witness-generation design §7.1): a wrong backend yields an
  * invalid proof, never a verifier accept.  The generic evaluator is always
  * the correct fallback.
  *
@@ -45,7 +45,7 @@
  * With no construction backend registered (the production default), these fall
  * through to the generic path exactly as before.
  *
- * Design doc: docs/CIRC_WITNESS_GEN.md §7.
+ * Design doc: the witness-generation design §7.
  */
 
 #ifndef VOLEITH_PARSERS_SHIPSHAPE_WITGEN_DISPATCH_H
@@ -74,7 +74,7 @@
  *
  * Returns 0 on success.  A nonzero return aborts witness generation: a
  * registered backend that cannot run is a build error, not a silent
- * fallthrough (docs/CIRC_WITNESS_GEN.md §7.3).
+ * fallthrough (the witness-generation design §7.3).
  */
 typedef int (*voleith_shipshape_witgen_backend_fn)(
     const voleith_shipshape_region_t *region, const uint8_t *ext,
@@ -90,7 +90,7 @@ typedef int (*voleith_shipshape_witgen_backend_fn)(
  * Returns 0 on success.  Returns a negative value if any argument is NULL,
  * if fn is NULL, or if the registry is full.
  *
- * NOTE: the spec doc (docs/CIRC_WITNESS_GEN.md §7.3) uses the constant name
+ * NOTE: the spec doc (the witness-generation design §7.3) uses the constant name
  * VOLEITH_SHIPSHAPE_BODY_HASH_BYTES; the real symbol in the codebase is
  * VOLEITH_SHIPSHAPE_REGISTRY_BODY_HASH_BYTES (shipshape_registry.h:43).
  * This implementation uses the real symbol.
@@ -204,7 +204,7 @@ voleith_shipshape_witgen_lookup(const voleith_shipshape_region_t *region);
  * Returns 0 on success.  Returns a negative value on an out-of-range input wire
  * id, a region span that overflows the witness buffer, an allocation failure,
  * or a nonzero backend return: a registered backend that cannot run is a build
- * error, not a silent fallthrough (docs/CIRC_WITNESS_GEN.md SECTION 7).
+ * error, not a silent fallthrough (the witness-generation design SECTION 7).
  */
 int voleith_shipshape_witgen_invoke_region(
     const voleith_shipshape_region_t *region,

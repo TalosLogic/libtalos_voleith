@@ -67,7 +67,7 @@
 #include "indexed_merkle_vt_gf8_helpers.h"
 #include "merkle_vt_gf8_helpers.h"
 #include "node_hash_vt.h"
-#include "ring_sig_v1_gf8_circuit.h"
+#include "rs_membership_gf8_circuit.h"
 
 #include <assert.h>
 #include <stddef.h>
@@ -377,7 +377,7 @@ test_fingerprint_kat_pin(void)
  *     5 = 0b101 -> dirs = [1, 0, 1] LSB first)
  *
  * Witness packing convention matches the wire-declaration order
- * documented in ring_sig_v1_gf8_circuit.h and exposed via the layout
+ * documented in rs_membership_gf8_circuit.h and exposed via the layout
  * struct: sk | dirs | owf_invin | per-level inode_invin.
  *
  * T4 replaces this hand-rolled packing with voleith_rs_membership_pack_witness.

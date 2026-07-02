@@ -14,8 +14,8 @@
  *
  *   ./shipshape_registry_freeze > parsers/shipshape_registry_table.c
  *
- * docs/CIRC_STDLIB.md §3 (freeze process), D2, D3, D7;
- * docs/SHIPSHAPE_IMPLEMENTATION_PLAN.md W2.1.
+ * the stdlib spec §3 (freeze process), D2, D3, D7;
+ * the implementation plan W2.1.
  */
 
 #include <stdint.h>
@@ -57,7 +57,7 @@ emit_header(void)
            "\\\n");
     printf(" *       > parsers/shipshape_registry_table.c\n");
     printf(" *\n");
-    printf(" * crypto-v1 (SHIPSHAPE_SPEC.md §7.2).\n");
+    printf(" * crypto-v1 (the Shipshape spec §7.2).\n");
     printf(" */\n\n");
     printf("#include \"shipshape_registry.h\"\n\n");
     /* This is generated output, not hand-written source: keep clang-format

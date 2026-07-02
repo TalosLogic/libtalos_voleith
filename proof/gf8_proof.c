@@ -435,7 +435,7 @@ voleith_gf8_prove_respond(voleith_proof_t *proof_out,
     {
         voleith_transcript_t t;
         voleith_transcript_init(&t, lambda, VOLEITH_FS_H2_2);
-        voleith_transcript_absorb(&t, chall_1, 5 * nb + 8);
+        voleith_transcript_absorb(&t, chall_1, voleith_chall1_bytes(lambda));
         voleith_transcript_absorb(&t, u_tilde, utilde_bytes);
 
         uint8_t v_tilde[32 + VOLEITH_VOLE_HASH_B];
@@ -736,7 +736,7 @@ voleith_gf8_verify_respond(voleith_gf8_verifier_reconstruct_t *ctx,
     {
         voleith_transcript_t t;
         voleith_transcript_init(&t, lambda, VOLEITH_FS_H2_2);
-        voleith_transcript_absorb(&t, chall_1, 5 * nb + 8);
+        voleith_transcript_absorb(&t, chall_1, voleith_chall1_bytes(lambda));
         voleith_transcript_absorb(&t, ctx->u_tilde_copy, utilde_bytes);
 
         uint8_t q_tilde[32 + VOLEITH_VOLE_HASH_B];
@@ -861,7 +861,7 @@ voleith_gf8_prove(voleith_proof_t *proof, const voleith_params_t *params,
         if (n_instance > 0)
             voleith_transcript_absorb(&t, inst, n_instance);
         voleith_transcript_absorb(&t, blob, blob_size);
-        voleith_transcript_squeeze(&t, chall_1, 5 * nb + 8);
+        voleith_transcript_squeeze(&t, chall_1, voleith_chall1_bytes(lambda));
         voleith_transcript_clear(&t);
     }
     free(blob);
@@ -948,7 +948,7 @@ voleith_gf8_verify(const voleith_proof_t *proof, const voleith_params_t *params,
         if (n_instance > 0)
             voleith_transcript_absorb(&t, inst, n_instance);
         voleith_transcript_absorb(&t, blob, blob_size);
-        voleith_transcript_squeeze(&t, chall_1, 5 * nb + 8);
+        voleith_transcript_squeeze(&t, chall_1, voleith_chall1_bytes(lambda));
         voleith_transcript_clear(&t);
     }
     free(blob);

@@ -5,7 +5,7 @@
  * test_shipshape_conformance.c - Fingerprint conformance + alias corpus for
  * the Shipshape (.ship) parser.
  *
- * Covers W3.8 of docs/SHIPSHAPE_IMPLEMENTATION_PLAN.md: the hand-curated
+ * Covers W3.8 of the implementation plan: the hand-curated
  * cross-parser corpus mandated by ISA design §5.5 (and §8.4 item 12, second
  * half).  Every input here is checked against the 16-byte canonical
  * fingerprint of the equivalent hand-built GF(2^8) circuit

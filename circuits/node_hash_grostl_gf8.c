@@ -232,93 +232,105 @@ static const uint8_t IV_INODE_512[128] = {
  * (fixed_leaf_bytes); it is zero-padded to the 2*node_bytes block.  The
  * inode block is L ‖ R, filling the block exactly.  BITS = 256 or 512;
  * NODE_BYTES = 32 or 64. */
-#define FIXED_WRAPPERS(BITS, NODE_BYTES)                                       \
-    static size_t node_hash_grostl##BITS##_fixed_leaf_invin_bytes(             \
-        size_t leaf_data_bytes)                                                \
-    {                                                                          \
-        (void)leaf_data_bytes; /* fixed width: contract requires NODE_BYTES */ \
-        return grostl##BITS##_gf8_node_invin_bytes();                          \
-    }                                                                          \
-    static size_t node_hash_grostl##BITS##_fixed_inode_invin_bytes(void)       \
-    {                                                                          \
-        return grostl##BITS##_gf8_node_invin_bytes();                          \
-    }                                                                          \
-    static void node_hash_grostl##BITS##_fixed_leaf_circuit(                   \
-        voleith_gf8_circuit_t *c, const gf8_wire_id *leaf_data,                \
-        size_t leaf_data_bytes, gf8_wire_id *out_node)                         \
-    {                                                                          \
-        (void)leaf_data_bytes;                                                 \
-        gf8_wire_id block[2 * (NODE_BYTES)];                                   \
-        for (size_t i = 0; i < (NODE_BYTES); i++)                              \
-            block[i] = leaf_data[i];                                           \
-        for (size_t i = (NODE_BYTES); i < 2 * (NODE_BYTES); i++)               \
-            block[i] = voleith_gf8_add_const(c, 0x00);                         \
-        grostl##BITS##_gf8_node_circuit(c, IV_LEAF_##BITS, block, out_node);   \
-    }                                                                          \
-    static void node_hash_grostl##BITS##_fixed_inode_circuit(                  \
-        voleith_gf8_circuit_t *c, const gf8_wire_id *left,                     \
-        const gf8_wire_id *right, gf8_wire_id *out_node)                       \
-    {                                                                          \
-        gf8_wire_id block[2 * (NODE_BYTES)];                                   \
-        for (size_t i = 0; i < (NODE_BYTES); i++)                              \
-            block[i] = left[i];                                                \
-        for (size_t i = 0; i < (NODE_BYTES); i++)                              \
-            block[(NODE_BYTES) + i] = right[i];                                \
-        grostl##BITS##_gf8_node_circuit(c, IV_INODE_##BITS, block, out_node);  \
-    }                                                                          \
-    static int node_hash_grostl##BITS##_fixed_leaf_build_witness(              \
-        const uint8_t *leaf_data, size_t leaf_data_bytes, uint8_t *inv_out)    \
-    {                                                                          \
-        (void)leaf_data_bytes;                                                 \
-        uint8_t block[2 * (NODE_BYTES)];                                       \
-        for (size_t i = 0; i < (NODE_BYTES); i++)                              \
-            block[i] = leaf_data[i];                                           \
-        for (size_t i = (NODE_BYTES); i < 2 * (NODE_BYTES); i++)               \
-            block[i] = 0x00;                                                   \
-        grostl##BITS##_gf8_node_build_witness(IV_LEAF_##BITS, block, inv_out); \
-        voleith_secure_zero(block, sizeof(block));                             \
-        return 0;                                                              \
-    }                                                                          \
-    static int node_hash_grostl##BITS##_fixed_inode_build_witness(             \
-        const uint8_t *left, const uint8_t *right, uint8_t *inv_out)           \
-    {                                                                          \
-        uint8_t block[2 * (NODE_BYTES)];                                       \
-        for (size_t i = 0; i < (NODE_BYTES); i++)                              \
-            block[i] = left[i];                                                \
-        for (size_t i = 0; i < (NODE_BYTES); i++)                              \
-            block[(NODE_BYTES) + i] = right[i];                                \
-        grostl##BITS##_gf8_node_build_witness(IV_INODE_##BITS, block,          \
-                                              inv_out);                        \
-        voleith_secure_zero(block, sizeof(block));                             \
-        return 0;                                                              \
-    }                                                                          \
-    static int node_hash_grostl##BITS##_fixed_leaf_hash(                       \
-        const uint8_t *leaf_data, size_t leaf_data_bytes, uint8_t *out)        \
-    {                                                                          \
-        (void)leaf_data_bytes;                                                 \
-        uint8_t block[2 * (NODE_BYTES)];                                       \
-        int rc;                                                                \
-        for (size_t i = 0; i < (NODE_BYTES); i++)                              \
-            block[i] = leaf_data[i];                                           \
-        for (size_t i = (NODE_BYTES); i < 2 * (NODE_BYTES); i++)               \
-            block[i] = 0x00;                                                   \
-        rc = voleith_grostl##BITS##_compress_node(IV_LEAF_##BITS, block, out); \
-        voleith_secure_zero(block, sizeof(block));                             \
-        return rc;                                                             \
-    }                                                                          \
-    static int node_hash_grostl##BITS##_fixed_inode_hash(                      \
-        const uint8_t *left, const uint8_t *right, uint8_t *out)               \
-    {                                                                          \
-        uint8_t block[2 * (NODE_BYTES)];                                       \
-        int rc;                                                                \
-        for (size_t i = 0; i < (NODE_BYTES); i++)                              \
-            block[i] = left[i];                                                \
-        for (size_t i = 0; i < (NODE_BYTES); i++)                              \
-            block[(NODE_BYTES) + i] = right[i];                                \
-        rc =                                                                   \
-            voleith_grostl##BITS##_compress_node(IV_INODE_##BITS, block, out); \
-        voleith_secure_zero(block, sizeof(block));                             \
-        return rc;                                                             \
+#define FIXED_WRAPPERS(BITS, NODE_BYTES)                                        \
+    static size_t node_hash_grostl##BITS##_fixed_leaf_invin_bytes(              \
+        size_t leaf_data_bytes)                                                 \
+    {                                                                           \
+        (void)leaf_data_bytes; /* fixed width: contract requires NODE_BYTES */  \
+        return grostl##BITS##_gf8_node_invin_bytes();                           \
+    }                                                                           \
+    static size_t node_hash_grostl##BITS##_fixed_inode_invin_bytes(void)        \
+    {                                                                           \
+        return grostl##BITS##_gf8_node_invin_bytes();                           \
+    }                                                                           \
+    static void node_hash_grostl##BITS##_fixed_leaf_circuit(                    \
+        voleith_gf8_circuit_t *c, const gf8_wire_id *leaf_data,                 \
+        size_t leaf_data_bytes, gf8_wire_id *out_node)                          \
+    {                                                                           \
+        /* Leaf preimage sk || attrs occupies the low leaf_data_bytes of      \
+         * the single-compression block; the remainder is zero-padded.  At    \
+         * leaf_data_bytes == NODE_BYTES this is byte-identical to the V1      \
+         * leaf (low half data, high half zero).  An over-capacity preimage   \
+         * is clamped here only to bound the block buffer; the matching       \
+         * leaf_hash / leaf_build_witness reject it, so no valid proof is      \
+         * built over a truncated leaf. */ \
+        gf8_wire_id block[2 * (NODE_BYTES)];                                    \
+        size_t n = leaf_data_bytes < 2 * (NODE_BYTES) ? leaf_data_bytes         \
+                                                      : 2 * (NODE_BYTES);       \
+        for (size_t i = 0; i < n; i++)                                          \
+            block[i] = leaf_data[i];                                            \
+        for (size_t i = n; i < 2 * (NODE_BYTES); i++)                           \
+            block[i] = voleith_gf8_add_const(c, 0x00);                          \
+        grostl##BITS##_gf8_node_circuit(c, IV_LEAF_##BITS, block, out_node);    \
+    }                                                                           \
+    static void node_hash_grostl##BITS##_fixed_inode_circuit(                   \
+        voleith_gf8_circuit_t *c, const gf8_wire_id *left,                      \
+        const gf8_wire_id *right, gf8_wire_id *out_node)                        \
+    {                                                                           \
+        gf8_wire_id block[2 * (NODE_BYTES)];                                    \
+        for (size_t i = 0; i < (NODE_BYTES); i++)                               \
+            block[i] = left[i];                                                 \
+        for (size_t i = 0; i < (NODE_BYTES); i++)                               \
+            block[(NODE_BYTES) + i] = right[i];                                 \
+        grostl##BITS##_gf8_node_circuit(c, IV_INODE_##BITS, block, out_node);   \
+    }                                                                           \
+    static int node_hash_grostl##BITS##_fixed_leaf_build_witness(               \
+        const uint8_t *leaf_data, size_t leaf_data_bytes, uint8_t *inv_out)     \
+    {                                                                           \
+        uint8_t block[2 * (NODE_BYTES)];                                        \
+        size_t n = leaf_data_bytes;                                             \
+        if (leaf_data_bytes > 2 * (NODE_BYTES))                                 \
+            return -1;                                                          \
+        for (size_t i = 0; i < n; i++)                                          \
+            block[i] = leaf_data[i];                                            \
+        for (size_t i = n; i < 2 * (NODE_BYTES); i++)                           \
+            block[i] = 0x00;                                                    \
+        grostl##BITS##_gf8_node_build_witness(IV_LEAF_##BITS, block, inv_out);  \
+        voleith_secure_zero(block, sizeof(block));                              \
+        return 0;                                                               \
+    }                                                                           \
+    static int node_hash_grostl##BITS##_fixed_inode_build_witness(              \
+        const uint8_t *left, const uint8_t *right, uint8_t *inv_out)            \
+    {                                                                           \
+        uint8_t block[2 * (NODE_BYTES)];                                        \
+        for (size_t i = 0; i < (NODE_BYTES); i++)                               \
+            block[i] = left[i];                                                 \
+        for (size_t i = 0; i < (NODE_BYTES); i++)                               \
+            block[(NODE_BYTES) + i] = right[i];                                 \
+        grostl##BITS##_gf8_node_build_witness(IV_INODE_##BITS, block,           \
+                                              inv_out);                         \
+        voleith_secure_zero(block, sizeof(block));                              \
+        return 0;                                                               \
+    }                                                                           \
+    static int node_hash_grostl##BITS##_fixed_leaf_hash(                        \
+        const uint8_t *leaf_data, size_t leaf_data_bytes, uint8_t *out)         \
+    {                                                                           \
+        uint8_t block[2 * (NODE_BYTES)];                                        \
+        size_t n = leaf_data_bytes;                                             \
+        int rc;                                                                 \
+        if (leaf_data_bytes > 2 * (NODE_BYTES))                                 \
+            return -1;                                                          \
+        for (size_t i = 0; i < n; i++)                                          \
+            block[i] = leaf_data[i];                                            \
+        for (size_t i = n; i < 2 * (NODE_BYTES); i++)                           \
+            block[i] = 0x00;                                                    \
+        rc = voleith_grostl##BITS##_compress_node(IV_LEAF_##BITS, block, out);  \
+        voleith_secure_zero(block, sizeof(block));                              \
+        return rc;                                                              \
+    }                                                                           \
+    static int node_hash_grostl##BITS##_fixed_inode_hash(                       \
+        const uint8_t *left, const uint8_t *right, uint8_t *out)                \
+    {                                                                           \
+        uint8_t block[2 * (NODE_BYTES)];                                        \
+        int rc;                                                                 \
+        for (size_t i = 0; i < (NODE_BYTES); i++)                               \
+            block[i] = left[i];                                                 \
+        for (size_t i = 0; i < (NODE_BYTES); i++)                               \
+            block[(NODE_BYTES) + i] = right[i];                                 \
+        rc =                                                                    \
+            voleith_grostl##BITS##_compress_node(IV_INODE_##BITS, block, out);  \
+        voleith_secure_zero(block, sizeof(block));                              \
+        return rc;                                                              \
     }
 
 FIXED_WRAPPERS(256, 32)
@@ -329,7 +341,7 @@ FIXED_WRAPPERS(512, 64)
 #define VT_FIXED_INSTANCE(BITS, NAME, NODE_BYTES, CR_BITS)                     \
     {                                                                          \
         .name = NAME, .node_bytes = NODE_BYTES, .cr_bits = CR_BITS,            \
-        .fixed_leaf_bytes = NODE_BYTES,                                        \
+        .fixed_leaf_bytes = NODE_BYTES, .leaf_block_bytes = 2 * (NODE_BYTES),  \
         .leaf_invin_bytes = node_hash_grostl##BITS##_fixed_leaf_invin_bytes,   \
         .inode_invin_bytes = node_hash_grostl##BITS##_fixed_inode_invin_bytes, \
         .leaf_circuit = node_hash_grostl##BITS##_fixed_leaf_circuit,           \

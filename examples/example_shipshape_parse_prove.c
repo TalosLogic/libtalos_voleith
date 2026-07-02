@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  *
  * example_shipshape_parse_prove.c - end-to-end Shipshape pipeline (W7.2 of
- * docs/SHIPSHAPE_IMPLEMENTATION_PLAN.md).
+ * the implementation plan).
  *
  * Loads a `.ship` file, parses it to a GF(2^8) circuit, generates the full
  * witness from the external input, then proves and verifies with the

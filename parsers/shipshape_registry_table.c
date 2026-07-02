@@ -11,7 +11,7 @@
  *   ./build/tools/shipshape_registry_freeze/shipshape_registry_freeze \
  *       > parsers/shipshape_registry_table.c
  *
- * crypto-v1 (SHIPSHAPE_SPEC.md §7.2).
+ * crypto-v1 (the Shipshape spec §7.2).
  */
 
 #include "shipshape_registry.h"

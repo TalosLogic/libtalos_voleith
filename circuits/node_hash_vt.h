@@ -58,19 +58,58 @@ typedef struct {
 
     /*
      * Fixed-leaf input width.  0 means the vt is variable-leaf (any
-     * leaf_data_bytes >= 0 is valid).  Non-zero means the vt's
-     * leaf_circuit / leaf_hash require exactly this many input bytes;
-     * any other value is a contract violation (currently silently
-     * truncated by some vts, but consumers that validate up-front
-     * should reject it instead of letting a wrong-width sk reach the
-     * leaf builders).  Used by voleith_rs_membership_validate to enforce
-     * the sk-width match.
+     * leaf_data_bytes >= 0 is valid).  Non-zero is the canonical V1 leaf
+     * width (leaf = OWF(sk) with sk exactly this wide), enforced by
+     * voleith_rs_membership_validate.
+     *
+     * Note: a fixed-input vt's leaf_circuit / leaf_hash accept any
+     * leaf_data_bytes in [0, leaf_block_bytes] (a shorter preimage is
+     * zero-padded into the single compression), which is what lets V3
+     * pack sk || attributes into the leaf.  fixed_leaf_bytes remains the
+     * V1 exact-width value; the composable upper bound is leaf_block_bytes
+     * (see below and voleith_rs_config_validate).
+     *
+     * A preimage WIDER than leaf_block_bytes is rejected, not truncated:
+     * leaf_hash and leaf_build_witness return -1, so a caller that would
+     * overflow the single compression (e.g. an indexed-Merkle record
+     * value || next_value || next_index = 2*node_bytes + index_bytes that
+     * exceeds the block) fails loudly instead of silently dropping the
+     * high bytes.  leaf_circuit (void) clamps only to bound its wire
+     * buffer; the matching leaf_hash / leaf_build_witness rejection means
+     * no valid proof is ever built over a truncated leaf.  Such wide-record
+     * IMTs require a variable-leaf vt (leaf_block_bytes == 0).
      *
      * Only hirose-aes-256-fixed32 (= 32) is non-zero today; the other
      * shipped vts are variable-leaf and get 0 via C99 designated
      * initializers (unmentioned fields = 0).
      */
     size_t fixed_leaf_bytes;
+
+    /*
+     * Single-fixed-compression leaf-preimage capacity, in bytes.  This
+     * is the message-input size of the leaf's hash structure, NOT the
+     * node-output size (node_bytes):
+     *
+     *   grostl-256-fixed : 64  (the 2*node_bytes Grostl permutation block)
+     *   grostl-512-fixed : 128
+     *   hirose-fixed32   : 32  (two 16-byte iterations, no padding block)
+     *
+     * 0 means the vt is variable-leaf: it pads / iterates to absorb any
+     * leaf_data_bytes with no single-compression cap (at a per-block
+     * cost), so there is no fixed capacity to report.
+     *
+     * Distinct from fixed_leaf_bytes: that field is the exact width the
+     * current leaf circuit consumes (used by the V1 membership validator,
+     * which builds leaf = OWF(sk) and requires sk to match it exactly).
+     * leaf_block_bytes is the *ceiling* the composable config validator
+     * checks the full OWF preimage (sk + attribute bytes) against, since
+     * a fixed-input OWF can carry attributes up to the block boundary in
+     * the same single compression (the leaf circuit zero-pads any
+     * shortfall; the exact preimage length is fixed by the attribute
+     * schema and bound into the fingerprint).  See
+     * voleith_rs_config_validate.
+     */
+    size_t leaf_block_bytes;
 
     /* witness sizing */
     size_t (*leaf_invin_bytes)(size_t leaf_data_bytes);

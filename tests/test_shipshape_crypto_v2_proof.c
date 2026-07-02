@@ -4,7 +4,7 @@
  *
  * test_shipshape_crypto_v2_proof.c - prove / verify round-trip for a
  * hash-parametric registry entry (MR4 / 4b of
- * SHIPSHAPE_CRYPTO_V2_SECRETDIR_IMPL_PLAN.md).
+ * the crypto-v2 implementation plan).
  *
  * Uses ring_sig/v1[aes_dm] because it is an assertion-only entry (the
  * root is an INSTANCE wire), so a wrong Merkle path is unsatisfiable and

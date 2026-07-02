@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  *
  * test_shipshape_witness.c - generic Tier 1 witness generator (W6.2 of
- * docs/SHIPSHAPE_IMPLEMENTATION_PLAN.md; docs/CIRC_WITNESS_GEN.md).
+ * the implementation plan; the witness-generation design).
  *
  * For each registry primitive, parse a `.ship` calling it with the same
  * witness / instance split the hand-written builder assumes, run the generic

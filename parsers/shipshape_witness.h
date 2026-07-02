@@ -11,7 +11,7 @@
  * input.  The gap is the gadget-internal witnesses introduced by lowering:
  * in Tier 1, the INV output, which the evaluator computes as the GF(2^8)
  * inverse of its source wire, resolved from the defining ASSERT_PRODUCT
- * constraint.  See docs/CIRC_WITNESS_GEN.md (W6.1) for the full design,
+ * constraint.  See the witness-generation design (W6.1) for the full design,
  * including the deferred Tier 2a hash-pinned dispatch interface.
  *
  * This is the generic evaluator (W6.2); it is the trusted reference and the

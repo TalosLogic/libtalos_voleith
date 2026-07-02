@@ -22,7 +22,7 @@
  * out of range) and propagated vt->inode_hash errors.  Memory
  * allocation failure is also surfaced as -1.
  *
- * See docs/RSV1_DESIGN.md §10 step 5 and docs/RSV1_IMPLEMENTATION_PLAN.md
+ * See docs/RSV1_DESIGN.md §10 step 5 and the RS-V1 implementation plan
  * T5a for the use case driving this module.
  */
 
@@ -63,7 +63,7 @@ int voleith_merkle_vt_build(const voleith_node_hash_vt *vt,
  * each level along the path from leaf_index to the root.
  *
  * Sibling ordering matches the secret-dir Merkle path circuit
- * convention (merkle_vt_gf8_circuit.h): siblings_out[k]
+ * convention (see merkle_vt_gf8_circuit.h): siblings_out[k]
  * is the sibling at level k counted from the leaf upward, with k = 0
  * at leaf level and k = depth - 1 at the level just below the root.
  * For leaf_index i, the sibling at level k sits at position

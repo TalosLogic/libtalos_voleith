@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  *
  * test_shipshape_registry_equiv.c - Registry equivalence tests, FIXED entries
- * (W5.1 of docs/SHIPSHAPE_IMPLEMENTATION_PLAN.md; ISA design §6 validation
+ * (W5.1 of the implementation plan; ISA design §6 validation
  * plan; STDLIB D2, D3, §2).
  *
  * For each crypto-v1 FIXED Tier 2a entry, a minimal `.ship` file calling the

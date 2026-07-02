@@ -8,6 +8,9 @@ shipshape_registry_table.gen.c
 # Fuzz directory
 build-fuzz/
 
+# san directory
+build-san/
+
 # CMake generated files (if accidentally created in source dir)
 CMakeCache.txt
 CMakeFiles/

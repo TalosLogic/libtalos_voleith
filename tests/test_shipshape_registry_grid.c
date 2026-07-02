@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  *
  * test_shipshape_registry_grid.c - Registry equivalence tests, PARAMETRIC
- * entries (W5.2 of docs/SHIPSHAPE_IMPLEMENTATION_PLAN.md; ISA design §6;
+ * entries (W5.2 of the implementation plan; ISA design §6;
  * STDLIB D1, §3.4).
  *
  * The same byte-for-byte table comparison as the FIXED-entry test, run over

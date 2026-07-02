@@ -11,7 +11,7 @@
  * backend wraps the matching builder in circuits/aes_gf8_circuit.h, which
  * emits inv_in bytes in the exact circuit-evaluation order the generic Tier 1
  * evaluator fills.  The output is therefore byte-identical to the generic
- * path: this is purely a speed layer (docs/CIRC_WITNESS_GEN.md SECTION 7).
+ * path: this is purely a speed layer (the witness-generation design SECTION 7).
  *
  * Backends are opt-in.  Nothing is registered until the caller invokes
  * voleith_shipshape_witgen_register_aes() before witness generation.

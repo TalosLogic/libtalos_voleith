@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  *
  * test_shipshape_registry_table.c - crypto-v1 registry freeze table tests
- * (SHIPSHAPE_IMPLEMENTATION_PLAN.md W2.1).
+ * (the implementation plan W2.1).
  *
  * Tests:
  *   1: table compiles, links, and has the expected entry count (13)

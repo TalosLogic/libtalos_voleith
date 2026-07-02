@@ -7,7 +7,7 @@
  *
  * The table is ordered by type_id and MUST remain so.  Type ids are
  * frozen: never renumber, never remove, only append.  See
- * docs/private/SHIPSHAPE_CRYPTO_V2_SECRETDIR_IMPL_PLAN.md MR1.
+ * the crypto-v2 implementation plan MR1.
  */
 
 #include "shipshape_node_hash_types.h"

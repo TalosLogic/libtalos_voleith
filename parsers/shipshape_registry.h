@@ -5,7 +5,7 @@
  * shipshape_registry.h - crypto-v1 Tier 2a registry: types, frozen table,
  * and the live standalone-body builders.
  *
- * The Shipshape Tier 2a registry (SHIPSHAPE_SPEC.md §7, docs/CIRC_STDLIB.md)
+ * The Shipshape Tier 2a registry (the Shipshape spec §7, the stdlib spec)
  * is a closed set of cryptographic subcircuits, each pinned by a body hash.
  * Two artifacts live here:
  *
@@ -20,7 +20,7 @@
  *     D3 standalone-witness circuit whose fingerprint IS the body hash.
  *     The freeze tool reads the descriptors to regenerate the table; CI
  *     re-derives and diffs, and divergence is a release-blocker
- *     (docs/CIRC_STDLIB.md §3, D2, D7).
+ *     (the stdlib spec §3, D2, D7).
  *
  * Body hash construction (D3): build a fresh GF(2^8) circuit, add each
  * signature INPUT wire as a WITNESS wire in signature order, emit the
@@ -119,7 +119,7 @@ size_t voleith_shipshape_registry_grid(size_t idx, uint32_t *out, size_t max);
 
 /*
  * Sentinel in an in_len slot marking the argument whose actual length
- * supplies the entry's inferred parameter n (SHIPSHAPE_SPEC.md 7.1).
+ * supplies the entry's inferred parameter n (the Shipshape spec 7.1).
  * FIXED entries have no such slot; PARAMETRIC entries have exactly one.
  */
 #define VOLEITH_SHIPSHAPE_REGISTRY_PARAM_LEN UINT32_MAX
@@ -140,7 +140,7 @@ int voleith_shipshape_registry_signature(
 
 /*
  * Instantiation cost of entry idx at parameter param, from the normative
- * SHIPSHAPE_SPEC.md 7.2 formulas: *blocks receives the derived block
+ * the Shipshape spec 7.2 formulas: *blocks receives the derived block
  * count (AES calls for cmac/*, compressions for grostl/*; 1 for FIXED
  * entries) and *invs the INV count, which equals the witness slots the
  * body adds.  The parser checks blocks against MAX_BLOCKS_PER_OPCODE and
@@ -197,7 +197,7 @@ int voleith_shipshape_registry_body_hash(
  * These entries accept a node-hash type selector (merkle/path_secret,
  * indexed_merkle/nonmember_secret, ring_sig/v1) and are frozen as a
  * parallel table to the crypto-v1 FIXED/PARAMETRIC table above.
- * See docs/private/SHIPSHAPE_CRYPTO_V2_SECRETDIR_IMPL_PLAN.md MR2.
+ * See the crypto-v2 implementation plan MR2.
  * ================================================================ */
 
 /*

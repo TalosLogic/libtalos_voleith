@@ -32,6 +32,10 @@ set(EXAMPLE_NAMES
     example_kvac_pq_grostl_gf8_depth12
     example_ring_sig_v1_gf8
     example_ring_sig_v1_revocable_gf8
+    example_rs_v2_linkable_gf8
+    example_rs_v3_attribute_gf8
+    example_rs_v4_claimable_gf8
+    example_rs_composite_gf8
     example_bristol_aes128
     example_shipshape_parse_prove
     example_shipshape_anon_membership

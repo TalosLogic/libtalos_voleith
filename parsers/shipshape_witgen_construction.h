@@ -22,7 +22,7 @@
  * region the parser actually built, which it only does for legal widths.
  *
  * This is purely a speed layer.  It is prover-side only and fail-closed
- * (docs/CIRC_WITNESS_GEN.md SECTION 7): a wrong backend yields an invalid
+ * (the witness-generation design SECTION 7): a wrong backend yields an invalid
  * proof, never a verifier accept.  The generic evaluator is always the correct
  * fallback, and nothing is registered until the caller invokes the register
  * entry point below before witness generation.

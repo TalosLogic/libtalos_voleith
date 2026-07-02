@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 cmake_minimum_required(VERSION 3.16)
-project(libvoleith VERSION 1.7.0 LANGUAGES C)
+project(libvoleith VERSION 1.8.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -20,7 +20,8 @@ option(VOLEITH_BUILD_DUDECT "Build dudect timing-validation harness (tools/dudec
 option(VOLEITH_BUILD_BENCH "Build FS-hash microbenchmarks (tools/bench_fs_hash)" OFF)
 option(VOLEITH_BUILD_REGISTRY_FREEZE "Build the crypto-v1 registry freeze tool (tools/shipshape_registry_freeze)" OFF)
 option(VOLEITH_FUZZ "Build libFuzzer parser harnesses (clang only; fuzz/)" OFF)
-option(VOLEITH_LEGACY_VERIFY "Accept pre-header proofs in voleith_verify (legacy fallback)" ON)
+option(VOLEITH_SANITIZE "Instrument the library, tests, and examples with AddressSanitizer + UndefinedBehaviorSanitizer (GCC or Clang; use a dedicated build dir)" OFF)
+option(VOLEITH_LEGACY_VERIFY "Accept pre-header proofs in voleith_verify (legacy fallback; SECURITY: legacy path skips header circuit/params identity binding, set OFF if you also accept v1 headered proofs)" ON)
 
 # Propagate VOLEITH_LEGACY_VERIFY as a compile definition for every
 # target defined below.  The macro gates the dual-path verifier
@@ -38,7 +39,7 @@ endif()
 # UndefinedBehaviorSanitizer.  The fuzz/ executables additionally link the
 # libFuzzer runtime (-fsanitize=fuzzer).  These directory-scoped options must
 # be set before any target is defined so voleith_core picks them up.  Clang
-# only.  See fuzz/README.md and docs/SHIPSHAPE_IMPLEMENTATION_PLAN.md W4.
+# only.  See fuzz/README.md and the implementation plan W4.
 if(VOLEITH_FUZZ)
     if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
         message(FATAL_ERROR
@@ -48,6 +49,22 @@ if(VOLEITH_FUZZ)
         -fno-omit-frame-pointer -g -O1)
     add_link_options(-fsanitize=address,undefined)
     message(STATUS "voleith: libFuzzer parser harnesses = ENABLED (fuzz/)")
+endif()
+
+# Instrument the whole build (library, tests, examples) with AddressSanitizer
+# + UndefinedBehaviorSanitizer.  Like the fuzz block above, these options must
+# be set before any target is defined so every target picks them up.  Works
+# with GCC or Clang.  Use a dedicated build directory: you never want
+# sanitizer-instrumented binaries in a release artifact.  Skipped when
+# VOLEITH_FUZZ is on (it already applies the same sanitizers plus libFuzzer).
+# -fno-sanitize-recover=all makes UBSan abort on the first finding so ctest
+# marks the offending test failed instead of merely printing a warning.
+# See README.md "Sanitizer builds (ASan / UBSan)".
+if(VOLEITH_SANITIZE AND NOT VOLEITH_FUZZ)
+    add_compile_options(-fsanitize=address,undefined
+        -fno-sanitize-recover=all -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address,undefined)
+    message(STATUS "voleith: ASan + UBSan instrumentation = ENABLED")
 endif()
 
 # Report which AES backend will be active.  Done after the AES-NI
@@ -220,6 +237,8 @@ set(VOLEITH_CORE_SOURCES
     proof/vole_hash.c
     proof/proof.c
     proof/gf8_proof.c
+    proof/rs_membership_gf8.c
+    proof/rs_gf8.c
     proof/ring_sig_v1_gf8.c
     circuits/aes_circuit.c
     circuits/aes_gf8_circuit.c
@@ -242,7 +261,9 @@ set(VOLEITH_CORE_SOURCES
     circuits/merkle_vt_gf8_helpers.c
     circuits/indexed_merkle_vt_gf8_circuit.c
     circuits/indexed_merkle_vt_gf8_helpers.c
-    circuits/ring_sig_v1_gf8_circuit.c
+    circuits/rs_membership_gf8_circuit.c
+    circuits/rs_leaf_gf8_circuit.c
+    circuits/rs_gf8_circuit.c
 )
 
 set(VOLEITH_PARSERS_SOURCES

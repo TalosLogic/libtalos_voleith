@@ -20,7 +20,7 @@
  *
  * Covers all eight wrapped vts (Hirose 2 + AES 2 + Grøstl 4).
  *
- * See docs/RSV1_IMPLEMENTATION_PLAN.md T5a.
+ * See the RS-V1 implementation plan T5a.
  */
 
 #include "merkle_vt_gf8_helpers.h"

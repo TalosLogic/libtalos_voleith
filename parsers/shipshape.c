@@ -4,7 +4,7 @@
  *
  * parsers/shipshape.c - Shipshape (.ship) native GF(2^8) circuit parser
  *
- * W3.1 (docs/SHIPSHAPE_IMPLEMENTATION_PLAN.md): entry-point skeleton.
+ * W3.1 (the implementation plan): entry-point skeleton.
  * Argument validation, resource-limit clamping, the MAX_FILE_BYTES gate
  * checked before buffering, out-struct zeroing, and free-on-all-paths.
  *

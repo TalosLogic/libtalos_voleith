@@ -5,7 +5,7 @@
  * parsers/shipshape_witgen_dispatch.c - Tier 2a hash-pinned witness-backend
  * registration and dispatch (W8.2 + W8.3a).
  *
- * Design: docs/CIRC_WITNESS_GEN.md §7.  Scope:
+ * Design: the witness-generation design §7.  Scope:
  *   - A fixed-size static registration table (no dynamic allocation).
  *   - Dispatch over FIXED Tier 2a registry entries by (name, frozen hash).
  *   - Dispatch over PARAMETRIC entries by structural name keying (W8.3c):

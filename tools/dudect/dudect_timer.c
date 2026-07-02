@@ -3,9 +3,14 @@
  *
  * High-resolution timer abstraction.
  *
- * x86_64: __rdtscp() reads the cycle counter and is partially
- *   serialized (it waits for prior instructions to retire).  Good
- *   enough for dudect's many-reps-per-trial measurement model.
+ * x86_64: __rdtscp() reads the cycle counter and waits for prior
+ *   instructions to retire, but it does not by itself prevent later
+ *   instructions from executing before the read.  A trailing _mm_lfence()
+ *   closes that window, so the counter read brackets only the work under
+ *   measurement.  This matches the serialisation quality of the aarch64
+ *   ISB path and markedly reduces per-trial measurement noise (and the
+ *   sub-cycle false positives it produces) on hosts with turbo / SMT /
+ *   frequency scaling enabled.
  *
  * aarch64 (macOS and Linux): inline assembly reads CNTVCT_EL0 (the
  *   virtual counter), preceded by an ISB instruction that serialises
@@ -29,13 +34,15 @@ uint64_t
 voleith_dudect_now_ticks(void)
 {
     unsigned int aux;
-    return __rdtscp(&aux);
+    uint64_t ticks = __rdtscp(&aux);
+    _mm_lfence();
+    return ticks;
 }
 
 const char *
 voleith_dudect_timer_name(void)
 {
-    return "RDTSCP (x86_64 cycles)";
+    return "RDTSCP+LFENCE (x86_64 cycles)";
 }
 
 #elif defined(__aarch64__)

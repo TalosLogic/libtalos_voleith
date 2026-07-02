@@ -396,7 +396,14 @@ check_domain_separation(const vt_case_t *cs)
 
     uint8_t leaf_out[MAX_NODE_BYTES];
     uint8_t inode_out[MAX_NODE_BYTES];
-    MUST_OK(h->leaf_hash(X, 2 * W, leaf_out));
+    /* The inode always consumes L||R = 2*node_bytes.  A fixed-input leaf
+     * rejects more than its single-compression capacity (it no longer
+     * silently truncates), so feed the leaf side at most that capacity;
+     * variable-leaf vts take the full 2*W sample. */
+    size_t leaf_in = (h->leaf_block_bytes != 0 && h->leaf_block_bytes < 2 * W)
+                         ? h->leaf_block_bytes
+                         : 2 * W;
+    MUST_OK(h->leaf_hash(X, leaf_in, leaf_out));
     MUST_OK(h->inode_hash(X, X + W, inode_out));
 
     char name[160];

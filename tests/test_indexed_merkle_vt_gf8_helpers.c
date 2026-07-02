@@ -5,7 +5,7 @@
  * test_indexed_merkle_vt_gf8_helpers.c - exercise voleith_imt_vt_build
  * and voleith_imt_vt_lookup_nonmember across every wrapped node-hash vt.
  *
- * Plan items (per docs/RSV1_IMPLEMENTATION_PLAN.md T5b):
+ * Plan items (per the RS-V1 implementation plan T5b):
  *   1. Depth-1 (2-leaf) IMT: verify build's root against a by-hand
  *      leaf_hash + inode_hash.
  *   2. Depth-3 (8-leaf) IMT: for several non-member targets, look up

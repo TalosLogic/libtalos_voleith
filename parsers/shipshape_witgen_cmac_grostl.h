@@ -12,7 +12,7 @@
  * circuits/grostl_gf8_circuit.h, which emits inv_in bytes in the exact
  * circuit-evaluation order the generic Tier 1 evaluator fills.  The output is
  * therefore byte-identical to the generic path: this is purely a speed layer
- * (docs/CIRC_WITNESS_GEN.md SECTION 7).
+ * (the witness-generation design SECTION 7).
  *
  * PARAMETRIC entries take a variable message length, so a single exact body
  * hash cannot pin a backend.  These register through the structural-keying

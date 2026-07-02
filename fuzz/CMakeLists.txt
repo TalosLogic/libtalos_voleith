@@ -11,7 +11,7 @@
 #   ./build-fuzz/fuzz/fuzz_shipshape fuzz/corpus/shipshape
 #   ./build-fuzz/fuzz/fuzz_bristol   fuzz/corpus/bristol
 #
-# See fuzz/README.md; docs/SHIPSHAPE_IMPLEMENTATION_PLAN.md W4.1; ISA 1.5,
+# See fuzz/README.md; the implementation plan W4.1; ISA 1.5,
 # 8.4 item 11.
 
 function(voleith_add_fuzzer NAME SRC)
@@ -25,3 +25,21 @@ endfunction()
 
 voleith_add_fuzzer(fuzz_shipshape fuzz_shipshape.c)
 voleith_add_fuzzer(fuzz_bristol fuzz_bristol.c)
+
+# Composable ring-signature harnesses (1.8.0 security review follow-up:
+# fuzz the two attacker-controlled entry points voleith_rs_sig_unpack and
+# voleith_rs_verify).  Both share the fixed configuration in
+# fuzz_rs_common.h.
+voleith_add_fuzzer(fuzz_rs_unpack fuzz_rs_unpack.c)
+voleith_add_fuzzer(fuzz_rs_verify fuzz_rs_verify.c)
+
+# Seed generator: a plain executable (no libFuzzer runtime) that signs once
+# and writes binary seeds for the two RS harnesses into corpus-work/.  RS
+# proofs are binary and cannot be hand-written like the .ship / Bristol
+# seeds, so they are regenerated rather than committed.
+add_executable(fuzz_rs_seedgen fuzz_rs_seedgen.c)
+target_link_libraries(fuzz_rs_seedgen PRIVATE voleith_core)
+target_include_directories(fuzz_rs_seedgen PRIVATE ${VOLEITH_CORE_INCLUDES})
+target_link_options(fuzz_rs_seedgen PRIVATE -fsanitize=address,undefined)
+set_target_properties(fuzz_rs_seedgen PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/fuzz)

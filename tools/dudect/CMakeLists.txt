@@ -48,7 +48,7 @@ if(NOT APPLE)
 endif()
 
 # Lives outside the test pipeline.  Run manually; see
-# docs/DUDECT_TIMING_VALIDATION.md.
+# the dudect timing-validation design.
 set_target_properties(dudect PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tools/dudect
 )

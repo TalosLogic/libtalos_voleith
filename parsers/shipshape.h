@@ -4,8 +4,8 @@
  *
  * parsers/shipshape.h - Shipshape (.ship) native GF(2^8) circuit parser
  *
- * Parses the Shipshape v1 text format (docs/specs/SHIPSHAPE_SPEC.md;
- * "FORMAT" = docs/CIRC_FORMAT.md; "ISA" = docs/GF8_CIRCUIT_ISA_DESIGN.md)
+ * Parses the Shipshape v1 text format (the Shipshape spec;
+ * "FORMAT" = the format spec; "ISA" = the ISA design)
  * and constructs a voleith_gf8_circuit_t that can be passed directly to the
  * GF(2^8) prover and verifier (proof/gf8_proof.c).
  *
