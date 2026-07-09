@@ -323,6 +323,90 @@ static const voleith_gf256_t gf256_alpha[7] = {
       UINT64_C(0x2f652b2af4e81545), UINT64_C(0x133eea09d26b7bb8)}},
 };
 
+static const voleith_gf128_t gf128_alpha16[15] = {
+    {{UINT64_C(0x63ea7b028543cbf0), UINT64_C(0x0074037f8fbf5037)}},
+    {{UINT64_C(0xab196026a747c4eb), UINT64_C(0x140fb73417d4c00e)}},
+    {{UINT64_C(0x32476112da5f3033), UINT64_C(0x4008ada5f3658963)}},
+    {{UINT64_C(0xc9d72f4ce0107fe9), UINT64_C(0xcb352a4945e99764)}},
+    {{UINT64_C(0x9551a583464a7e5c), UINT64_C(0xb27066416627a690)}},
+    {{UINT64_C(0x78d57583e44d6fa6), UINT64_C(0x750431f6e115d5d8)}},
+    {{UINT64_C(0xbbafede459f94914), UINT64_C(0x7c5aa435d961eaeb)}},
+    {{UINT64_C(0x2cdc8c6658b4246e), UINT64_C(0xc318c2e03b81411f)}},
+    {{UINT64_C(0x53566ea4c12a68e1), UINT64_C(0x41562760b0323e48)}},
+    {{UINT64_C(0x767a068cc3194739), UINT64_C(0x1807fa0b22753088)}},
+    {{UINT64_C(0xde53320e6f309b47), UINT64_C(0x4595eaf2146332b1)}},
+    {{UINT64_C(0xf8979f8f2b8b57e2), UINT64_C(0xf6b759638ebd6142)}},
+    {{UINT64_C(0x2836202285524adf), UINT64_C(0xa63efbb3b09d76cd)}},
+    {{UINT64_C(0x070c39ed9fb68b7d), UINT64_C(0x87fd90aa8023c7ce)}},
+    {{UINT64_C(0xbe3cd67329c4b0ee), UINT64_C(0xee53b060eb5a92cc)}},
+};
+
+static const voleith_gf192_t gf192_alpha16[15] = {
+    {{UINT64_C(0xf85ca5cde9be576f), UINT64_C(0x19de76a5b1b74f1d),
+      UINT64_C(0x119e9d800838ddf3)}},
+    {{UINT64_C(0xf22f59f2f05ac0a2), UINT64_C(0x7482abb95a0d79ca),
+      UINT64_C(0xc2a729987e43c151)}},
+    {{UINT64_C(0xf443bbe047db3241), UINT64_C(0x179b863911769a8b),
+      UINT64_C(0x8a42b4590d52b5cb)}},
+    {{UINT64_C(0xb651d37baf782a1c), UINT64_C(0x95a076e7a1cea289),
+      UINT64_C(0xa37bd6b82827368e)}},
+    {{UINT64_C(0x4d848d95220cbda1), UINT64_C(0x37829c11a9a85932),
+      UINT64_C(0xfb6834f57126a7e0)}},
+    {{UINT64_C(0x9ddf353fcf6aba21), UINT64_C(0x7c2fe53a169bc75b),
+      UINT64_C(0xe2d5672b123c9602)}},
+    {{UINT64_C(0x691a08fe6ed0d218), UINT64_C(0xeb250d24a6993753),
+      UINT64_C(0x744a732d1fa01470)}},
+    {{UINT64_C(0x0b81c94ae503b6d2), UINT64_C(0x78d607e8c048fec8),
+      UINT64_C(0x9a909826794b3a83)}},
+    {{UINT64_C(0x8fba1b22247094a9), UINT64_C(0x5ad41e06b0c337be),
+      UINT64_C(0xb7718e3de10c9e00)}},
+    {{UINT64_C(0x95cec26d2be1d6d7), UINT64_C(0xfbd4565f9691ed13),
+      UINT64_C(0x4c100982821a26f9)}},
+    {{UINT64_C(0x6475a71087f04234), UINT64_C(0x714cbbc305616bde),
+      UINT64_C(0xd22cd9c62dea0d7c)}},
+    {{UINT64_C(0x92e72344e1b1a98c), UINT64_C(0xc44fe3c4487d0743),
+      UINT64_C(0xaf217eb836fc2e1e)}},
+    {{UINT64_C(0x09a9b60a0ec5d208), UINT64_C(0x4a1531890b49ff7c),
+      UINT64_C(0x5406ebda77fcc139)}},
+    {{UINT64_C(0x9b0d45f778311006), UINT64_C(0xb849dd448f3abe7f),
+      UINT64_C(0xa76c1297ec8c2432)}},
+    {{UINT64_C(0x18bfdf201ab8fbc0), UINT64_C(0x9acd6d0974fe8880),
+      UINT64_C(0x8afadc4a41f3dd75)}},
+};
+
+static const voleith_gf256_t gf256_alpha16[15] = {
+    {{UINT64_C(0xd097564120152efa), UINT64_C(0x7f43bbe727097150),
+      UINT64_C(0x9c7fe7d74be4f1a5), UINT64_C(0x107ede188b2a0edc)}},
+    {{UINT64_C(0x48aac61ea068d7a5), UINT64_C(0x7f47feefc2ba73a3),
+      UINT64_C(0x59f58d944fcb6e1c), UINT64_C(0x3002abcf2bc4795d)}},
+    {{UINT64_C(0x2688a3ab6a7de908), UINT64_C(0xf327601a7a9d1324),
+      UINT64_C(0xb41bf715c9fb2c68), UINT64_C(0x450f09ca6403088e)}},
+    {{UINT64_C(0x4aeb19e2ce9478c5), UINT64_C(0x697aa2395e2c2647),
+      UINT64_C(0xd8be1743f9277e77), UINT64_C(0xa45501999def1be5)}},
+    {{UINT64_C(0x2f929dc2eeff5bcd), UINT64_C(0xd7fb01a5a2266075),
+      UINT64_C(0x223e1e7af783482a), UINT64_C(0x500d40c8d8189d4f)}},
+    {{UINT64_C(0x087fa9b18b03cc0a), UINT64_C(0xb74179eeb3e0267a),
+      UINT64_C(0x931455e1094d1e89), UINT64_C(0x43715bb5182f08c2)}},
+    {{UINT64_C(0x2497dc2f28433fc5), UINT64_C(0xef161b464ed2d923),
+      UINT64_C(0xcf838be9faf0c5ee), UINT64_C(0x368f55a5aef6821f)}},
+    {{UINT64_C(0xfc2183a6af96a5ad), UINT64_C(0x2d18fec572e211eb),
+      UINT64_C(0x3a3bdff43dbed32e), UINT64_C(0x82572631412d6c28)}},
+    {{UINT64_C(0x7f5e094e1eed992e), UINT64_C(0xe91250bac2311061),
+      UINT64_C(0x016f87eab9c9963d), UINT64_C(0x26b9f35f00e55153)}},
+    {{UINT64_C(0xa2bc01a74815cc1b), UINT64_C(0x80d4ab853f82a98f),
+      UINT64_C(0x784129583e761aa0), UINT64_C(0x24141a32514b5c1f)}},
+    {{UINT64_C(0x36ad13ccaaa8d5e6), UINT64_C(0xb17e9d42131de8da),
+      UINT64_C(0xf17bdb973e93ada2), UINT64_C(0x22c106f1cb6e1c5b)}},
+    {{UINT64_C(0x4d631f352fdd4c2b), UINT64_C(0x71f57243766fc525),
+      UINT64_C(0x69549fa00c1f14dd), UINT64_C(0x01f2f5637cade324)}},
+    {{UINT64_C(0xd3d72e16511bb3e5), UINT64_C(0x7667fbeb4c8d1eb9),
+      UINT64_C(0x77d24bd8b8ca1ada), UINT64_C(0x82c019a2f4d665a1)}},
+    {{UINT64_C(0xbdcbb04e527add51), UINT64_C(0x4ab814ac0dfb8c6e),
+      UINT64_C(0x9e8fa3c901d07fee), UINT64_C(0xb6991ef333298379)}},
+    {{UINT64_C(0xc59a3ac4e6261df2), UINT64_C(0xa43de50c84f407bd),
+      UINT64_C(0x056b976a60d32528), UINT64_C(0x21c5243b0493b793)}},
+};
+
 int
 voleith_byte_combine(uint8_t *out, const uint8_t x[8], int lambda)
 {
@@ -359,6 +443,64 @@ voleith_byte_combine(uint8_t *out, const uint8_t x[8], int lambda)
             r1 ^= gf256_alpha[i - 1].v[1] & mask;
             r2 ^= gf256_alpha[i - 1].v[2] & mask;
             r3 ^= gf256_alpha[i - 1].v[3] & mask;
+        }
+        voleith_gf256_t result = {{r0, r1, r2, r3}};
+        voleith_gf256_to_bytes(out, &result);
+    } else {
+        return -1;
+    }
+
+    return 0;
+}
+
+/*
+ * GF16Embed(val; lambda) - embeds a GF(2^16) element into F_{2^lambda} as
+ *
+ *     embed(val) = sum_{i=0}^{15} val_bit_i * beta^i
+ *
+ * where beta is the alpha16 generator (the smallest-encoding root of m16
+ * embedded in F_{2^lambda}; see tools/gen_alpha16) and beta^0 = 1 is
+ * implicit.  This is the GF(2^16) analogue of voleith_byte_combine and the
+ * subfield map used by the gf16 element-level QuickSilver prover/verifier to
+ * lift GF(2^16) values and products into the lambda-bit VOLE tag field.  The
+ * masked accumulation is constant-time in val, matching voleith_byte_combine.
+ */
+int
+voleith_gf16_embed(uint8_t *out, uint16_t val, int lambda)
+{
+    if (lambda == 128) {
+        uint64_t r0 = 0, r1 = 0;
+        uint64_t m0 = ct_barrier_u64(-((uint64_t)val & 1ULL));
+        r0 ^= 1ULL & m0;
+        for (int i = 1; i < 16; i++) {
+            uint64_t mask = ct_barrier_u64(-(((uint64_t)val >> i) & 1ULL));
+            r0 ^= gf128_alpha16[i - 1].v[0] & mask;
+            r1 ^= gf128_alpha16[i - 1].v[1] & mask;
+        }
+        voleith_gf128_t result = {{r0, r1}};
+        voleith_gf128_to_bytes(out, &result);
+    } else if (lambda == 192) {
+        uint64_t r0 = 0, r1 = 0, r2 = 0;
+        uint64_t m0 = ct_barrier_u64(-((uint64_t)val & 1ULL));
+        r0 ^= 1ULL & m0;
+        for (int i = 1; i < 16; i++) {
+            uint64_t mask = ct_barrier_u64(-(((uint64_t)val >> i) & 1ULL));
+            r0 ^= gf192_alpha16[i - 1].v[0] & mask;
+            r1 ^= gf192_alpha16[i - 1].v[1] & mask;
+            r2 ^= gf192_alpha16[i - 1].v[2] & mask;
+        }
+        voleith_gf192_t result = {{r0, r1, r2}};
+        voleith_gf192_to_bytes(out, &result);
+    } else if (lambda == 256) {
+        uint64_t r0 = 0, r1 = 0, r2 = 0, r3 = 0;
+        uint64_t m0 = ct_barrier_u64(-((uint64_t)val & 1ULL));
+        r0 ^= 1ULL & m0;
+        for (int i = 1; i < 16; i++) {
+            uint64_t mask = ct_barrier_u64(-(((uint64_t)val >> i) & 1ULL));
+            r0 ^= gf256_alpha16[i - 1].v[0] & mask;
+            r1 ^= gf256_alpha16[i - 1].v[1] & mask;
+            r2 ^= gf256_alpha16[i - 1].v[2] & mask;
+            r3 ^= gf256_alpha16[i - 1].v[3] & mask;
         }
         voleith_gf256_t result = {{r0, r1, r2, r3}};
         voleith_gf256_to_bytes(out, &result);

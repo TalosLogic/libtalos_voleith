@@ -5,6 +5,100 @@ All notable changes to libtalos_voleith are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] 2026-07-09
+
+Erasure coding: Reed-Solomon storage and RLNC transport codecs over a new
+GF(2^16) core field, plus the native GF(2^16) prover, the in-circuit RLNC
+membership and rank-certificate statements, the confidential-RLNC codec and
+encoding proof, and the RS chunk membership certificates / storage use case.
+
+### Added
+
+GF(2^16) core field
+
+- `core/field16.{c,h}`: GF(2^16) element arithmetic over poly `0x1100B`
+  (x^16 + x^12 + x^3 + x + 1). `voleith_gf16_mul` with CLMUL / PMULL / constant-
+  time software paths; `voleith_gf16_inv` via a fixed Fermat addition chain;
+  2-byte little-endian byte conversions. Validated by `tests/test_field16.c`
+  (exhaustive inverse sweep, distributivity, KATs).
+
+Shared linear-algebra core and plaintext codecs
+
+- `erasure/` module (sibling to `vole/`), `erasure/erasure.h` common types and
+  field selector (`GF8` / `GF16`).
+- `erasure/matrix.{c,h}`: systematic Vandermonde and Cauchy generator matrices
+  over GF(2^8) and GF(2^16), submatrix select, and Gaussian-elimination solve
+  (singular submatrices return an error code, not a crash).
+- `erasure/rs.{c,h}`: systematic `(n, k)` Reed-Solomon encode and decode /
+  repair over GF(2^8) from any k of n chunks. KATs from a Jerasure 2.0 +
+  GF-Complete oracle (poly 0x11B, Cauchy), generated once and checked in, never
+  linked (`tests/test_erasure_rs.c`, `tools/gen_rs_kat/`).
+- `erasure/rlnc.{c,h}`: RLNC encode / recode / decode over GF(2^16); coded
+  symbols carry their coefficient vector and a generation id; decode once the
+  coefficient matrix reaches rank k, with rank-progress reporting. Oracle KATs
+  at w=16 (`tests/test_erasure_rlnc.c`, `tools/gen_rlnc_kat/`).
+
+Native GF(2^16) prover and in-circuit RLNC
+
+- alpha16 subfield-embedding tables for lambda in {128, 192, 256} in
+  `core/field.{c,h}`, derived clean-room by an in-repo generator
+  (`tools/gen_alpha16/`) with a SageMath cross-check; homomorphism-validated
+  (`tests/test_gf16_embed.c`).
+- `proof/gf16_prover.c` / `gf16_verifier.c` / `gf16_circuit.c` /
+  `gf16_proof.{c,h}` (+ `gf16_circuit_fingerprint.{c,h}`): native element-level
+  GF(2^16) QuickSilver prover / verifier (one GF(2^16) element per VOLE slot)
+  and the non-interactive Fiat-Shamir wrapper with the two-phase commit /
+  respond split at chall_1, ported from the GF(2^8) stack.
+- `circuits/rlnc_gf16_circuit.{c,h}`: in-circuit generation-membership statement
+  `y = c . X` (public coefficients `c`, witnessed source matrix `X`) plus a
+  rank / sufficiency assertion, on the native gf16 prover. Examples
+  `example_rlnc_gf16` and `example_rlnc_gf16_private_vector`.
+
+RS chunk membership certificates and storage use case
+
+- `erasure/rs_dataset.{c,h}`: dataset metadata, its canonical serializer /
+  parser (design 6.10), and the metadata-to-`R` binding
+  `R = H(merkle_root || H(serialize(metadata)))` with `compute_R` / `verify_R`.
+- `circuits/rs_chunk_cert_circuit.{c,h}`: FWK-blinded chunk membership circuit,
+  public-index and secret-index (indexed-consistency) variants.
+- `proof/rs_chunk_cert_proof.{c,h}`: non-interactive membership certificate
+  (Fiat-Shamir wrapper) with the two-layer dataset check (recompute `R`, then
+  verify against `merkle_root`); `prove` / `verify` and `_secret_dir` forms.
+- `erasure/rs_membership.{c,h}`: plaintext leaf / tree / sibling-path / digest
+  helpers for the FWK-blinded chunk tree.
+- `erasure/rs_retriever.{c,h}`: retriever sufficiency flow (verify, dedup by
+  recovered index, "have I `k` distinct yet", decode); index-recovery-by-trial.
+- `erasure/rs_consistency.{c,h}`: capability-3 plaintext consistency check
+  (re-encode and compare digests + whole-file digest).
+- `erasure/rs.{c,h}`: healer decode-once / encode-specific-rows entry points
+  (`voleith_rs_encode_row` / `voleith_rs_encode_indices`).
+- `erasure/rs_wire.{c,h}`: dataset descriptor and per-chunk header wire
+  serializers (design 6.10). Descriptor = `merkle_root || serialize(metadata)`;
+  chunk header = `version || flags || R || cert_len || certificate ||
+  [possession_tag]`. The certificate is length-prefixed (4-byte BE) so the
+  reserved possession tail stays parseable; the reserved tail is defined and
+  skipped (forward-compat). Header parse takes `cr_profile` as an input (a 32-
+  vs 64-byte `R` is indistinguishable from the bytes; the descriptor pins it).
+- Examples: `example_rs_chunk_membership`, `example_rs_heal`, `example_rs_wire`.
+
+Confidential RLNC and the rank certificate
+
+- `circuits/rlnc_gf16_cert_circuit.{c,h}`: knowledge-of-inverse rank certificate
+  (`C . C^{-1} = I`, witness `C` and `C^{-1}`), the in-circuit counterpart of
+  `voleith_rlnc_gf16_coeffs_full_rank`.
+- `erasure/rlnc_confidential.{c,h}` (`voleith_confrlnc_*`): paper-2
+  confidential-RLNC codec (secret-coefficient encode, `T` split/join, secret
+  partial permutation); weak/computational security, documented as such. The
+  secret-input path (matrix inverse, permutation apply, key generation) is
+  constant-time, verified with the dudect timing harness (`docs/dudect-runs/`).
+- `circuits/permutation_gf16_circuit.{c,h}` (`voleith_perm_gf16_circuit`):
+  AS-Waksman secret-permutation gadget, one mul gate per 2x2 switch.
+- `circuits/rlnc_confidential_gf16_circuit.{c,h}`: confidential-encoding
+  correctness statement on the native gf16 prover. Example
+  `example_rlnc_confidential`.
+- `circuits/rlnc_gf16_circuit.{c,h}`: both-secret (data-blind) membership
+  orientation `Y = c . X`.
+
 ## [1.8.0] 2026-07-02
 
 Composable ring signatures (V2/V3/V4). One `voleith_rs_*` superset config

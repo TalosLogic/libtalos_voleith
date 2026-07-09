@@ -269,4 +269,19 @@ voleith_gf256_eq(const voleith_gf256_t *a, const voleith_gf256_t *b)
  */
 int voleith_byte_combine(uint8_t *out, const uint8_t x[8], int lambda);
 
+/*
+ * GF16Embed(val; lambda) - embeds a GF(2^16) element into F_{2^lambda} using
+ * powers of the alpha16 generator beta (the embedded root of m16):
+ *   embed(val) = sum_{i=0}^{15} val_bit_i * beta^i.
+ * The GF(2^16) analogue of voleith_byte_combine, used by the gf16
+ * element-level QuickSilver layer.
+ *
+ * val:    a GF(2^16) element (uint16_t; see core/field16.h)
+ * lambda: security parameter (128, 192, or 256)
+ * out:    output buffer of lambda/8 bytes
+ *
+ * Returns 0 on success, -1 on invalid lambda.
+ */
+int voleith_gf16_embed(uint8_t *out, uint16_t val, int lambda);
+
 #endif /* VOLEITH_FIELD_H */

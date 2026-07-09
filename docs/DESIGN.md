@@ -106,6 +106,10 @@ The AES-128 circuit in this variant has 200 mul gates (one inversion per S-box, 
 
 The GF(2^8) variant is approximately 8× more compact than the bit-level variant for byte-oriented workloads. Both variants are first-class: every circuit building block ships in both versions, and the same parameter sets and Fiat-Shamir construction are used for both.
 
+### A specialized third prover: native GF(2^16)
+
+The two variants above are the general-purpose choice for any circuit. A third, specialized element-level prover carries one GF(2^16) element per VOLE slot (`proof/gf16_prover.c` / `gf16_verifier.c` / `gf16_circuit.c` / `gf16_proof.{c,h}`). It mirrors the GF(2^8) element-level structure and Fiat-Shamir construction (including the two-phase commit/respond split), with alpha16 subfield-embedding tables for lambda in {128, 192, 256}. It exists for the high-throughput network-coding statements whose symbols are naturally GF(2^16) elements, where a native wide-field prover verifies faster than the GF(2^8) tower equivalent; it is not a general-purpose replacement for the GF(2^8) building-block library. Its construction and the erasure-coding statements built on it (RLNC membership, the rank certificate, confidential RLNC, and the RS chunk membership certificate) are documented in [`docs/ERASURE_CODES_DESIGN.md`](ERASURE_CODES_DESIGN.md).
+
 ---
 
 ## Circuit API as the Core Abstraction

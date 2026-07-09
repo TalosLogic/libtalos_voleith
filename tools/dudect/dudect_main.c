@@ -38,6 +38,12 @@ extern const dudect_target_t target_voleith_byte_combine_256;
 extern const dudect_target_t target_voleith_grostl256_msg;
 extern const dudect_target_t target_voleith_grostl512_msg;
 extern const dudect_target_t target_voleith_grostl256_gf8_build_witness_msg;
+extern const dudect_target_t target_voleith_ec_matrix_invert_ct;
+extern const dudect_target_t target_voleith_confrlnc_permute;
+extern const dudect_target_t target_voleith_confrlnc_permute_inverse;
+extern const dudect_target_t target_voleith_perm_gf16_route;
+extern const dudect_target_t target_voleith_confrlnc_validate_key;
+extern const dudect_target_t target_voleith_confrlnc_keygen;
 
 static const dudect_target_t *const target_registry[] = {
     &target_sentinel_leak,
@@ -55,6 +61,12 @@ static const dudect_target_t *const target_registry[] = {
     &target_voleith_grostl256_msg,
     &target_voleith_grostl512_msg,
     &target_voleith_grostl256_gf8_build_witness_msg,
+    &target_voleith_ec_matrix_invert_ct,
+    &target_voleith_confrlnc_permute,
+    &target_voleith_confrlnc_permute_inverse,
+    &target_voleith_perm_gf16_route,
+    &target_voleith_confrlnc_validate_key,
+    &target_voleith_confrlnc_keygen,
     NULL,
 };
 

@@ -256,6 +256,38 @@ the design rationale.
 
 ---
 
+## Erasure coding and storage proofs
+
+Beyond the proof system, the library ships a plaintext erasure-coding layer and
+the zero-knowledge statements built on top of it, for verifiable distributed
+storage and network coding.  These live in `erasure/` (a sibling to `vole/`,
+depending only on `core/`) and do no I/O: the transport and the ledger / tracker
+are the consuming application's job.
+
+| Capability | Functions | Notes |
+|------------|-----------|-------|
+| Reed-Solomon (storage) | `voleith_rs_encode` / `_decode` / `_repair`, `voleith_rs_encode_indices` | Systematic `(n, k)` over GF(2⁸); any k of n chunks rebuild the blob (MDS).  Cauchy or Vandermonde generator.  `encode_indices` is the decode-once / encode-many healer primitive. |
+| RLNC (transport) | `voleith_rlnc_*` encode / recode / decode | Random linear network coding over a new GF(2¹⁶) field (`core/field16.h`); coded symbols carry a coefficient vector and generation id; decode at rank k with rank-progress reporting. |
+| RLNC membership (in circuit) | `rlnc_gf16_circuit` | Proves a coded symbol belongs to a committed generation (`y = c · X`) on the native GF(2¹⁶) prover.  Public-coefficient and both-secret (data-blind) orientations. |
+| RLNC rank certificate (in circuit) | `rlnc_gf16_cert_circuit` | Knowledge-of-inverse full-rank statement (`C · C⁻¹ = I`): proves a hidden coefficient matrix is invertible without revealing it.  Standalone; it does not bind `C` to any particular packet set. |
+| Confidential RLNC (paper 2) | `voleith_confrlnc_*`, `rlnc_confidential_gf16_circuit` | Secret-coefficient + secret-partial-permutation codec (Brahimi-Merazka) with a ZK encoding-correctness statement (AS-Waksman permutation gadget, `voleith_perm_gf16_circuit`).  Weak/computational security; not a substitute for AEAD. |
+| Chunk membership certificate | `voleith_rs_chunk_cert_prove` / `_verify` (+ `_secret_dir`) | A non-interactive proof that a chunk is a genuine member of a dataset under its root `R`, via an FWK-blinded chunk Merkle tree (the FWK is never revealed).  Public-index and secret-index variants. |
+| Dataset binding and wire format | `voleith_rs_compute_R` / `_verify_R`, `voleith_rs_metadata_serialize` / `_parse`, `voleith_rs_descriptor_serialize` / `_parse`, `voleith_rs_chunk_header_serialize` / `_parse` | `R = H(merkle_root ‖ H(serialize(metadata)))` binds the tree and dataset parameters together; the descriptor and per-chunk header are the canonical on-the-wire envelopes (design §6.10). |
+| Retriever and consistency helpers | `voleith_rs_retriever_*`, `voleith_rs_check_consistency`, `voleith_rs_recover_index` | Local decision primitives: verify, dedup by recovered index, "do I have k distinct yet", decode, and the plaintext re-encode-and-compare consistency check. |
+
+The native GF(2¹⁶) proving stack (`proof/gf16_prover.c` / `gf16_verifier.c` /
+`gf16_circuit.c` / `gf16_proof.{c,h}`) mirrors the GF(2⁸) stack one element per
+VOLE slot, for fastest verification on the high-throughput network-coding path.
+
+See [`docs/ERASURE_CODES_DESIGN.md`](docs/ERASURE_CODES_DESIGN.md) for the codec
+construction, the dataset commitment and wire format (§6.7 / §6.10), the library
+boundary (§7.0), and the test-oracle strategy (Jerasure 2.0 + GF-Complete,
+oracle-only and never linked).  Runnable examples: `example_rs_chunk_membership`,
+`example_rs_heal`, `example_rs_wire`, `example_rlnc_gf16`,
+`example_rlnc_gf16_private_vector`, and `example_rlnc_confidential`.
+
+---
+
 ## Fiat-Shamir transform
 
 `voleith_prove` / `voleith_verify` and `voleith_gf8_prove` /
@@ -508,6 +540,9 @@ block in both proof-system variants, plus the Bristol Fashion parser:
 | `example_rs_v3_attribute_gf8.c`                   | Composable ring signature proving a hidden attribute is in a public range (`age in [18,120]`) |
 | `example_rs_v4_claimable_gf8.c`                   | Composable ring signature with a claimable commitment: sign anonymously, later claim authorship |
 | `example_rs_composite_gf8.c`                      | All composable modules in one proof (membership + revocation + nullifier + spent-set + attribute + commitment) |
+| `example_rs_chunk_membership.c`                   | RS storage use case end-to-end: FWK-blinded chunk membership certificate, retriever verify/dedup/decode, and the capability-3 consistency check |
+| `example_rs_heal.c`                               | Healer repair flow: decode a dataset once from k survivors, then re-encode several lost chunks bit-identically (digests unchanged) |
+| `example_rs_wire.c`                               | The RS dataset on the wire: serialize the descriptor and per-chunk packet, then parse them back, recompute R, and verify the certificate from the bytes |
 
 Each example builds the circuit, generates a valid witness, produces a proof,
 verifies it, and prints circuit statistics (AND-gate count, ell, proof size)

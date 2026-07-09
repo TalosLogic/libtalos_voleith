@@ -74,6 +74,7 @@
 #include "shipshape_internal.h"
 #include "shipshape_node_hash_types.h"
 #include "shipshape_registry.h"
+#include "util.h"
 
 /* ================================================================
  * Parse context
@@ -596,7 +597,8 @@ match_header_line(ss_lexer_t *lx, const char *const *expect)
             lex_next_word(lx, &w, &wl);
         if (wl == 0)
             return VOLEITH_SHIPSHAPE_ERR_HEADER; /* too few tokens */
-        if (wl != strlen(expect[i]) || memcmp(w, expect[i], wl) != 0)
+        if (wl != strlen(expect[i]) ||
+            voleith_const_memcmp(w, expect[i], wl) != 0)
             return VOLEITH_SHIPSHAPE_ERR_HEADER; /* wrong spelling */
     }
 
@@ -645,12 +647,14 @@ parse_header(ss_lexer_t *lx, int *version)
         if (wl != 0)
             break;
     }
-    if (wl != sizeof(kw_stdlib) - 1 || memcmp(w, kw_stdlib, wl) != 0)
+    if (wl != sizeof(kw_stdlib) - 1 ||
+        voleith_const_memcmp(w, kw_stdlib, wl) != 0)
         return VOLEITH_SHIPSHAPE_ERR_HEADER;
     lex_next_word(lx, &w, &wl);
-    if (wl == sizeof(kw_v2) - 1 && memcmp(w, kw_v2, wl) == 0) {
+    if (wl == sizeof(kw_v2) - 1 && voleith_const_memcmp(w, kw_v2, wl) == 0) {
         *version = 2;
-    } else if (wl == sizeof(kw_v1) - 1 && memcmp(w, kw_v1, wl) == 0) {
+    } else if (wl == sizeof(kw_v1) - 1 &&
+               voleith_const_memcmp(w, kw_v1, wl) == 0) {
         *version = 1;
     } else {
         return VOLEITH_SHIPSHAPE_ERR_HEADER;
@@ -672,7 +676,8 @@ tok_word_is(const ss_token_t *t, const char *kw)
 {
     size_t n = strlen(kw);
 
-    return t->kind == SS_TOK_WORD && t->len == n && memcmp(t->lex, kw, n) == 0;
+    return t->kind == SS_TOK_WORD && t->len == n &&
+           voleith_const_memcmp(t->lex, kw, n) == 0;
 }
 
 /* Copy a non-terminated lexeme slice [s, s+n) into a fresh NUL-terminated
@@ -700,7 +705,7 @@ ctx_lookup(const ss_parse_ctx_t *ctx, const char *name, size_t len)
     for (size_t i = 0; i < ctx->n_syms; i++) {
         const char *d = ctx->syms[i].name;
 
-        if (strlen(d) == len && memcmp(d, name, len) == 0)
+        if (strlen(d) == len && voleith_const_memcmp(d, name, len) == 0)
             return (int)i;
     }
     return -1;
@@ -1212,7 +1217,7 @@ gate_linear_map(ss_parse_ctx_t *ctx, ss_gp_t *gp)
         return gp->err;
     if (budget_wires(ctx, 1) != 0 || budget_gates(ctx, 1) != 0)
         return VOLEITH_SHIPSHAPE_ERR_LIMIT;
-    if (memcmp(M, SQUARING_MATRIX, 8) == 0)
+    if (voleith_const_memcmp(M, SQUARING_MATRIX, 8) == 0)
         c = voleith_gf8_add_square(ctx->circuit, a);
     else
         c = voleith_gf8_add_linear_map(ctx->circuit, a, M);
@@ -1633,7 +1638,7 @@ starts_with(const ss_token_t *t, const char *pre)
 {
     size_t n = strlen(pre);
 
-    return t->len >= n && memcmp(t->lex, pre, n) == 0;
+    return t->len >= n && voleith_const_memcmp(t->lex, pre, n) == 0;
 }
 
 /* Find a defined subcircuit by name (slice [name, name+len)); NULL if none. */
@@ -1643,7 +1648,7 @@ find_def(const ss_parse_ctx_t *ctx, const char *name, size_t len)
     for (size_t i = 0; i < ctx->n_defs; i++) {
         const char *d = ctx->defs[i].name;
 
-        if (strlen(d) == len && memcmp(d, name, len) == 0)
+        if (strlen(d) == len && voleith_const_memcmp(d, name, len) == 0)
             return &ctx->defs[i];
     }
     return NULL;
@@ -2183,7 +2188,7 @@ registry_lookup(const char *name, size_t len)
     for (size_t i = 0; i < voleith_shipshape_registry_count; i++) {
         const char *fqn = voleith_shipshape_registry[i].fqn;
 
-        if (strlen(fqn) == len && memcmp(fqn, name, len) == 0)
+        if (strlen(fqn) == len && voleith_const_memcmp(fqn, name, len) == 0)
             return (int)i;
     }
     return -1;
@@ -2199,7 +2204,7 @@ registry_lookup_hash(const char *name, size_t len)
     for (size_t i = 0; i < voleith_shipshape_reg_hash_count; i++) {
         const char *fqn = voleith_shipshape_reg_hash[i].fqn;
 
-        if (strlen(fqn) == len && memcmp(fqn, name, len) == 0)
+        if (strlen(fqn) == len && voleith_const_memcmp(fqn, name, len) == 0)
             return (int)i;
     }
     return -1;

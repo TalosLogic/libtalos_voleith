@@ -1,0 +1,108 @@
+================================================================
+voleith dudect timing-validation evidence trail
+Architecture: x86_64 (Intel Gracemont E-core)
+Host:         Linux / gcc
+Date:         2026-07-09
+================================================================
+
+Environment
+-----------
+  CPU:        Intel N100 (Gracemont E-cores)
+  Kernel:     Linux 7.0
+  Compiler:   gcc (toolchain default)
+  Target:     voleith_core_dudect (no hardware acceleration flags;
+              CLMUL/AES-NI/ARMv8/PMULL all disabled so the binary
+              exercises core/aes_ct64.c and the constant-time
+              software field paths in core/field.c).
+
+  Why this host: Gracemont is an in-order-ish Atom microarchitecture,
+  a deliberately different uarch from the Sandy Bridge-EP host in
+  x86_64-2026-05-26.txt.  Its integer-divide latency is data-dependent
+  (as on Sandy Bridge), which is why keygen's bounded index sampler
+  reduces with a multiply-shift rather than a hardware divide.
+
+Build
+-----
+  cmake -S . -B build -DVOLEITH_BUILD_DUDECT=ON
+  cmake --build build --target dudect
+
+Runtime
+-------
+  Timer:      RDTSCP+LFENCE (x86_64 cycles)
+  Affinity:   pinned to CPU 0 (sched_setaffinity)
+  Governor:   performance
+  Crop:       [1.00%, 99.00%]
+  Threshold:  |t| > 4.5  ->  FAIL
+
+
+================================================================
+Run 1 -- 2026-07-09  --all --samples 200000  (v1.9.0 erasure / gf16
+                                              constant-time gate)
+================================================================
+
+  Full target set: the pre-1.9.0 targets plus the six erasure /
+  confidential-RLNC secret-input targets introduced for v1.9.0
+  (invert_ct, permute, permute_inverse, perm_gf16_route, validate_key,
+  keygen).
+
+  sentinel_leak                            |t| = 56519.45  FAIL  (expected sanity check)
+  sentinel_clean                           |t| =     0.36  PASS
+  aes_ct64_encrypt_key                     |t| =     0.09  PASS
+  aes_ct64_encrypt_x4_key                  |t| =     0.14  PASS
+  aes_ct64_encrypt_pt                      |t| =     0.06  PASS
+  aes_ct64_encrypt_x4_pt                   |t| =     0.20  PASS
+  voleith_gf128_mul                        |t| =     0.98  PASS
+  voleith_gf192_mul                        |t| =     0.24  PASS
+  voleith_gf256_mul                        |t| =     0.04  PASS
+  voleith_byte_combine_128                 |t| =     0.25  PASS
+  voleith_byte_combine_192                 |t| =     0.29  PASS
+  voleith_byte_combine_256                 |t| =     0.25  PASS
+  voleith_grostl256_msg                    |t| =     0.08  PASS
+  voleith_grostl512_msg                    |t| =     0.06  PASS
+  voleith_grostl256_gf8_build_witness_msg  |t| =     0.18  PASS
+  voleith_ec_matrix_invert_ct              |t| =     0.07  PASS  (new)
+  voleith_confrlnc_permute                 |t| =     0.27  PASS  (new)
+  voleith_confrlnc_permute_inverse         |t| =     0.63  PASS  (new)
+  voleith_perm_gf16_route                  |t| =     0.00  PASS  (new)
+  voleith_confrlnc_validate_key            |t| =     1.87  PASS  (new)
+  voleith_confrlnc_keygen                  |t| =     0.06  PASS  (new; see note)
+
+  Notes:
+    Clean run: the planted sentinel_leak fails (56519) and all 20 real
+    targets pass with wide margin (max real |t| = 1.87, validate_key).
+    No borderline readings on this host; every |t| trace walked around
+    zero rather than scaling with sqrt(n).
+
+    keygen: reads 0.06 here.  Its Fisher-Yates index sampler draws a
+    fixed number of PRG bytes and reduces them into range with a
+    multiply-shift (no reject loop, no hardware divide), so total PRG
+    consumption and total time are independent of the secret seed.  The
+    divide-free reduction matters on Gracemont / Atom, where divide
+    latency is operand-dependent and a modulo reduction could otherwise
+    leak the dividend.
+
+    perm_gf16_route and the keygen shuffle are access-ORDER paths: a
+    total-time PASS here is corroborating evidence.  Their obliviousness
+    (masked scans / masked swaps, no secret-indexed access) rests on
+    construction and code inspection; total-time dudect is largely blind
+    to access-order effects.
+
+
+================================================================
+v1.9.0 erasure constant-time gate status -- 2026-07-09  (Gracemont)
+================================================================
+
+  All 20 real targets PASS at the release-gate sample count
+  (200000/class, nmin=196000 after crop), including the six new
+  confidential-RLNC / erasure secret-input targets: invert_ct 0.07,
+  permute 0.27, permute_inverse 0.63, perm_gf16_route 0.00,
+  validate_key 1.87, keygen 0.06.
+
+  This confirms the confidential-RLNC / erasure secret-input paths are
+  constant-time on a second x86_64 microarchitecture (Gracemont),
+  complementing the Sandy Bridge-EP evidence (x86_64-2026-05-26.txt,
+  pre-1.9.0 targets) and the Apple M1 evidence
+  (aarch64-darwin-m1-2026-05-26.txt Run 5, full v1.9.0 set).  keygen's
+  divide-free sampler is confirmed constant-time here.  Access-order
+  paths additionally rest on code inspection, since total-time dudect is
+  largely blind to access-order effects.

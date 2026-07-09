@@ -30,6 +30,8 @@
  *   Group M: Tier 2a registry calls (W3.7).
  */
 
+#define _POSIX_C_SOURCE 200809L
+
 #include "aes_cmac_gf8_circuit.h"
 #include "aes_gf8_circuit.h"
 #include "gf8_circuit_fingerprint.h"

@@ -29,8 +29,11 @@ void voleith_secure_zero(void *ptr, size_t len);
  * Returns 0 if all bytes are equal, non-zero otherwise.
  * Always reads all len bytes regardless of content - no early exit.
  *
- * Use instead of memcmp() wherever the inputs may be secret (e.g. comparing
- * commitment hashes, challenge values, MACs).
+ * PROJECT POLICY: library code uses this for EVERY byte comparison, never plain
+ * memcmp -- so no one has to judge case by case whether a given buffer is
+ * secret. Plain memcmp() is allowed only in tests and examples (e.g. comparing
+ * expected vs actual outputs). Note this reports only equal / not-equal; if you
+ * need ordering (memcmp's sign), write an explicit comparator instead.
  */
 int voleith_const_memcmp(const void *a, const void *b, size_t len);
 

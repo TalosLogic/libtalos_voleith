@@ -36,6 +36,12 @@ set(EXAMPLE_NAMES
     example_rs_v3_attribute_gf8
     example_rs_v4_claimable_gf8
     example_rs_composite_gf8
+    example_rs_chunk_membership
+    example_rs_heal
+    example_rs_wire
+    example_rlnc_gf16
+    example_rlnc_gf16_private_vector
+    example_rlnc_confidential
     example_bristol_aes128
     example_shipshape_parse_prove
     example_shipshape_anon_membership

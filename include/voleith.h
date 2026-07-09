@@ -92,9 +92,9 @@
 
 /* Library version */
 #define VOLEITH_VERSION_MAJOR 1
-#define VOLEITH_VERSION_MINOR 8
+#define VOLEITH_VERSION_MINOR 9
 #define VOLEITH_VERSION_PATCH 0
-#define VOLEITH_VERSION_STRING "1.8.0"
+#define VOLEITH_VERSION_STRING "1.9.0"
 
 /* Runtime CPU feature detection */
 #include "cpu.h"

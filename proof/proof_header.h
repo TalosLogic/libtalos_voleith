@@ -154,6 +154,17 @@ int voleith_proof_header_check_identity_gf8(
     const voleith_proof_header_t *h, const struct voleith_gf8_circuit *circuit,
     const voleith_params_t *params);
 
+/*
+ * GF(2^16) variant of check_identity.  Forward-declares the circuit type via
+ * the struct tag so this header does not need to drag in gf16_circuit.h; the
+ * implementation includes it.
+ */
+struct voleith_gf16_circuit;
+
+int voleith_proof_header_check_identity_gf16(
+    const voleith_proof_header_t *h, const struct voleith_gf16_circuit *circuit,
+    const voleith_params_t *params);
+
 /* ================================================================
  * Public inspection helper
  * ================================================================ */

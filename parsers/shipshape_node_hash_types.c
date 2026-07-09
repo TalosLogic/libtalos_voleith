@@ -11,6 +11,7 @@
  */
 
 #include "shipshape_node_hash_types.h"
+#include "util.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -61,7 +62,8 @@ voleith_shipshape_node_hash_type_by_name(const char *name, size_t len)
 
     for (i = 0; i < voleith_shipshape_node_hash_types_count; i++) {
         const char *entry_name = voleith_shipshape_node_hash_types[i].name;
-        if (strlen(entry_name) == len && memcmp(entry_name, name, len) == 0)
+        if (strlen(entry_name) == len &&
+            voleith_const_memcmp(entry_name, name, len) == 0)
             return &voleith_shipshape_node_hash_types[i];
     }
     return NULL;

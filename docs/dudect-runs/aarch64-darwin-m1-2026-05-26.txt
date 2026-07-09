@@ -2,7 +2,7 @@
 voleith dudect timing-validation evidence trail
 Architecture: aarch64
 Host:         macOS 15.7.7 / Apple M1
-Date:         2026-05-26
+Date:         2026-05-26 (Runs 1-4); 2026-07-09 (Run 5, v1.9.0 erasure gate)
 ================================================================
 
 Environment
@@ -152,5 +152,78 @@ Phase C status as of 2026-05-26  (macOS aarch64 / Apple M1)
   Verdict for this platform: all 9 real targets PASS at the
   release-gate sample count.  Source-level constant-time guarantee
   for core/aes_ct64.c and the software paths in core/field.c is
-  supported on Apple Silicon by both structural review (security-
-  review items C-2, C-3) and empirical validation (this file).
+  supported on Apple Silicon by both structural review and empirical
+  validation (this file).
+
+
+================================================================
+Run 5 -- 2026-07-09  --all --samples 200000  (v1.9.0 erasure / gf16
+                                              constant-time gate)
+================================================================
+
+  Timer:    CNTVCT_EL0 (aarch64 macOS, 24 MHz, ~41.7 ns/tick)
+  Affinity: pinned to CPU 0
+  Note:     macOS exposes no user-space CPU governor; P/E-core
+            migration remains a residual noise source.
+
+  Adds the six erasure / confidential-RLNC secret-input targets
+  introduced for v1.9.0 (invert_ct, permute, permute_inverse,
+  perm_gf16_route, validate_key, keygen) to the pre-existing set.
+
+  sentinel_leak                            |t| = 9531.68  FAIL  (expected sanity check)
+  sentinel_clean                           |t| =    0.07  PASS
+  aes_ct64_encrypt_key                     |t| =    0.28  PASS
+  aes_ct64_encrypt_x4_key                  |t| =    0.96  PASS
+  aes_ct64_encrypt_pt                      |t| =    0.18  PASS
+  aes_ct64_encrypt_x4_pt                   |t| =    1.32  PASS
+  voleith_gf128_mul                        |t| =    0.89  PASS
+  voleith_gf192_mul                        |t| =    0.84  PASS
+  voleith_gf256_mul                        |t| =    0.60  PASS
+  voleith_byte_combine_128                 |t| =    0.54  PASS
+  voleith_byte_combine_192                 |t| =    0.01  PASS
+  voleith_byte_combine_256                 |t| =    0.64  PASS
+  voleith_grostl256_msg                    |t| =    0.07  PASS
+  voleith_grostl512_msg                    |t| =    0.19  PASS
+  voleith_grostl256_gf8_build_witness_msg  |t| =    1.10  PASS
+  voleith_ec_matrix_invert_ct              |t| =    1.49  PASS  (new)
+  voleith_confrlnc_permute                 |t| =    0.78  PASS  (new)
+  voleith_confrlnc_permute_inverse         |t| =    1.36  PASS  (new)
+  voleith_perm_gf16_route                  |t| =    0.30  PASS  (new)
+  voleith_confrlnc_validate_key            |t| =    2.02  PASS  (new)
+  voleith_confrlnc_keygen                  |t| =    1.37  PASS  (new; see note)
+
+  Notes:
+    All 21 targets read as expected: the planted sentinel_leak fails
+    (9531) and every real target passes well under 4.5.
+
+    keygen: reads 1.37 here.  Its Fisher-Yates index sampler draws a
+    fixed number of PRG bytes and reduces them into range with a
+    multiply-shift (no reject loop, no hardware divide), so total PRG
+    consumption and total time are independent of the secret seed.
+
+    validate_key: early-window readings touched ~4.4 at the 10% mark
+    (nA=nB=20000) before settling to 2.02 at full sample count; |t|
+    walked down rather than scaling with sqrt(n), the noise-convergence
+    signature seen in Runs 3 and 4, not a structural signal.
+
+    perm_gf16_route and the keygen shuffle are access-ORDER paths: a
+    total-time PASS here is corroborating evidence.  Their obliviousness
+    (masked scans / masked swaps, no secret-indexed access) is
+    established by construction and code inspection; total-time dudect is
+    largely blind to access-order effects.
+
+
+================================================================
+v1.9.0 erasure constant-time gate status -- 2026-07-09
+================================================================
+
+  All six new confidential-RLNC / erasure secret-input targets PASS at
+  the release-gate sample count (200000/class, nmin=196000 after crop):
+  invert_ct 1.49, permute 0.78, permute_inverse 1.36, perm_gf16_route
+  0.30, validate_key 2.02, keygen 1.37.
+
+  Together with the unchanged pre-1.9.0 targets (all still PASS), this
+  confirms the confidential-RLNC / erasure secret-input paths are
+  constant-time on Apple Silicon.  Access-order paths (perm_gf16_route,
+  the keygen shuffle) additionally rest on code inspection, since
+  total-time dudect is largely blind to access-order effects.

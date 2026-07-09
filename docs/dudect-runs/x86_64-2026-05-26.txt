@@ -2,7 +2,7 @@
 voleith dudect timing-validation evidence trail
 Architecture: x86_64
 Host:         Ubuntu 22.04 / gcc
-Date:         2026-05-26 (initial entries; updated as testing continues)
+Date:         2026-05-26 (Runs 1-5); 2026-07-09 (Run 6, v1.9.0 erasure gate)
 ================================================================
 
 Environment
@@ -97,8 +97,7 @@ Phase B status as of 2026-05-26
   All 9 real targets PASS on Linux x86_64 at the relevant sample
   count.  Source-level constant-time guarantee for core/aes_ct64.c
   and the software paths in core/field.c is supported by both
-  structural review (security-review item C-2, C-3) and empirical
-  validation (this file).
+  structural review and empirical validation (this file).
 
   Further x86_64 testing planned before formal release-gate sign-off
   (additional hosts, longer-run --all at 500k+ samples, governor
@@ -202,3 +201,89 @@ Phase B status as of 2026-05-27
   SubBytes delegates to aes_ct64_sbox_inplace_4blocks; ShiftBytes
   indexes by public per-row constants) and empirical validation
   (Runs 4 and 5 above).
+
+
+================================================================
+Run 6 -- 2026-07-09  --all --samples 200000  (v1.9.0 erasure / gf16
+                                              constant-time gate)
+================================================================
+
+  Host:       Sandy Bridge-EP (E5-2690), Debian 13 with clang 19.
+              (Runs 1-5 above were Ubuntu 22.04 / gcc on this uarch.)
+  Timer:      RDTSCP+LFENCE (x86_64 cycles)
+  Affinity:   pinned to CPU 0
+  Governor:   performance
+  Crop:       [1.00%, 99.00%]
+
+  Adds the six erasure / confidential-RLNC secret-input targets
+  introduced for v1.9.0 (invert_ct, permute, permute_inverse,
+  perm_gf16_route, validate_key, keygen) to the pre-existing set.
+
+  sentinel_leak                            |t| = 1800.85  FAIL  (expected sanity check)
+  sentinel_clean                           |t| =    0.21  PASS
+  aes_ct64_encrypt_key                     |t| =    0.47  PASS
+  aes_ct64_encrypt_x4_key                  |t| =    0.42  PASS
+  aes_ct64_encrypt_pt                      |t| =    0.31  PASS
+  aes_ct64_encrypt_x4_pt                   |t| =    0.01  PASS
+  voleith_gf128_mul                        |t| =    0.07  PASS
+  voleith_gf192_mul                        |t| =    0.10  PASS
+  voleith_gf256_mul                        |t| =    0.89  PASS
+  voleith_byte_combine_128                 |t| =    0.25  PASS
+  voleith_byte_combine_192                 |t| =    4.42  PASS  (see note)
+  voleith_byte_combine_256                 |t| =    3.67  PASS
+  voleith_grostl256_msg                    |t| =    0.59  PASS
+  voleith_grostl512_msg                    |t| =    0.48  PASS
+  voleith_grostl256_gf8_build_witness_msg  |t| =    0.36  PASS
+  voleith_ec_matrix_invert_ct              |t| =    2.81  PASS  (new)
+  voleith_confrlnc_permute                 |t| =    1.22  PASS  (new)
+  voleith_confrlnc_permute_inverse         |t| =    2.33  PASS  (new)
+  voleith_perm_gf16_route                  |t| =    1.02  PASS  (new)
+  voleith_confrlnc_validate_key            |t| =    0.81  PASS  (new)
+  voleith_confrlnc_keygen                  |t| =    0.76  PASS  (new; see note)
+
+  Notes:
+    All 21 targets read as expected: the planted sentinel_leak fails
+    (1800) and every real target passes under 4.5.
+
+    byte_combine_192: reads 4.42 here, the highest real |t| in the run.
+    Its running trace touched 4.56 at the 90% mark before settling to
+    4.42 at full sample count, walking around the 4.5 line rather than
+    scaling with sqrt(n).  This is the same host-noise fragility the
+    scalar byte_combine loop showed in Run 1 (where the 100k-sample
+    reading FAILed and dedicated 1M-sample re-runs, Runs 2 and 3,
+    converged to |t| < 0.2).  The objdump analysis from Run 1 applies
+    unchanged: the loop is fully unrolled scalar GPR code with no
+    secret-dependent branches and no secret-indexed loads.
+
+    keygen: reads 0.76 here.  Its Fisher-Yates index sampler draws a
+    fixed number of PRG bytes and reduces them into range with a
+    multiply-shift (no reject loop, no hardware divide), so total PRG
+    consumption and total time are independent of the secret seed.  The
+    divide-free reduction matters on Sandy Bridge, where integer-divide
+    latency is operand-dependent and a modulo reduction could otherwise
+    leak the dividend.
+
+    perm_gf16_route and the keygen shuffle are access-ORDER paths: a
+    total-time PASS here is corroborating evidence.  Their obliviousness
+    (masked scans / masked swaps, no secret-indexed access) rests on
+    construction and code inspection; total-time dudect is largely blind
+    to access-order effects.
+
+
+================================================================
+v1.9.0 erasure constant-time gate status -- 2026-07-09  (Sandy Bridge-EP)
+================================================================
+
+  All 20 real targets PASS at the release-gate sample count
+  (200000/class, nmin=196000 after crop), including the six new
+  confidential-RLNC / erasure secret-input targets: invert_ct 2.81,
+  permute 1.22, permute_inverse 2.33, perm_gf16_route 1.02,
+  validate_key 0.81, keygen 0.76.
+
+  This confirms the confidential-RLNC / erasure secret-input paths are
+  constant-time on the Sandy Bridge-EP host, complementing the Gracemont
+  evidence (x86_64-gracemont-2026-07-09.txt) and the Apple M1 evidence
+  (aarch64-darwin-m1-2026-05-26.txt Run 5) for the full v1.9.0 target
+  set.  keygen's divide-free sampler is confirmed constant-time here.
+  Access-order paths additionally rest on code inspection, since
+  total-time dudect is largely blind to access-order effects.

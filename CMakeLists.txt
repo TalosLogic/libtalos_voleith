@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 cmake_minimum_required(VERSION 3.16)
-project(libvoleith VERSION 1.8.0 LANGUAGES C)
+project(libvoleith VERSION 1.9.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -207,6 +207,7 @@ set(VOLEITH_CORE_SOURCES
     core/field_clmul.c
     core/field_pmull.c
     core/field_scalar.c
+    core/field16.c
     core/aes.c
     core/aes_aesni.c
     core/aes_armv8.c
@@ -229,17 +230,23 @@ set(VOLEITH_CORE_SOURCES
     proof/verifier.c
     proof/gf8_prover.c
     proof/gf8_verifier.c
+    proof/gf16_circuit.c
+    proof/gf16_prover.c
+    proof/gf16_verifier.c
     proof/fiat_shamir.c
     proof/proof_header.c
     proof/circuit_fingerprint.c
     proof/gf8_circuit_fingerprint.c
+    proof/gf16_circuit_fingerprint.c
     proof/params_fingerprint.c
     proof/vole_hash.c
     proof/proof.c
     proof/gf8_proof.c
+    proof/gf16_proof.c
     proof/rs_membership_gf8.c
     proof/rs_gf8.c
     proof/ring_sig_v1_gf8.c
+    proof/rs_chunk_cert_proof.c
     circuits/aes_circuit.c
     circuits/aes_gf8_circuit.c
     circuits/grostl_gf8_circuit.c
@@ -264,6 +271,11 @@ set(VOLEITH_CORE_SOURCES
     circuits/rs_membership_gf8_circuit.c
     circuits/rs_leaf_gf8_circuit.c
     circuits/rs_gf8_circuit.c
+    circuits/rlnc_gf16_circuit.c
+    circuits/rlnc_gf16_cert_circuit.c
+    circuits/permutation_gf16_circuit.c
+    circuits/rlnc_confidential_gf16_circuit.c
+    circuits/rs_chunk_cert_circuit.c
 )
 
 set(VOLEITH_PARSERS_SOURCES
@@ -280,9 +292,26 @@ set(VOLEITH_PARSERS_SOURCES
 )
 list(APPEND VOLEITH_CORE_SOURCES ${VOLEITH_PARSERS_SOURCES})
 
+# Erasure-coding module (plaintext data layer; sibling to vole/, depends
+# only on core/).  Sources are added as each phase lands (P1 matrix, P2 RS,
+# P3 RLNC); the header-only scaffolding (erasure/erasure.h) needs no source.
+set(VOLEITH_ERASURE_SOURCES
+    erasure/matrix.c
+    erasure/rs.c
+    erasure/rlnc.c
+    erasure/rlnc_confidential.c
+    erasure/rs_dataset.c
+    erasure/rs_wire.c
+    erasure/rs_membership.c
+    erasure/rs_retriever.c
+    erasure/rs_consistency.c
+)
+list(APPEND VOLEITH_CORE_SOURCES ${VOLEITH_ERASURE_SOURCES})
+
 set(VOLEITH_CORE_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}/core
     ${CMAKE_CURRENT_SOURCE_DIR}/vole
+    ${CMAKE_CURRENT_SOURCE_DIR}/erasure
     ${CMAKE_CURRENT_SOURCE_DIR}/proof
     ${CMAKE_CURRENT_SOURCE_DIR}/circuits
     ${CMAKE_CURRENT_SOURCE_DIR}/parsers

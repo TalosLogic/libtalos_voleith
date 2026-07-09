@@ -15,6 +15,7 @@
 #include "../core/util.h"
 #include "circuit_fingerprint.h"
 #include "gf8_circuit_fingerprint.h"
+#include "gf16_circuit_fingerprint.h"
 #include "params_fingerprint.h"
 
 #include <string.h>
@@ -200,6 +201,34 @@ voleith_proof_header_check_identity_gf8(const voleith_proof_header_t *h,
         return -1;
 
     if (voleith_gf8_circuit_fingerprint(circuit, expected_circuit_fp) != 0)
+        return -1;
+    if (voleith_params_fingerprint(params, expected_params_fp) != 0)
+        return -1;
+
+    rv = voleith_const_memcmp(h->circuit_fp, expected_circuit_fp,
+                              VOLEITH_PROOF_FINGERPRINT_BYTES) |
+         voleith_const_memcmp(h->params_fp, expected_params_fp,
+                              VOLEITH_PROOF_FINGERPRINT_BYTES);
+
+    voleith_secure_zero(expected_circuit_fp, sizeof(expected_circuit_fp));
+    voleith_secure_zero(expected_params_fp, sizeof(expected_params_fp));
+
+    return (rv == 0) ? 0 : -1;
+}
+
+int
+voleith_proof_header_check_identity_gf16(const voleith_proof_header_t *h,
+                                         const voleith_gf16_circuit_t *circuit,
+                                         const voleith_params_t *params)
+{
+    uint8_t expected_circuit_fp[VOLEITH_PROOF_FINGERPRINT_BYTES];
+    uint8_t expected_params_fp[VOLEITH_PROOF_FINGERPRINT_BYTES];
+    int rv;
+
+    if (h == NULL || circuit == NULL || params == NULL)
+        return -1;
+
+    if (voleith_gf16_circuit_fingerprint(circuit, expected_circuit_fp) != 0)
         return -1;
     if (voleith_params_fingerprint(params, expected_params_fp) != 0)
         return -1;

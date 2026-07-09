@@ -63,8 +63,9 @@ typedef enum {
 } voleith_fs_kind_t;
 
 typedef enum {
-    VOLEITH_BAVC_STANDARD = 0,  /* default; FAEST v2.0 GGM tree */
-    VOLEITH_BAVC_HALF_TREE = 1, /* correlated GGM (the half-tree implementation plan) */
+    VOLEITH_BAVC_STANDARD = 0, /* default; FAEST v2.0 GGM tree */
+    VOLEITH_BAVC_HALF_TREE =
+        1, /* correlated GGM (the half-tree implementation plan) */
 } voleith_bavc_kind_t;
 
 typedef enum {

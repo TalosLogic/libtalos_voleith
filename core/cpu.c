@@ -22,6 +22,7 @@
  */
 
 #include "cpu.h"
+#include "util.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -84,8 +85,10 @@ apply_force_backend(unsigned mask)
         size_t dlen = (size_t)(colon - p);
         size_t vlen = (size_t)(vend - vstart);
 
-#define DMATCH(s) (dlen == sizeof(s) - 1 && memcmp(p, (s), dlen) == 0)
-#define VMATCH(s) (vlen == sizeof(s) - 1 && memcmp(vstart, (s), vlen) == 0)
+#define DMATCH(s)                                                              \
+    (dlen == sizeof(s) - 1 && voleith_const_memcmp(p, (s), dlen) == 0)
+#define VMATCH(s)                                                              \
+    (vlen == sizeof(s) - 1 && voleith_const_memcmp(vstart, (s), vlen) == 0)
 
         if (DMATCH("aes")) {
             if (VMATCH("bitsliced")) {
