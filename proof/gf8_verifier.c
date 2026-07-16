@@ -242,6 +242,7 @@ voleith_gf8_qs_verify(const voleith_gf8_circuit_t *circuit,
 
     uint8_t *bit_keys = NULL; /* n_wires * 8 * nb bytes */
     uint8_t *Q_T = NULL;
+    uint8_t *wire_pub = NULL; /* public byte per INSTANCE/CONST wire, by id */
 
     /*
      * H-3: validate every wire / constraint reference and guard the
@@ -259,6 +260,14 @@ voleith_gf8_qs_verify(const voleith_gf8_circuit_t *circuit,
         case GF8_WIRE_XOR:
         case GF8_WIRE_MUL:
             if (e->a >= n_wires || e->b >= n_wires)
+                return -1;
+            break;
+        case GF8_WIRE_SCALE_INSTANCE:
+            /* b must be an in-range instance wire (mirrors circuit_validate):
+             * keep the primitive memory-safe and public-only even if handed a
+             * forged circuit directly. */
+            if (e->a >= n_wires || e->b >= n_wires ||
+                wires[e->b].kind != GF8_WIRE_INSTANCE)
                 return -1;
             break;
         case GF8_WIRE_XOR_CONST:
@@ -296,6 +305,12 @@ voleith_gf8_qs_verify(const voleith_gf8_circuit_t *circuit,
 
     bit_keys = calloc(n_wires, (size_t)8 * nb);
     if (!bit_keys)
+        goto oom;
+
+    /* Public scalar per wire, needed to rebuild the x -> b*x matrix for
+     * SCALE_INSTANCE gates (b is always an earlier INSTANCE wire). */
+    wire_pub = calloc(n_wires ? n_wires : 1, 1);
+    if (!wire_pub)
         goto oom;
 
     Q_T = gf8v_transpose_matrix(Q, lambda, nb, n_bit_cols);
@@ -357,6 +372,7 @@ voleith_gf8_qs_verify(const voleith_gf8_circuit_t *circuit,
             }
             case GF8_WIRE_INSTANCE: {
                 uint8_t v = instance[instance_idx++];
+                wire_pub[w] = v;
                 for (unsigned int i = 0; i < 8; i++) {
                     if ((v >> i) & 1u)
                         memcpy(bk_w + i * nb, delta, nb);
@@ -367,6 +383,7 @@ voleith_gf8_qs_verify(const voleith_gf8_circuit_t *circuit,
             }
             case GF8_WIRE_CONST: {
                 uint8_t v = e->const_val;
+                wire_pub[w] = v;
                 for (unsigned int i = 0; i < 8; i++) {
                     if ((v >> i) & 1u)
                         memcpy(bk_w + i * nb, delta, nb);
@@ -404,6 +421,15 @@ voleith_gf8_qs_verify(const voleith_gf8_circuit_t *circuit,
                 static const uint8_t SQ[8] = {0x51, 0xD0, 0x22, 0xF0,
                                               0x94, 0x60, 0x28, 0xC0};
                 gf8v_apply_linear_map(bk_w, bit_keys + e->a * 8 * nb, SQ, nb);
+                break;
+            }
+            case GF8_WIRE_SCALE_INSTANCE: {
+                /* Mirror the prover: rebuild the x -> b*x matrix from the
+                 * public scalar on the instance operand and propagate the key
+                 * by linearity.  Free: no d byte, no slot. */
+                uint8_t M[8];
+                voleith_gf8_mul_matrix(M, wire_pub[e->b]);
+                gf8v_apply_linear_map(bk_w, bit_keys + e->a * 8 * nb, M, nb);
                 break;
             }
             }
@@ -520,10 +546,12 @@ voleith_gf8_qs_verify(const voleith_gf8_circuit_t *circuit,
 
     free(Q_T);
     free(bit_keys);
+    free(wire_pub);
     return 0;
 
 oom:
     free(Q_T);
     free(bit_keys);
+    free(wire_pub);
     return -1;
 }

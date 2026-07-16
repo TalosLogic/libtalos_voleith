@@ -1,14 +1,17 @@
 # Shipshape v1 Specification: GF(2^8) Circuit ISA and Text Format
 
 **Format name:** Shipshape. **File extension:** `.ship`
-(RECOMMENDED; §1.1). **Format version:** `.shipshape 1`.
-**Stdlib version:** `crypto-v1`. **Spec revision:** 2026-06-11 (r3).
+(RECOMMENDED; §1.1). **Format version:** `.shipshape 1.1`
+(semver; §1.4). **Stdlib version:** `crypto-v1`.
+**Spec revision:** 2026-07-12 (r4).
 
 **Status: normative; draft until the first conformant parser
 ships.** Draft revisions MAY change the language itself: r3 named
 the format Shipshape and renamed the header magic from `.circ` (the
-design-time working name) to `.shipshape`. After the first parser
-release, a spec revision MUST NOT change which files parse (§1.4).
+design-time working name) to `.shipshape`. r4 adopted semver on the
+format axis and added the `SCALE_INSTANCE` opcode as the first
+additive MINOR bump (`.shipshape 1.1`; §1.4, §4.2.5). After the first
+parser release, a spec revision MUST NOT change which files parse (§1.4).
 This is the single, self-contained normative specification of the
 Shipshape circuit description language and the single source of truth
 for it: the surface syntax and formal grammar (Appendix A, Appendix
@@ -105,9 +108,23 @@ the well-formed files, rejects everything else with a defined error
 
 Three version identifiers move independently:
 
-- The **format version** (`.shipshape 1` header line) names the
-  language this document defines. A future `.shipshape 2` gets a
-  successor specification.
+- The **format version** (`.shipshape MAJOR[.MINOR]` header line) names
+  the language this document defines. It is semver on `(MAJOR, MINOR)`.
+  A bare `MAJOR` means `MAJOR.0`, so `.shipshape 1` == `.shipshape 1.0`.
+  A new Tier 1 opcode (§§4-5) that leaves every prior-minor file valid
+  and fingerprint-identical is an additive MINOR bump (for example
+  `SCALE_INSTANCE`, introduced in `1.1`, §4.2.5); such a change is a
+  delta section in this same document. Removing or renaming an opcode,
+  changing any lowering, cost, or semantics, or tightening a rule is a
+  MAJOR bump, which gets a successor specification. A parser advertises,
+  per supported MAJOR, the highest MINOR it accepts; it accepts a file
+  iff the MAJOR is supported and the file's MINOR does not exceed that
+  highest MINOR, and it dispatches solely to that MAJOR's opcode table
+  (no cross-major substitution, mirroring the stdlib rule). An opcode
+  whose introduced-minor exceeds the file's declared MINOR is rejected
+  (`ERR_OPCODE_VERSION`), distinct from an unknown opcode (`ERR_GATE`).
+  The declared version is the minimum required; under-declaring a
+  newer opcode is an error, over-declaring is legal.
 - The **stdlib version** (`stdlib crypto-v1` or `stdlib crypto-v2`
   header line) names the Tier 2a registry the file calls into (§7).
   Registry changes are always a new version, never an in-place edit.
@@ -256,7 +273,9 @@ namespaces, tracking the security boundary:
 | `stdlib/structural/*` | 2b | Bundled; **empty set in v1**, so every use is a parse error | No | Advisory only |
 | `user/*` | 2b | Defined in the file | No | Advisory only |
 
-Tier 1 is the closed primitive opcode set of §§4-5. Tier 2a is the
+Tier 1 is the primitive opcode set of §§4-5. It is closed within a
+format major: a new primitive enters only by an additive MINOR bump
+(§1.4). Tier 2a is the
 hash-pinned cryptographic registry (§7): names are by-reference
 only, and the parser substitutes the registry-canonical body
 verbatim, so two parsers agree byte-for-byte on what a Tier 2a call
@@ -383,7 +402,11 @@ field and stdlib version has exactly one accepted token sequence. A
 duplicated header keyword is a parse error (enforced structurally by
 the grammar).
 
-- `.shipshape <version>` declares the format version (§1.4).
+- `.shipshape <version>` declares the format version (§1.4). The
+  `<version>` token is `MAJOR` or `MAJOR.MINOR`: non-negative decimal
+  components with no leading zeros (bare `0` excepted). A bare `MAJOR`
+  is `MAJOR.0`. This parser accepts major 1 with minor up to 1; a
+  higher major or minor is `ERR_HEADER`.
 - `field <F> irreducible <poly>` declares the working field. The
   parser rejects any opcode whose semantics are not defined over the
   declared field, and the proof-system binding refuses to verify a
@@ -623,6 +646,25 @@ SQUARE %a -> %c
 - **Cost.** (0, 0, 0).
 - **Lowered form.** `voleith_gf8_add_square` (SQUARE wire kind). A
   parser MUST NOT rewrite `SQUARE` as a `LINEAR_MAP`.
+
+#### 4.2.5 SCALE_INSTANCE
+
+```
+SCALE_INSTANCE %a %b -> %c
+```
+
+- **Since.** Format `1.1` (introduced-minor 1). A file using this
+  opcode MUST declare `.shipshape 1.1` or higher; declaring `1.0` (or a
+  bare `1`) is `ERR_OPCODE_VERSION`.
+- **Semantics.** `c = a . b` in GF(2^8), where `%b` MUST be an INSTANCE
+  (public) wire. Because the multiplier is public, `x -> b . x` is a
+  per-proof GF(2)-linear map on `a`, so the gate is free (no VOLE slot),
+  unlike `MUL`.
+- **Cost.** (0, 0, 0).
+- **Lowered form.** `voleith_gf8_add_scale_instance` (SCALE_INSTANCE
+  wire kind).
+- **Errors.** `%b` not an INSTANCE wire is `ERR_TYPE` (re-checked by the
+  builder and by `voleith_gf8_circuit_validate`).
 
 ### 4.3 Linear sugar
 

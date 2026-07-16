@@ -419,6 +419,15 @@ gf8_qs_prove_impl(const voleith_gf8_circuit_t *circuit, const uint8_t *witness,
                     memcpy(bt_w + i * nb, V_T + (slot * 8 + i) * nb, nb);
                 break;
             }
+            case GF8_WIRE_SCALE_INSTANCE: {
+                /* out = b * a with b a public instance byte: a GF(2)-linear map
+                 * x -> b*x, so the tag propagates like LINEAR_MAP with the
+                 * runtime matrix of that scalar.  No VOLE slot consumed. */
+                uint8_t M[8];
+                voleith_gf8_mul_matrix(M, wire_vals[e->b]);
+                gf8p_apply_linear_map(bt_w, bit_tags + e->a * 8 * nb, M, nb);
+                break;
+            }
             }
         }
     }

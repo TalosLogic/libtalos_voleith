@@ -36,6 +36,7 @@
 #include "merkle_grostl_gf8_circuit.h"
 #include "node_hash_vt.h"
 #include "../proof/gf8_circuit.h"
+#include "../proof/gf8_circuit_fingerprint.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -575,6 +576,186 @@ run_case_leaf_node(const equiv_case_t *cs)
     voleith_gf8_circuit_free(cB);
 }
 
+/* ================================================================
+ * EP.DIR equivalence: merkle_vt_gf8_path_from_leaf_node_public_dir.
+ *
+ * Compare the public-dir entry (directions on INSTANCE wires) against
+ * the secret-dir from-leaf-node entry (directions on WITNESS wires) on
+ * the SAME vt, leaf node, siblings, and direction values:
+ *
+ *   A: merkle_vt_gf8_path_from_leaf_node_secret_dir  (dir = witness)
+ *   B: merkle_vt_gf8_path_from_leaf_node_public_dir  (dir = instance)
+ *
+ * The two are NOT gate-stream identical (public-dir uses slot-free
+ * mux_instance and drops the per-level booleanity assert), so this
+ * pins:
+ *   1. Equivalence of the root wire VALUES (and vs the software root).
+ *   2. Zero added slots for the swap: B's mul_count is exactly A's
+ *      minus the depth*W secret-dir mux gates, and B carries neither
+ *      the depth dir witnesses nor the depth booleanity asserts.
+ *   3. Gate-stream (fingerprint) independence from the direction
+ *      pattern: B built for two different target leaves has the same
+ *      fingerprint (directions enter only as instance values).
+ * ================================================================ */
+
+static void
+run_case_leaf_node_public_dir(const equiv_case_t *cs)
+{
+    size_t W = cs->vt->node_bytes;
+    size_t depth = DEPTH;
+    size_t target = 5;
+
+    printf("  %-15s leaf-node-public-dir\n", cs->name);
+
+    uint8_t leaves[N_LEAVES][LEAF_DATA_BYTES];
+    for (size_t i = 0; i < N_LEAVES; i++)
+        for (size_t j = 0; j < LEAF_DATA_BYTES; j++)
+            leaves[i][j] = (uint8_t)(i * 16 + j);
+
+    uint8_t root_sw[64];
+    uint8_t *siblings = calloc(depth, W);
+    uint8_t dirs[16];
+    build_software_tree(cs->vt, depth, N_LEAVES, target, leaves, root_sw,
+                        siblings, dirs);
+
+    voleith_gf8_circuit_t *cA = voleith_gf8_circuit_new();
+    voleith_gf8_circuit_t *cB = voleith_gf8_circuit_new();
+
+    /*
+     * A declares dir wires as WITNESS, B as INSTANCE.  Everything else
+     * (leaf_data, path_nodes witnesses, then the hash inv_in wires) is
+     * declared in the same order, so the witness layout matches once A's
+     * extra dir witnesses are removed.
+     */
+    gf8_wire_id leaf_wires_A[LEAF_DATA_BYTES], leaf_wires_B[LEAF_DATA_BYTES];
+    for (size_t i = 0; i < LEAF_DATA_BYTES; i++) {
+        leaf_wires_A[i] = voleith_gf8_add_witness(cA);
+        leaf_wires_B[i] = voleith_gf8_add_witness(cB);
+    }
+
+    gf8_wire_id *path_wires_A = calloc(depth * W, sizeof(gf8_wire_id));
+    gf8_wire_id *path_wires_B = calloc(depth * W, sizeof(gf8_wire_id));
+    for (size_t i = 0; i < depth * W; i++) {
+        path_wires_A[i] = voleith_gf8_add_witness(cA);
+        path_wires_B[i] = voleith_gf8_add_witness(cB);
+    }
+
+    gf8_wire_id dir_wires_A[16], dir_wires_B[16];
+    for (size_t k = 0; k < depth; k++) {
+        dir_wires_A[k] = voleith_gf8_add_witness(cA);  /* secret-dir */
+        dir_wires_B[k] = voleith_gf8_add_instance(cB); /* public-dir */
+    }
+
+    gf8_wire_id root_wires_A[64], root_wires_B[64];
+
+    gf8_wire_id leaf_node_A[MERKLE_VT_MAX_NODE_BYTES];
+    gf8_wire_id leaf_node_B[MERKLE_VT_MAX_NODE_BYTES];
+    cs->vt->leaf_circuit(cA, leaf_wires_A, LEAF_DATA_BYTES, leaf_node_A);
+    cs->vt->leaf_circuit(cB, leaf_wires_B, LEAF_DATA_BYTES, leaf_node_B);
+
+    MUST_OK(merkle_vt_gf8_path_from_leaf_node_secret_dir(
+        cA, cs->vt, leaf_node_A, path_wires_A, dir_wires_A, depth,
+        root_wires_A));
+    MUST_OK(merkle_vt_gf8_path_from_leaf_node_public_dir(
+        cB, cs->vt, leaf_node_B, path_wires_B, dir_wires_B, depth,
+        root_wires_B));
+    check("public-dir circuit built ok", voleith_gf8_circuit_ok(cB) == 1);
+
+    /* Zero added slots: B drops depth*W secret muxes, depth dir
+     * witnesses, and depth booleanity asserts; nothing else changes. */
+    size_t wA = voleith_gf8_circuit_witness_count(cA);
+    size_t wB = voleith_gf8_circuit_witness_count(cB);
+    size_t mA = voleith_gf8_circuit_mul_count(cA);
+    size_t mB = voleith_gf8_circuit_mul_count(cB);
+    size_t aA = voleith_gf8_circuit_assert_product_count(cA);
+    size_t aB = voleith_gf8_circuit_assert_product_count(cB);
+    check("public-dir has no dir witnesses", wB == wA - depth);
+    check("public-dir swap is slot-free (no mux muls)", mB == mA - depth * W);
+    check("public-dir has no booleanity asserts", aB == aA - depth);
+
+    /* Same witness (minus dirs) + dir instance values -> same root. */
+    uint8_t *witnessA = calloc(wA > 0 ? wA : 1, 1);
+    uint8_t *witnessB = calloc(wB > 0 ? wB : 1, 1);
+    build_witness(cs->vt, leaves[target], depth, siblings, dirs, /*secret*/ 1,
+                  witnessA);
+    build_witness(cs->vt, leaves[target], depth, siblings, dirs, /*secret*/ 0,
+                  witnessB);
+    uint8_t dir_inst[16];
+    for (size_t k = 0; k < depth; k++)
+        dir_inst[k] = dirs[k];
+
+    size_t nW_A = voleith_gf8_circuit_wire_count(cA);
+    size_t nW_B = voleith_gf8_circuit_wire_count(cB);
+    uint8_t *wireA = calloc(nW_A > 0 ? nW_A : 1, 1);
+    uint8_t *wireB = calloc(nW_B > 0 ? nW_B : 1, 1);
+
+    int okA = voleith_gf8_circuit_eval(cA, witnessA, NULL, wireA);
+    int okB = voleith_gf8_circuit_eval(cB, witnessB, dir_inst, wireB);
+    check("secret-dir A satisfied", okA == 1);
+    check("public-dir B satisfied", okB == 1);
+
+    int roots_eq_AB = 1, roots_eq_sw = 1;
+    for (size_t i = 0; i < W; i++) {
+        if (wireA[root_wires_A[i]] != wireB[root_wires_B[i]])
+            roots_eq_AB = 0;
+        if (wireB[root_wires_B[i]] != root_sw[i])
+            roots_eq_sw = 0;
+    }
+    check("roots agree secret-dir vs public-dir", roots_eq_AB);
+    check("public-dir root matches software", roots_eq_sw);
+
+    /* A flipped public direction feeds the inode a swapped (L, R), so the
+     * inv_in witnesses (built for the correct dir) no longer satisfy the
+     * S-box constraints: the circuit is no longer satisfied.  The swap is
+     * free and public, but it still binds. */
+    uint8_t dir_inst_bad[16];
+    for (size_t k = 0; k < depth; k++)
+        dir_inst_bad[k] = dirs[k];
+    dir_inst_bad[0] ^= 0x01u;
+    int okB_bad = voleith_gf8_circuit_eval(cB, witnessB, dir_inst_bad, wireB);
+    check("flipped public dir breaks satisfaction", okB_bad == 0);
+
+    /* Fingerprint t-independence: the same public-dir construction for a
+     * different target leaf (different direction pattern) yields the
+     * identical gate stream, because directions are instance wires that
+     * never enter circuit construction. */
+    uint8_t fp_b[VOLEITH_GF8_CIRCUIT_FINGERPRINT_BYTES];
+    voleith_gf8_circuit_fingerprint(cB, fp_b);
+
+    voleith_gf8_circuit_t *cC = voleith_gf8_circuit_new();
+    gf8_wire_id leaf_wires_C[LEAF_DATA_BYTES];
+    for (size_t i = 0; i < LEAF_DATA_BYTES; i++)
+        leaf_wires_C[i] = voleith_gf8_add_witness(cC);
+    gf8_wire_id *path_wires_C = calloc(depth * W, sizeof(gf8_wire_id));
+    for (size_t i = 0; i < depth * W; i++)
+        path_wires_C[i] = voleith_gf8_add_witness(cC);
+    gf8_wire_id dir_wires_C[16];
+    for (size_t k = 0; k < depth; k++)
+        dir_wires_C[k] = voleith_gf8_add_instance(cC);
+    gf8_wire_id leaf_node_C[MERKLE_VT_MAX_NODE_BYTES], root_wires_C[64];
+    cs->vt->leaf_circuit(cC, leaf_wires_C, LEAF_DATA_BYTES, leaf_node_C);
+    MUST_OK(merkle_vt_gf8_path_from_leaf_node_public_dir(
+        cC, cs->vt, leaf_node_C, path_wires_C, dir_wires_C, depth,
+        root_wires_C));
+    uint8_t fp_c[VOLEITH_GF8_CIRCUIT_FINGERPRINT_BYTES];
+    voleith_gf8_circuit_fingerprint(cC, fp_c);
+    check("public-dir fingerprint is direction-independent",
+          memcmp(fp_b, fp_c, sizeof(fp_b)) == 0);
+
+    free(path_wires_C);
+    voleith_gf8_circuit_free(cC);
+
+    free(wireA);
+    free(wireB);
+    free(witnessA);
+    free(witnessB);
+    free(path_wires_A);
+    free(path_wires_B);
+    free(siblings);
+    voleith_gf8_circuit_free(cA);
+    voleith_gf8_circuit_free(cB);
+}
+
 int
 main(void)
 {
@@ -588,6 +769,10 @@ main(void)
     printf("\n=== T1: from-leaf-node secret-dir equivalence ===\n");
     for (size_t i = 0; i < N_CASES; i++)
         run_case_leaf_node(&CASES[i]);
+
+    printf("\n=== EP.DIR: from-leaf-node public-dir equivalence ===\n");
+    for (size_t i = 0; i < N_CASES; i++)
+        run_case_leaf_node_public_dir(&CASES[i]);
 
     printf("\n%d / %d tests passed\n", total_pass, total_tests);
     return (total_pass == total_tests) ? 0 : 1;

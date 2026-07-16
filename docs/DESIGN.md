@@ -283,6 +283,10 @@ The registry exists because of a soundness channel, not convenience. A wrong con
 
 For the normative format, grammar, entry table, and conformance requirements, see SHIPSHAPE_SPEC §7.7 ("crypto-v2 registry: hash-parametric crypto extensions (secret-direction)").
 
+### Format versioning: semver on the format axis
+
+The three version axes stay independent: the **format version** (`.shipshape` line, the Tier 1 ISA), the **stdlib version** (`crypto-vN`, the Tier 2a registry), and the editorial spec revision. The format axis is semver `MAJOR.MINOR`. A new Tier 1 opcode that leaves every prior-minor file valid and lowering to a byte-identical fingerprint is an *additive MINOR* bump, not a new major: existing files are unaffected (a bare `MAJOR` reads as `MAJOR.0`), and the frozen registry bodies and all KATs are untouched because the version header is not hashed. Removing or renaming an opcode, or changing any lowering, cost, or semantics, is a MAJOR bump with a successor spec. The scale-by-instance gate ships this way as `SCALE_INSTANCE`, the first `.shipshape 1.1` opcode: a file must declare `1.1` to use it (declaring `1.0` yields `ERR_OPCODE_VERSION`, distinct from `ERR_GATE` for a genuinely unknown opcode). This is what let the V6 gate reach the `.ship` toolchain at minor cost without reopening the frozen crypto registry. Normative rules in SHIPSHAPE_SPEC §1.4.
+
 ### Tier 2a witness dispatch (opt-in prover-side fast path)
 
 The witness-backend dispatch interface (spec §2.5, §7) is implemented as an opt-in speed layer over the generic Tier 1 evaluator. A registered backend fills a registry region's internal inverse witnesses by running the primitive natively (the same `circuits/*_build_witness` the hand-written path uses) instead of the per-wire brute-force `voleith_gf8_inv` scan, and the single forward pass skips the inverse for the slots a backend covers. With no backend registered the generic evaluator carries every circuit unchanged: the layer is never a correctness requirement, only a speed-up where the dominant cost is a few large primitive calls.
@@ -670,7 +674,7 @@ Performance optimisations are applied only to operations that do not affect soun
 
 ## Ring Signatures
 
-The library's ring-signature capabilities (the RSv1 anonymous-membership baseline with optional revocation, and the composable V2 / V3 / V4 superset shipped in 1.8.0: linkable nullifier, hidden-attribute predicates, claimable commitment) are documented in [`docs/RING_SIGNATURES_DESIGN.md`](RING_SIGNATURES_DESIGN.md). They compose the OWF leaf, secret-dir Merkle path, and indexed non-membership circuits described in [`docs/CIRCUIT_DESIGN.md`](CIRCUIT_DESIGN.md) over the GF(2^8) proof stack.
+The library's ring-signature capabilities (the RSv1 anonymous-membership baseline with optional revocation, the composable V2 / V3 / V4 superset shipped in 1.8.0: linkable nullifier, hidden-attribute predicates, claimable commitment, and the V6 forward-secure key-evolution module shipped in 1.10.0) are documented in [`docs/RING_SIGNATURES_DESIGN.md`](RING_SIGNATURES_DESIGN.md). They compose the OWF leaf, secret-dir Merkle path, and indexed non-membership circuits described in [`docs/CIRCUIT_DESIGN.md`](CIRCUIT_DESIGN.md) over the GF(2^8) proof stack. V6 adds a per-identity epoch tree whose in-circuit path uses public directions (the bits of a public epoch `t`), verified through the free scale-by-instance gate so one circuit fingerprint covers every epoch; the GGM key schedule that gives the forward-security erasure boundary stays out of circuit.
 
 ---
 

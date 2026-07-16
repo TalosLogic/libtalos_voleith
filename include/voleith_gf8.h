@@ -166,9 +166,9 @@
 /* Library version */
 #ifndef VOLEITH_VERSION_MAJOR
 #define VOLEITH_VERSION_MAJOR 1
-#define VOLEITH_VERSION_MINOR 9
+#define VOLEITH_VERSION_MINOR 10
 #define VOLEITH_VERSION_PATCH 0
-#define VOLEITH_VERSION_STRING "1.9.0"
+#define VOLEITH_VERSION_STRING "1.10.0"
 #endif
 
 /* GF(2⁸) proof system: circuit builder and prove/verify API */

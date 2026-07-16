@@ -135,6 +135,27 @@ typedef struct voleith_rs_layout {
     size_t inst_spent_root_bytes; /* = node_bytes */
     size_t depth_s;
 
+    /* ----- V6 epoch subtree (depth_e > 0) -------------------------- */
+    /* witness: sk_t (epoch seed) declared in sk's slot, then the leaf salt
+     * (when configured), the epoch attribute tail is the shared V3 attr
+     * wires, the epoch tree siblings, and the epoch leaf / per-level inode
+     * inv_in emitted by stage A0.  instance: the depth_e epoch direction
+     * bytes (bits of t), declared first (before membership_root). */
+    size_t epoch_sk_off;
+    size_t epoch_sk_bytes; /* = cfg->epoch_sk_bytes (16 or 32) */
+    size_t salt_off;
+    size_t salt_bytes; /* = cfg->leaf_salt_bytes (0 = none) */
+    size_t epoch_siblings_off;
+    size_t epoch_siblings_bytes; /* = depth_e * node_bytes */
+    size_t epoch_leaf_invin_off;
+    size_t epoch_leaf_invin_bytes; /* = epoch_hash->leaf_invin_bytes(sk_t) */
+    size_t epoch_path_invin_off;
+    size_t epoch_path_invin_per_level;
+    size_t epoch_path_invin_bytes; /* = depth_e * inode_invin */
+    size_t inst_epoch_dirs_off;
+    size_t inst_epoch_dirs_bytes; /* = depth_e */
+    size_t depth_e;
+
     /* ----- superset totals ----------------------------------------- */
     size_t witness_bytes;
     size_t instance_bytes;
@@ -171,6 +192,15 @@ typedef struct voleith_rs_layout {
  *     the attribute wires.  Predicate gates add mul gates but no
  *     witnesses; only the attribute payload and the widened leaf inv_in
  *     grow the witness.
+ *   epoch (cfg->depth_e > 0, V6 forward secure): stage A0 emits
+ *     h_t = epoch_hash->leaf_circuit(sk_t) then walks the epoch tree with
+ *     public directions (bits of t on instance wires, slot-free
+ *     mux_instance) to epoch_root.  The leaf stage then uses epoch_root in
+ *     sk's place: without V3 the ring leaf IS epoch_root; with V3 it is
+ *     OWF(epoch_root || attrs || salt).  membership.sk_bytes is 0 (EP.CFG);
+ *     when the nullifier is also on, its PRF keys off sk_t (not sk).  All
+ *     of this is inert when depth_e == 0, so a non-epoch config yields the
+ *     exact 1.8.0 wire/gate stream.
  *   commitment (cfg->enable_commitment): binds a hiding commitment
  *     C = tree_vt->leaf_hash(id || rand) as a public instance, with id
  *     (the leaf-preimage handle shared with the future V5 opener) and

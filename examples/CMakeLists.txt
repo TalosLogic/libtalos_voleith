@@ -35,6 +35,7 @@ set(EXAMPLE_NAMES
     example_rs_v2_linkable_gf8
     example_rs_v3_attribute_gf8
     example_rs_v4_claimable_gf8
+    example_rs_v6_forward_secure_gf8
     example_rs_composite_gf8
     example_rs_chunk_membership
     example_rs_heal

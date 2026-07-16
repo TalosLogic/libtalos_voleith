@@ -165,6 +165,7 @@ for further composition.
 | Indexed Merkle non-membership (any hash, hash-agnostic) | `merkle_vt_gf8_indexed_nonmember_circuit` (+ `_secret_dir`) | Same vt coverage as the generic Merkle path. |
 | Ring signatures (RSv1) | `voleith_rsv1_sign` / `_verify`, `voleith_rs_membership_build_circuit`, `voleith_ring_sig_pack` / `_unpack` | Anonymous-member signature over a published ring with optional revocation.  Parameterised over any `voleith_node_hash_vt`; composes the OWF leaf hash, the secret-dir Merkle path, and the secret-dir indexed-Merkle non-member branch into one circuit. |
 | Ring signatures (composable V2/V3/V4) | `voleith_rs_sign` / `_verify`, `voleith_rs_build_circuit`, `voleith_rs_sig_pack` / `_unpack` | Superset of RSv1 with independently-enableable modules: V2 linkable nullifier `T = AES-CMAC(sk, scope)` (+ optional in-circuit spent-set) , V3 hidden-attribute predicates (`EQ` / `RANGE` over `OWF(sk \|\| attributes)`), V4 claimable commitment `C = H(id \|\| rand)`.  One composed Fiat-Shamir transcript with a module-bitmap domain tag; `"VRSC"` wire format.  See [`docs/RING_SIGNATURES_DESIGN.md`](docs/RING_SIGNATURES_DESIGN.md). |
+| Ring signatures (forward-secure V6) | `voleith_rs_epoch_keygen` / `_sign`, `voleith_rs_epoch_state_advance`, `voleith_rs_epoch_derive_sk` | Composable module (bit 5) adding per-identity epoch key evolution: a key captured at epoch t cannot sign for any earlier epoch.  Epoch tree walked in-circuit with public directions (bits of t) via the free scale-by-instance gate; GGM key schedule with erasure lives out of circuit.  Versioned forward-secure state.  See [`docs/RING_SIGNATURES_DESIGN.md`](docs/RING_SIGNATURES_DESIGN.md). |
 | Bounded-range assertion | `assert_in_range_gf8` | Constrains `low <= value <= high` (inclusive) over little-endian byte-vector wires; builds on the indexed-Merkle comparison routine. |
 
 For each building block, see [`docs/CIRCUIT_DESIGN.md`](docs/CIRCUIT_DESIGN.md):
@@ -173,7 +174,8 @@ choice, the Grøstl `_T27` / `_T59` truncation rationale, the Hirose-AES-256
 construction, the `voleith_node_hash_vt` interface, the indexed-Merkle
 non-membership trust assumption (and the record-array validator that
 catches the common operational foot-guns), and worked gate-count examples.
-The ring-signature protocols (RSv1 and the composable V2/V3/V4 superset)
+The ring-signature protocols (RSv1, the composable V2/V3/V4 superset, and
+the forward-secure V6 module)
 and their Fiat-Shamir message-binding construction are in
 [`docs/RING_SIGNATURES_DESIGN.md`](docs/RING_SIGNATURES_DESIGN.md); the proof
 system and layered architecture are in [`docs/DESIGN.md`](docs/DESIGN.md).
@@ -234,6 +236,13 @@ A worked corpus lives under `tests/data/shipshape/` (AES and CMAC key
 knowledge, public- and secret-direction Merkle paths), and
 `examples/example_shipshape_parse_prove.c` runs the full parse to witness to
 prove to verify pipeline on one of them.
+
+The format version is semver `MAJOR.MINOR`: a new Tier 1 opcode that leaves
+existing files valid and fingerprint-identical is an additive MINOR bump. The
+scale-by-instance gate ships this way as `SCALE_INSTANCE`, the first
+`.shipshape 1.1` opcode (a file must declare `1.1` to use it); existing
+`.shipshape 1` files are unaffected. This is independent of the stdlib
+(`crypto-vN`) axis.
 
 The additive `stdlib crypto-v2` registry extends crypto-v1 with three
 hash-parametric crypto extensions (secret-direction Merkle path, indexed-Merkle
@@ -539,6 +548,7 @@ block in both proof-system variants, plus the Bristol Fashion parser:
 | `example_rs_v2_linkable_gf8.c`                    | Composable ring signature with a linkable nullifier: same signer+scope links, different scope does not |
 | `example_rs_v3_attribute_gf8.c`                   | Composable ring signature proving a hidden attribute is in a public range (`age in [18,120]`) |
 | `example_rs_v4_claimable_gf8.c`                   | Composable ring signature with a claimable commitment: sign anonymously, later claim authorship |
+| `example_rs_v6_forward_secure_gf8.c`              | Forward-secure ring signature: sign at epoch 0, advance, sign at epoch 5, retired-epoch refusal, verifier epoch-window policy |
 | `example_rs_composite_gf8.c`                      | All composable modules in one proof (membership + revocation + nullifier + spent-set + attribute + commitment) |
 | `example_rs_chunk_membership.c`                   | RS storage use case end-to-end: FWK-blinded chunk membership certificate, retriever verify/dedup/decode, and the capability-3 consistency check |
 | `example_rs_heal.c`                               | Healer repair flow: decode a dataset once from k survivors, then re-encode several lost chunks bit-identically (digests unchanged) |

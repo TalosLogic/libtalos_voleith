@@ -27,9 +27,16 @@
  *  19:  Instance wires evaluated from instance array
  *  20:  Incremental resource caps (set_limits): wire_cap / gate_cap bound the
  *       circuit, default 0 == unlimited, over-cap append => INVALID + !ok
+ *  21:  SCALE_INSTANCE value equivalence vs add_mul over all (a, b)
+ *  22:  SCALE_INSTANCE consumes no VOLE slot (mul_count / ell unchanged)
+ *  23:  scale_instance / mux_instance reject a non-instance b / sel at build
+ *  24:  mux_instance truth table vs add_mux (boolean sel); zero slots
+ *  25:  voleith_gf8_mul_matrix builds x -> c*x over all (c, x)
+ *  26:  SCALE_INSTANCE validate + fingerprint (deterministic; != add_mul)
  */
 
 #include "../proof/gf8_circuit.h"
+#include "../proof/gf8_circuit_fingerprint.h"
 #include "../core/field.h"
 #include <stdio.h>
 #include <string.h>
@@ -791,6 +798,253 @@ test_resource_caps(void)
 }
 
 /* ================================================================
+ * Test 21: SCALE_INSTANCE value equivalence vs add_mul
+ * Exhaustive over all (a, b) in GF(2⁸)²: scale_instance(a, b_instance)
+ * must equal add_mul(a, b_witness) must equal gf8_mul(a, b).
+ * ================================================================ */
+static void
+test_scale_instance_value_equiv(void)
+{
+    voleith_gf8_circuit_t *cm = voleith_gf8_circuit_new();
+    gf8_wire_id ma = voleith_gf8_add_witness(cm);
+    gf8_wire_id mb = voleith_gf8_add_witness(cm);
+    gf8_wire_id mprod = voleith_gf8_add_mul(cm, ma, mb);
+
+    voleith_gf8_circuit_t *cs = voleith_gf8_circuit_new();
+    gf8_wire_id sa = voleith_gf8_add_witness(cs);
+    gf8_wire_id sb = voleith_gf8_add_instance(cs);
+    gf8_wire_id sprod = voleith_gf8_add_scale_instance(cs, sa, sb);
+
+    check("scale_instance: builder ok (b is instance)",
+          sprod != GF8_WIRE_ID_INVALID && voleith_gf8_circuit_ok(cs) == 1);
+
+    size_t nm = voleith_gf8_circuit_wire_count(cm);
+    size_t ns = voleith_gf8_circuit_wire_count(cs);
+    uint8_t *vm = calloc(nm, 1);
+    uint8_t *vs = calloc(ns, 1);
+
+    int all_ok = 1;
+    for (int av = 0; av < 256 && all_ok; av++) {
+        for (int bv = 0; bv < 256; bv++) {
+            uint8_t mw[2] = {(uint8_t)av, (uint8_t)bv};
+            uint8_t sw[1] = {(uint8_t)av};
+            uint8_t si[1] = {(uint8_t)bv};
+            memset(vm, 0, nm);
+            memset(vs, 0, ns);
+            voleith_gf8_circuit_eval(cm, mw, NULL, vm);
+            voleith_gf8_circuit_eval(cs, sw, si, vs);
+            uint8_t expect = voleith_gf8_mul((uint8_t)av, (uint8_t)bv);
+            if (vm[mprod] != expect || vs[sprod] != expect) {
+                all_ok = 0;
+                break;
+            }
+        }
+    }
+    check("scale_instance: value == add_mul == gf8_mul over all (a,b)", all_ok);
+
+    free(vm);
+    free(vs);
+    voleith_gf8_circuit_free(cm);
+    voleith_gf8_circuit_free(cs);
+}
+
+/* ================================================================
+ * Test 22: SCALE_INSTANCE consumes no VOLE slot
+ * mul_count and ell must be unchanged by the gate.
+ * ================================================================ */
+static void
+test_scale_instance_slot_count(void)
+{
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    gf8_wire_id a = voleith_gf8_add_witness(c);
+    gf8_wire_id b = voleith_gf8_add_instance(c);
+
+    check("scale: mul_count = 0 before", voleith_gf8_circuit_mul_count(c) == 0);
+    check("scale: ell = 1 before (one witness)", voleith_gf8_qs_ell(c) == 1);
+
+    gf8_wire_id s0 = voleith_gf8_add_scale_instance(c, a, b);
+    gf8_wire_id s1 = voleith_gf8_add_scale_instance(c, s0, b);
+    (void)s1;
+
+    check("scale: mul_count still 0 after two gates",
+          voleith_gf8_circuit_mul_count(c) == 0);
+    check("scale: ell still 1 after two gates", voleith_gf8_qs_ell(c) == 1);
+
+    voleith_gf8_circuit_free(c);
+}
+
+/* ================================================================
+ * Test 23: operand-kind rejection at build time
+ * b (scale) / sel (mux_instance) must reference an INSTANCE wire.
+ * ================================================================ */
+static void
+test_scale_instance_rejects_nonpublic(void)
+{
+    /* scale_instance with a witness b is rejected. */
+    {
+        voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+        gf8_wire_id a = voleith_gf8_add_witness(c);
+        gf8_wire_id b = voleith_gf8_add_witness(c);
+        gf8_wire_id s = voleith_gf8_add_scale_instance(c, a, b);
+        check("scale: witness b => INVALID + !ok",
+              s == GF8_WIRE_ID_INVALID && voleith_gf8_circuit_ok(c) == 0);
+        voleith_gf8_circuit_free(c);
+    }
+    /* scale_instance with a const b is rejected (public but not INSTANCE). */
+    {
+        voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+        gf8_wire_id a = voleith_gf8_add_witness(c);
+        gf8_wire_id b = voleith_gf8_add_const(c, 0x02);
+        gf8_wire_id s = voleith_gf8_add_scale_instance(c, a, b);
+        check("scale: const b => INVALID + !ok",
+              s == GF8_WIRE_ID_INVALID && voleith_gf8_circuit_ok(c) == 0);
+        voleith_gf8_circuit_free(c);
+    }
+    /* mux_instance with a witness sel is rejected. */
+    {
+        voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+        gf8_wire_id a = voleith_gf8_add_witness(c);
+        gf8_wire_id b = voleith_gf8_add_witness(c);
+        gf8_wire_id sel = voleith_gf8_add_witness(c);
+        gf8_wire_id m = voleith_gf8_add_mux_instance(c, a, b, sel);
+        check("mux_instance: witness sel => INVALID + !ok",
+              m == GF8_WIRE_ID_INVALID && voleith_gf8_circuit_ok(c) == 0);
+        voleith_gf8_circuit_free(c);
+    }
+}
+
+/* ================================================================
+ * Test 24: mux_instance truth table vs add_mux, and zero slots
+ * ================================================================ */
+static void
+test_mux_instance_equiv(void)
+{
+    voleith_gf8_circuit_t *cm = voleith_gf8_circuit_new();
+    gf8_wire_id ma = voleith_gf8_add_witness(cm);
+    gf8_wire_id mb = voleith_gf8_add_witness(cm);
+    gf8_wire_id msel = voleith_gf8_add_witness(cm);
+    gf8_wire_id mout = voleith_gf8_add_mux(cm, ma, mb, msel);
+
+    voleith_gf8_circuit_t *ci = voleith_gf8_circuit_new();
+    gf8_wire_id ia = voleith_gf8_add_witness(ci);
+    gf8_wire_id ib = voleith_gf8_add_witness(ci);
+    gf8_wire_id isel = voleith_gf8_add_instance(ci);
+    gf8_wire_id iout = voleith_gf8_add_mux_instance(ci, ia, ib, isel);
+
+    check("mux_instance: builder ok (sel is instance)",
+          iout != GF8_WIRE_ID_INVALID && voleith_gf8_circuit_ok(ci) == 1);
+    check("mux_instance: adds zero VOLE slots (ell = 2 witnesses)",
+          voleith_gf8_qs_ell(ci) == 2 &&
+              voleith_gf8_circuit_mul_count(ci) == 0);
+
+    size_t nm = voleith_gf8_circuit_wire_count(cm);
+    size_t ni = voleith_gf8_circuit_wire_count(ci);
+    uint8_t *vm = calloc(nm, 1);
+    uint8_t *vi = calloc(ni, 1);
+
+    int all_ok = 1;
+    for (int av = 0; av < 256 && all_ok; av++) {
+        for (int bv = 0; bv < 256; bv++) {
+            for (int s = 0; s < 2; s++) {
+                uint8_t mw[3] = {(uint8_t)av, (uint8_t)bv, (uint8_t)s};
+                uint8_t iw[2] = {(uint8_t)av, (uint8_t)bv};
+                uint8_t is[1] = {(uint8_t)s};
+                memset(vm, 0, nm);
+                memset(vi, 0, ni);
+                voleith_gf8_circuit_eval(cm, mw, NULL, vm);
+                voleith_gf8_circuit_eval(ci, iw, is, vi);
+                if (vm[mout] != vi[iout]) {
+                    all_ok = 0;
+                    break;
+                }
+            }
+        }
+    }
+    check("mux_instance: truth table matches add_mux for boolean sel", all_ok);
+
+    free(vm);
+    free(vi);
+    voleith_gf8_circuit_free(cm);
+    voleith_gf8_circuit_free(ci);
+}
+
+/* ================================================================
+ * Test 25: voleith_gf8_mul_matrix builds the map x -> c*x
+ * Exercised through a LINEAR_MAP gate (same row-major convention).
+ * ================================================================ */
+static void
+test_mul_matrix(void)
+{
+    int all_ok = 1;
+    for (int c = 0; c < 256 && all_ok; c++) {
+        uint8_t M[8];
+        voleith_gf8_mul_matrix(M, (uint8_t)c);
+
+        voleith_gf8_circuit_t *circ = voleith_gf8_circuit_new();
+        gf8_wire_id a = voleith_gf8_add_witness(circ);
+        gf8_wire_id o = voleith_gf8_add_linear_map(circ, a, M);
+        size_t n = voleith_gf8_circuit_wire_count(circ);
+        uint8_t *vals = calloc(n, 1);
+
+        for (int x = 0; x < 256; x++) {
+            uint8_t w[1] = {(uint8_t)x};
+            memset(vals, 0, n);
+            voleith_gf8_circuit_eval(circ, w, NULL, vals);
+            if (vals[o] != voleith_gf8_mul((uint8_t)c, (uint8_t)x)) {
+                all_ok = 0;
+                break;
+            }
+        }
+        free(vals);
+        voleith_gf8_circuit_free(circ);
+    }
+    check("mul_matrix: M(c)*x == gf8_mul(c, x) over all (c, x)", all_ok);
+}
+
+/* ================================================================
+ * Test 26: validate + fingerprint behavior with the new gate
+ * ================================================================ */
+static void
+test_scale_instance_validate_fingerprint(void)
+{
+    /* A well-formed scale-instance circuit validates. */
+    voleith_gf8_circuit_t *cs = voleith_gf8_circuit_new();
+    gf8_wire_id sa = voleith_gf8_add_witness(cs);
+    gf8_wire_id sb = voleith_gf8_add_instance(cs);
+    gf8_wire_id sprod = voleith_gf8_add_scale_instance(cs, sa, sb);
+    voleith_gf8_assert_zero(cs, sprod);
+    check("scale: well-formed circuit validates",
+          voleith_gf8_circuit_validate(cs) == 0);
+
+    /* Fingerprint is deterministic for the scale circuit. */
+    uint8_t fp_a[VOLEITH_GF8_CIRCUIT_FINGERPRINT_BYTES];
+    uint8_t fp_b[VOLEITH_GF8_CIRCUIT_FINGERPRINT_BYTES];
+    check("scale: fingerprint computes",
+          voleith_gf8_circuit_fingerprint(cs, fp_a) == 0);
+    check("scale: fingerprint computes (2)",
+          voleith_gf8_circuit_fingerprint(cs, fp_b) == 0);
+    check("scale: fingerprint deterministic",
+          memcmp(fp_a, fp_b, sizeof(fp_a)) == 0);
+
+    /* Same topology with add_mul instead of scale_instance yields a distinct
+     * fingerprint (the wire kind byte differs), so the free gate is not
+     * confusable with a MUL gate in the transcript. */
+    voleith_gf8_circuit_t *cm = voleith_gf8_circuit_new();
+    gf8_wire_id ma = voleith_gf8_add_witness(cm);
+    gf8_wire_id mb = voleith_gf8_add_instance(cm);
+    gf8_wire_id mprod = voleith_gf8_add_mul(cm, ma, mb);
+    voleith_gf8_assert_zero(cm, mprod);
+    uint8_t fp_m[VOLEITH_GF8_CIRCUIT_FINGERPRINT_BYTES];
+    check("mul variant: fingerprint computes",
+          voleith_gf8_circuit_fingerprint(cm, fp_m) == 0);
+    check("scale vs mul: fingerprints differ",
+          memcmp(fp_a, fp_m, sizeof(fp_a)) != 0);
+
+    voleith_gf8_circuit_free(cs);
+    voleith_gf8_circuit_free(cm);
+}
+
+/* ================================================================
  * main
  * ================================================================ */
 int
@@ -818,6 +1072,12 @@ main(void)
     test_assert_product();
     test_instance_wires();
     test_resource_caps();
+    test_scale_instance_value_equiv();
+    test_scale_instance_slot_count();
+    test_scale_instance_rejects_nonpublic();
+    test_mux_instance_equiv();
+    test_mul_matrix();
+    test_scale_instance_validate_fingerprint();
 
     printf("  %d / %d passed\n", pass_count, test_count);
     return (pass_count == test_count) ? 0 : 1;

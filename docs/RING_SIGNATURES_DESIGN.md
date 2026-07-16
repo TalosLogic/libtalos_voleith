@@ -197,10 +197,9 @@ Two example programs (`examples/example_ring_sig_v1_gf8.c`, `examples/example_ri
 
 ### Variant roadmap
 
-V1 shipped first as the smallest useful surface, with explicit hooks for follow-on variants. The composable V2 / V3 / V4 superset below shipped in 1.8.0 over the same `voleith_rs_membership_*` baseline. Still on the roadmap:
+V1 shipped first as the smallest useful surface, with explicit hooks for follow-on variants. The composable V2 / V3 / V4 superset below shipped in 1.8.0 over the same `voleith_rs_membership_*` baseline; V6 (forward-secure key evolution) shipped in 1.10.0 as an additional module (see "Forward-secure key evolution (V6)" below). Still on the roadmap:
 
 - **V5 (traceable line-reveal / designated opener).** Two signatures by the same member under the same context reveal the member, or a designated opener can decrypt the signer's identity.
-- **V6 (forward-secure key evolution).** Per-epoch key derivation so past signatures stay valid after key compromise.
 - **V7 (threshold t-of-n).** A signature requires t of n authorised members to cooperate.
 
 The `voleith_rs_membership_*` layer is named separately from `voleith_rsv1_*` precisely so V2 / V4 / V5 / V7 can share the membership baseline without copy-paste. V3 and V6 deviate from the baseline shape and get their own builders.
@@ -313,3 +312,41 @@ revocation_root_or_zero is absorbed unconditionally (node_bytes zeros when disab
 Examples: `example_rs_v2_linkable_gf8`, `example_rs_v3_attribute_gf8`, `example_rs_v4_claimable_gf8`, `example_rs_composite_gf8` (8-member depth-3 ring, sign + verify + headline property, CI smoke return code). All default to Hirose-AES-256 (2^128) with a documented one-edit switch to Grøstl-256 / Grøstl-512 (2^256) and the matching parameter set.
 
 The two attacker-controlled entry points (`voleith_rs_sig_unpack`, the `"VRSC"` envelope parser, and `voleith_rs_verify`) have libFuzzer harnesses under `fuzz/` (`fuzz_rs_unpack`, `fuzz_rs_verify`, seeded by `fuzz_rs_seedgen`).
+
+## Forward-secure key evolution (V6)
+
+V6 (shipped in 1.10.0) adds per-identity key evolution: an enrolled member holds a signing key that changes every epoch, and advancing past an epoch destroys the key material for it. It is a composable module (enabled by `depth_e > 0`) and combines with V2 / V3 / V4 and revocation like the other modules.
+
+### Two guarantees
+
+Against an adversary that steals the signer's complete secret state at some epoch `t_c` (the signer having been honest up to `t_c`, including honest key erasure on every advance):
+
+1. **Forward unforgeability.** The thief cannot produce a signature that verifies for any earlier epoch `tau < t_c`.
+2. **Forward anonymity.** The thief cannot deanonymize the signer's already-published signatures, and (with the V2 nullifier enabled) cannot recompute the signer's past nullifier tags to link them.
+
+The thief does hold everything needed to sign for the current and future epochs, and can advance the state itself. V6 is not recovery-from-compromise: revoke the member's ring leaf (the revocation module) to cut off future signing. What V6 protects is the past.
+
+### Key lifecycle
+
+Each identity carries a tree of `2^depth_e` one-time epoch seeds, expanded from a single master seed with the AES-CTR PRG (a GGM tree, kept entirely out of the circuit). The per-epoch seed `sk_t` is hashed to a leaf, and the leaves are Merkle-hashed into an **epoch root**; that root is the value enrolled as the member's ring leaf. There is no separate static per-member key: with V3 off the ring leaf is the epoch root directly; with V3 on it is `OWF(epoch_root || attributes || salt)`.
+
+- **Keygen** (`voleith_rs_epoch_keygen`) builds the epoch tree, returns the epoch root, and initializes the forward-secure state at epoch 0. The signer keeps a compact cover (`O(depth_e)` seeds) plus the public epoch-node hashes.
+- **Signing at epoch t** (`voleith_rs_epoch_sign`) proves in-circuit that `sk_t` hashes into the enrolled epoch root **at position t**, where the epoch-path directions are the public bits of `t`, then continues into the ordinary secret-direction membership path that hides which member signed. Making the position public is what ties a signature's claimed epoch to the leaf actually used; if it were secret, a thief holding a current seed could sign while claiming any past epoch.
+- **Advancing** (`voleith_rs_epoch_state_advance`) recomputes the cover for `[target_t, T)` and zeroizes every seed that could reach an earlier epoch. After advancing past `t`, the signer API refuses to sign for `t` (the seed no longer exists).
+
+`t` is public and bound both into Fiat-Shamir and as the epoch-path direction wires, so a signature for one epoch cannot be replayed as another. The library verifies "valid for epoch t"; it does not know the current time. **Applications must enforce their own epoch-acceptance window** (reject `t` outside what they currently accept) exactly as they enforce V2 scope policy; the example demonstrates a checked window.
+
+### Caveats
+
+- **Erasure and backups.** Forward security holds only if expended seeds are actually gone. The library zeroizes on advance, but it cannot control operational copies: a restored backup, VM snapshot, or swap image of an old state silently reverts erasure and lets the holder sign for every epoch that was live when the copy was taken. Treat the serialized state like a private key and keep no stale copies.
+- **Per-epoch nullifier semantics (with V2).** The V2 nullifier is keyed with `sk_t`, so linkability is per (scope, epoch): two signatures link only within the same scope and the same epoch. This is deliberate, it is what keeps past tags uncomputable after erasure. Cross-epoch linkability is out of scope, because any key enabling it would survive compromise and let the thief link past signatures. Applications wanting per-epoch uniqueness put `t` in their scope.
+- **External same-hash reuse.** The in-circuit statement fixes the tree roles, but it cannot protect an application's own external constructions that hash related values (for example, epoch roots) with the same node hash. Domain-separating those is the application's responsibility, as with every variant.
+- **Public-state size.** The signer stores all `2T - 1` public epoch-node hashes, `(2T-1) * node_bytes`, which grows with `depth_e` (roughly 32 KB / 2 MB / 512 MB at `depth_e` 10 / 16 / 24 for 16-byte nodes). This is the current-version cost; XMSS/BDS-style `O(log T)` traversal storage is a planned future enhancement for constrained signers or routine deep-tree use.
+
+### Strength and cost
+
+The epoch tree is an honestly-built Merkle tree over one-time keys, so its forgery resistance reduces to preimage / second-preimage resistance of the node hash, not collision resistance. That lets deployments optionally use a cheaper epoch hash than the membership tree hash (`epoch_hash`, with the `epoch_hash_preimage_ok` opt-in relaxing the default strength rule). Signing adds one epoch leaf hash plus `depth_e` inode hashes over the membership circuit; verification stays linear in circuit size, as everywhere in this library.
+
+### Tests and examples
+
+`tests/test_rs_gf8.c` covers the epoch config fingerprint and layout, keygen determinism (epoch-root KAT), sign/verify at several epochs, the forward-security properties (retired-epoch derivation refused; a thief-simulated wrong-epoch proof rejected at sign and verify), state serialize / deserialize with version and tamper rejection, and V6 composition with V2 / V4 / revocation. `example_rs_v6_forward_secure_gf8` runs an 8-member ring: sign at epoch 0, advance, sign at epoch 5, the retired-epoch refusal, and a verifier epoch-window policy check. Three dudect release-gate targets (`voleith_rs_epoch_keygen`, `voleith_rs_epoch_state_advance`, `voleith_rs_epoch_derive_sk`) validate that the key schedule is constant-time in the secret seeds.

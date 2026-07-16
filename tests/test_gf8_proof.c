@@ -12,13 +12,17 @@
  *   5. Different fs_seeds give different but both valid proofs
  *   6. Chain MUL circuit (8 MUL gates)
  *   7. AES-128 GF8 element-level circuit round-trip (FIPS 197 Appendix B)
+ *   8. SCALE_INSTANCE gate roundtrip + tampered-scalar rejection (GATE.QS)
+ *   9. SCALE_INSTANCE vs add_mul: one-slot proof-size delta, both verify
  */
 
 #include "gf8_proof.h"
 #include "gf8_circuit.h"
+#include "gf8_circuit_fingerprint.h"
 #include "gf8_prover.h"
 #include "aes_gf8_circuit.h"
 #include "fiat_shamir.h"
+#include "../core/field.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -916,6 +920,150 @@ test_byte_len_helpers(void)
 }
 
 /* ================================================================
+ * SCALE_INSTANCE gate (GATE.QS): a scale-by-instance product feeding a
+ * MUL gate and an equality assert.
+ *
+ *   w0 = witness(a)
+ *   b  = instance(0)                 public scalar
+ *   s  = scale_instance(w0, b) = a*b (free: no VOLE slot)
+ *   w1 = witness(d)
+ *   m  = mul(s, w1) = a*b*d          (one VOLE slot)
+ *   e  = instance(1)                 expected a*b*d
+ *   assert_equal(m, e)
+ *
+ * When use_mul is set, s is built with add_mul instead (b stays the instance
+ * operand), giving a structurally identical circuit that costs one more slot.
+ * ell = 2 witnesses + (use_mul ? 2 : 1) mul gates.
+ * ================================================================ */
+static voleith_gf8_circuit_t *
+build_scale_circuit(int use_mul)
+{
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    if (!c)
+        return NULL;
+
+    gf8_wire_id w0 = voleith_gf8_add_witness(c);
+    gf8_wire_id b = voleith_gf8_add_instance(c);
+    gf8_wire_id s = use_mul ? voleith_gf8_add_mul(c, w0, b)
+                            : voleith_gf8_add_scale_instance(c, w0, b);
+    gf8_wire_id w1 = voleith_gf8_add_witness(c);
+    gf8_wire_id m = voleith_gf8_add_mul(c, s, w1);
+    gf8_wire_id e = voleith_gf8_add_instance(c);
+    voleith_gf8_assert_equal(c, m, e);
+
+    return c;
+}
+
+static void
+test_scale_gate_roundtrip(const voleith_params_t *params, const char *label)
+{
+    printf("\n[GF8 SCALE_INSTANCE roundtrip: %s]\n", label);
+
+    voleith_gf8_circuit_t *c = build_scale_circuit(0);
+    if (!c) {
+        printf("  SKIP: circuit alloc failed\n");
+        return;
+    }
+    CHECK(voleith_gf8_circuit_ok(c), "scale circuit builds");
+    CHECK(voleith_gf8_qs_ell(c) == 3, "scale circuit ell == 3 (2 wit + 1 mul)");
+
+    uint8_t a = 0x03, d = 0x07, bpub = 0x05;
+    uint8_t prod = voleith_gf8_mul(voleith_gf8_mul(a, bpub), d);
+    uint8_t witness[2] = {a, d};
+    uint8_t instance[2] = {bpub, prod};
+    uint8_t fs_seed[16];
+    memset(fs_seed, 0x71, sizeof(fs_seed));
+
+    voleith_proof_t proof;
+    memset(&proof, 0, sizeof(proof));
+    int pret = voleith_gf8_prove(&proof, params, c, witness, instance, fs_seed,
+                                 sizeof(fs_seed));
+    CHECK(pret == 0, "scale circuit prove succeeds");
+
+    if (pret == 0) {
+        CHECK(voleith_gf8_verify(&proof, params, c, instance, fs_seed,
+                                 sizeof(fs_seed)) == 0,
+              "scale circuit verifies");
+
+        /* Tamper the public scalar b: the verifier rebuilds a different
+         * x -> b*x matrix, so key propagation diverges and verify fails
+         * (design Q2 review item b). */
+        uint8_t instance_bad[2] = {(uint8_t)(bpub ^ 0x01), prod};
+        CHECK(voleith_gf8_verify(&proof, params, c, instance_bad, fs_seed,
+                                 sizeof(fs_seed)) != 0,
+              "tampered scale-instance byte rejected at verify");
+
+        voleith_proof_free(&proof);
+    }
+
+    voleith_gf8_circuit_free(c);
+}
+
+static void
+test_scale_vs_mul_slot(void)
+{
+    printf("\n[GF8 SCALE_INSTANCE vs add_mul: one-slot delta]\n");
+
+    const voleith_params_t *params = &voleith_params_em_128f;
+    voleith_gf8_circuit_t *cs = build_scale_circuit(0);
+    voleith_gf8_circuit_t *cm = build_scale_circuit(1);
+    if (!cs || !cm) {
+        printf("  SKIP: circuit alloc failed\n");
+        voleith_gf8_circuit_free(cs);
+        voleith_gf8_circuit_free(cm);
+        return;
+    }
+
+    size_t ell_s = voleith_gf8_qs_ell(cs);
+    size_t ell_m = voleith_gf8_qs_ell(cm);
+    CHECK(ell_m == ell_s + 1, "add_mul variant costs exactly one more slot");
+
+    /* Structurally identical circuits differ only in the one gate kind, so
+     * the fingerprint distinguishes them. */
+    uint8_t fp_s[VOLEITH_GF8_CIRCUIT_FINGERPRINT_BYTES];
+    uint8_t fp_m[VOLEITH_GF8_CIRCUIT_FINGERPRINT_BYTES];
+    voleith_gf8_circuit_fingerprint(cs, fp_s);
+    voleith_gf8_circuit_fingerprint(cm, fp_m);
+    CHECK(memcmp(fp_s, fp_m, sizeof(fp_s)) != 0,
+          "scale vs mul variant fingerprints differ");
+
+    uint8_t a = 0x03, d = 0x07, bpub = 0x05;
+    uint8_t prod = voleith_gf8_mul(voleith_gf8_mul(a, bpub), d);
+    uint8_t witness[2] = {a, d};
+    uint8_t instance[2] = {bpub, prod};
+    uint8_t fs_seed[16];
+    memset(fs_seed, 0x9E, sizeof(fs_seed));
+
+    voleith_proof_t ps, pm;
+    memset(&ps, 0, sizeof(ps));
+    memset(&pm, 0, sizeof(pm));
+    int rs = voleith_gf8_prove(&ps, params, cs, witness, instance, fs_seed,
+                               sizeof(fs_seed));
+    int rm = voleith_gf8_prove(&pm, params, cm, witness, instance, fs_seed,
+                               sizeof(fs_seed));
+    CHECK(rs == 0 && rm == 0, "both variants prove");
+
+    if (rs == 0 && rm == 0) {
+        CHECK(ps.len == voleith_gf8_proof_byte_size(params, ell_s),
+              "scale proof size matches formula(ell)");
+        CHECK(pm.len == voleith_gf8_proof_byte_size(params, ell_m),
+              "mul proof size matches formula(ell+1)");
+        CHECK(pm.len > ps.len, "mul-variant proof is larger by the slot");
+        CHECK(voleith_gf8_verify(&ps, params, cs, instance, fs_seed,
+                                 sizeof(fs_seed)) == 0,
+              "scale variant verifies");
+        CHECK(voleith_gf8_verify(&pm, params, cm, instance, fs_seed,
+                                 sizeof(fs_seed)) == 0,
+              "mul variant verifies");
+        voleith_proof_free(&ps);
+        voleith_proof_free(&pm);
+    }
+
+    voleith_gf8_circuit_free(cs);
+    voleith_gf8_circuit_free(cm);
+}
+
+/* ================================================================
  * Main
  * ================================================================ */
 
@@ -937,6 +1085,9 @@ main(void)
     test_aes128_gf8_roundtrip();
     test_v2_length_validation();
     test_byte_len_helpers();
+    test_scale_gate_roundtrip(&voleith_params_em_128f, "em_128f");
+    test_scale_gate_roundtrip(&voleith_params_em_128s, "em_128s");
+    test_scale_vs_mul_slot();
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return (g_fail > 0) ? 1 : 0;

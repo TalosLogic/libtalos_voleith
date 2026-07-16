@@ -294,6 +294,7 @@ voleith_shipshape_witness_gen(const voleith_shipshape_parsed_t *parsed,
             value[i] = voleith_gf8_mul(value[w->a], value[w->a]);
             break;
         case GF8_WIRE_MUL:
+        case GF8_WIRE_SCALE_INSTANCE:
             value[i] = voleith_gf8_mul(value[w->a], value[w->b]);
             break;
         }

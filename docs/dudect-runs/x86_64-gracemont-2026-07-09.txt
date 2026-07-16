@@ -2,7 +2,8 @@
 voleith dudect timing-validation evidence trail
 Architecture: x86_64 (Intel Gracemont E-core)
 Host:         Linux / gcc
-Date:         2026-07-09
+Date:         2026-07-09 (Run 1, v1.9.0 erasure gate);
+              2026-07-13 (Run 2, v1.10.0 RSv6 key-schedule gate)
 ================================================================
 
 Environment
@@ -106,3 +107,85 @@ v1.9.0 erasure constant-time gate status -- 2026-07-09  (Gracemont)
   divide-free sampler is confirmed constant-time here.  Access-order
   paths additionally rest on code inspection, since total-time dudect is
   largely blind to access-order effects.
+
+
+================================================================
+Run 2 -- 2026-07-13  --target voleith_rs_epoch_keygen
+                     --target voleith_rs_epoch_derive_sk
+                     --target voleith_rs_epoch_state_advance
+                     --samples 200000  (v1.10.0 RSv6 forward-secure
+                                        epoch key-schedule gate)
+================================================================
+
+  Timer:      RDTSCP+LFENCE (x86_64 cycles)
+  Affinity:   pinned to CPU 0
+  Governor:   performance
+  Crop:       [1.00%, 99.00%]
+
+  Adds the three v1.10.0 RSv6 out-of-circuit GGM key-schedule
+  secret-input targets.  Class A / class B vary the secret master
+  seed (and derived cover seeds) at a fixed public epoch position t;
+  the property under test is timing-independence from the secret
+  seed material, not from t (position hiding is the in-circuit
+  membership walk's job).
+
+  voleith_rs_epoch_keygen         |t| = 0.04  PASS
+  voleith_rs_epoch_derive_sk      |t| = 0.04  PASS
+  voleith_rs_epoch_state_advance  |t| = 0.10  PASS
+
+  voleith_rs_epoch_keygen (reps=1, 200000 samples/class):
+    class A: mu = 5368829.61  sigma = 161015.57  n = 196000 (cropped 4000)
+    class B: mu = 5368848.45  sigma = 161134.86  n = 196000 (cropped 4000)
+    Per-call cost: ~5.37 Mcyc per key schedule (the full GGM
+                   cover-tree expansion).
+    Per-call class delta: ~19 cyc (relative 3.5e-6).
+
+  voleith_rs_epoch_derive_sk (reps=40, 200000 samples/class):
+    class A: mu = 1049397.82  sigma = 39683.35  n = 196000 (cropped 4000)
+    class B: mu = 1049392.12  sigma = 39715.75  n = 196000 (cropped 4000)
+    Per-call cost: ~26.2 kcyc per derivation: the read-only walk of
+                   the cover down to sk_t.
+    Per-call class delta: ~0.14 cyc; effectively zero.
+
+  voleith_rs_epoch_state_advance (reps=40, 200000 samples/class):
+    class A: mu = 130828.17  sigma = 4595.41  n = 196000 (cropped 4000)
+    class B: mu = 130826.72  sigma = 4593.58  n = 196000 (cropped 4000)
+    Per-call cost: ~3.27 kcyc per advance: the puncture +
+                   retired-seed zeroization + new-cover recompute.
+    Per-call class delta: ~0.036 cyc; effectively zero.
+
+  Verdict: PASS for all three, with wide margin (max real |t| = 0.10);
+  every |t| trace walked around zero rather than scaling with sqrt(n).
+  Class sigmas match to within 0.1%, the signature of identical control
+  flow across seeds.  This gates the RSv6 key-schedule paths in
+  proof/rs_epoch_gf8.c on the Gracemont / Atom uarch:
+    - derive_node selects a child with memcpy(cur, bit ? r : l, sb):
+      the branch is on public epoch-bit direction, never a seed byte.
+    - compute_cover loops a t-dependent (public) number of times and
+      expands each node with a fixed-length PRG draw independent of
+      the seed contents.
+    - advance recomputes the cover with fixed passes and zeroizes the
+      retired cover seeds; no seed-dependent branch or index.
+
+
+================================================================
+v1.10.0 RSv6 forward-secure key-schedule gate status -- 2026-07-13
+                                                     (Gracemont)
+================================================================
+
+  All three RSv6 out-of-circuit key-schedule secret-input targets
+  PASS at the release-gate sample count (200000/class, nmin=196000
+  after crop): keygen 0.04, derive_sk 0.04, state_advance 0.10.
+
+  This confirms the GGM epoch key schedule is timing-independent of
+  the secret master seed / cover seeds on a second x86_64
+  microarchitecture (Gracemont), complementing the Sandy Bridge-EP
+  evidence (x86_64-2026-05-26.txt Run 7) and the Apple M1 evidence
+  (aarch64-darwin-m1-2026-05-26.txt Run 6).  The constant-time scope
+  is seed-independence, not epoch-position independence, which is by
+  design: the schedule is public in t, and hiding the signer's
+  epoch / ring position is the in-circuit secret-dir membership walk
+  plus the slot-free uniform gate stream of the public-dir epoch walk.
+  The in-circuit V6 additions (SCALE_INSTANCE-based epoch directions)
+  add no secret-input primitives beyond the existing GF(2^8) gate set
+  already gated in Run 1.

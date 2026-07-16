@@ -511,6 +511,72 @@ voleith_gf8_add_mux(voleith_gf8_circuit_t *c, gf8_wire_id a, gf8_wire_id b,
     return voleith_gf8_add_xor(c, a, prod);
 }
 
+gf8_wire_id
+voleith_gf8_add_scale_instance(voleith_gf8_circuit_t *c, gf8_wire_id a,
+                               gf8_wire_id b)
+{
+    /*
+     * b must reference an already-declared INSTANCE wire.  Rejecting a
+     * witness/gate operand here (and again in circuit_validate) is what keeps
+     * the free path public-only: a secret operand would need a VOLE slot.
+     */
+    if (b >= c->n_wires || c->wires[b].kind != GF8_WIRE_INSTANCE) {
+        c->alloc_ok = 0;
+        return GF8_WIRE_ID_INVALID;
+    }
+    gf8_wire_entry_t e = {
+        .kind = GF8_WIRE_SCALE_INSTANCE,
+        .a = a,
+        .b = b,
+        .const_val = 0,
+        .matrix = {0},
+    };
+    /* Not counted as a MUL: consumes no VOLE slot. */
+    return append_wire(c, e);
+}
+
+gf8_wire_id
+voleith_gf8_add_mux_instance(voleith_gf8_circuit_t *c, gf8_wire_id a,
+                             gf8_wire_id b, gf8_wire_id sel)
+{
+    /*
+     * MUX(a, b, sel) = a XOR (sel · (b XOR a)), with sel an instance wire so
+     * the scale gate is free.
+     *
+     *   diff = b XOR a                    (free XOR gate)
+     *   prod = scale_instance(diff, sel)  (free: sel is public)
+     *   out  = a XOR prod                 (free XOR gate)
+     */
+    gf8_wire_id diff = voleith_gf8_add_xor(c, b, a);
+    if (diff == GF8_WIRE_ID_INVALID)
+        return GF8_WIRE_ID_INVALID;
+
+    gf8_wire_id prod = voleith_gf8_add_scale_instance(c, diff, sel);
+    if (prod == GF8_WIRE_ID_INVALID)
+        return GF8_WIRE_ID_INVALID;
+
+    return voleith_gf8_add_xor(c, a, prod);
+}
+
+void
+voleith_gf8_mul_matrix(uint8_t out[8], uint8_t c)
+{
+    /*
+     * Column j of the map x -> c·x is c·αʲ (αʲ = the element with only bit j
+     * set).  Scatter each column bit into the row-major matrix that
+     * apply_linear_map consumes: out[i] bit j = bit i of c·αʲ.
+     */
+    for (int i = 0; i < 8; i++)
+        out[i] = 0;
+    for (int j = 0; j < 8; j++) {
+        uint8_t col = voleith_gf8_mul(c, (uint8_t)(1u << j));
+        for (int i = 0; i < 8; i++) {
+            if (col & (uint8_t)(1u << i))
+                out[i] |= (uint8_t)(1u << j);
+        }
+    }
+}
+
 void
 voleith_gf8_assert_zero(voleith_gf8_circuit_t *c, gf8_wire_id w)
 {
@@ -629,6 +695,13 @@ voleith_gf8_circuit_validate(const voleith_gf8_circuit_t *c)
             if (w->a >= i || w->b >= i)
                 return -1;
             break;
+        case GF8_WIRE_SCALE_INSTANCE:
+            /* Re-check operand kind: b must be an instance wire, so a forged
+             * blob cannot smuggle a witness operand through the free path. */
+            if (w->a >= i || w->b >= i ||
+                c->wires[w->b].kind != GF8_WIRE_INSTANCE)
+                return -1;
+            break;
         case GF8_WIRE_XOR_CONST:
         case GF8_WIRE_LINEAR_MAP:
         case GF8_WIRE_SQUARE:
@@ -710,6 +783,7 @@ voleith_gf8_circuit_eval(const voleith_gf8_circuit_t *c, const uint8_t *witness,
             val = apply_linear_map(GF8_SQUARE_MATRIX, wire_vals[w->a]);
             break;
         case GF8_WIRE_MUL:
+        case GF8_WIRE_SCALE_INSTANCE:
             val = voleith_gf8_mul(wire_vals[w->a], wire_vals[w->b]);
             break;
         }

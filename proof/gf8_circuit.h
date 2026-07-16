@@ -67,6 +67,9 @@ typedef enum {
     GF8_WIRE_LINEAR_MAP, /* output = M·a for 8×8 GF(2) matrix M (free) */
     GF8_WIRE_SQUARE,     /* output = a² = Frobenius(a) (free: GF(2)-linear) */
     GF8_WIRE_MUL, /* output = a · b in GF(2⁸)  (costs one VOLE slot) */
+    GF8_WIRE_SCALE_INSTANCE, /* output = a · b, b MUST be an instance wire
+                              * (free: b is public, so a·b is GF(2)-linear
+                              * in a via the runtime matrix of x -> b·x) */
 } gf8_wire_kind_t;
 
 /*
@@ -78,7 +81,8 @@ typedef enum {
  * For unary gates (LINEAR_MAP, SQUARE, XOR_CONST): a holds the input, b is
  * GF8_WIRE_ID_INVALID.
  *
- * For binary gates (XOR, MUL): both a and b hold input wire IDs.
+ * For binary gates (XOR, MUL, SCALE_INSTANCE): both a and b hold input wire
+ * IDs.  For SCALE_INSTANCE, b must reference an INSTANCE wire.
  *
  * const_val: for CONST and XOR_CONST, the embedded constant byte.
  *
@@ -228,6 +232,43 @@ gf8_wire_id voleith_gf8_add_mul(voleith_gf8_circuit_t *c, gf8_wire_id a,
  */
 gf8_wire_id voleith_gf8_add_mux(voleith_gf8_circuit_t *c, gf8_wire_id a,
                                 gf8_wire_id b, gf8_wire_id sel);
+
+/*
+ * Add a scale-by-instance gate: output = a · b in GF(2⁸), where b MUST be an
+ * instance (public) wire.  Free in QuickSilver: because b is public, x -> b·x
+ * is a GF(2)-linear map whose 8×8 matrix the prover/verifier build at runtime,
+ * so no VOLE slot is consumed (unlike add_mul).
+ *
+ * a may be any wire.  If b does not reference an INSTANCE wire, the call fails
+ * (returns GF8_WIRE_ID_INVALID and clears voleith_gf8_circuit_ok()); the same
+ * kind check is re-run by voleith_gf8_circuit_validate() so a hand-forged wire
+ * table cannot route a witness operand through the free path.
+ */
+gf8_wire_id voleith_gf8_add_scale_instance(voleith_gf8_circuit_t *c,
+                                           gf8_wire_id a, gf8_wire_id b);
+
+/*
+ * Add a slot-free 2-to-1 MUX gate: output = (sel == 0x00) ? a : b, where sel
+ * MUST be an instance (public) wire.  Emitted as a XOR scale_instance(a XOR b,
+ * sel); costs zero VOLE slots (the scale gate is free).  If sel does not
+ * reference an INSTANCE wire, the call fails like add_scale_instance.
+ *
+ * As with voleith_gf8_add_mux, sel is expected to carry 0x00 or 0x01 and the
+ * circuit does not enforce this: a non-boolean public sel yields the algebraic
+ * result a XOR sel·(b XOR a), not a selection.
+ */
+gf8_wire_id voleith_gf8_add_mux_instance(voleith_gf8_circuit_t *c,
+                                         gf8_wire_id a, gf8_wire_id b,
+                                         gf8_wire_id sel);
+
+/*
+ * Build the 8×8 GF(2) matrix (row-major, as consumed by add_linear_map and the
+ * evaluator) of the GF(2⁸)-linear map x -> c·x for a fixed scalar c.  Column j
+ * is c·αʲ; out[i] bit j is set iff bit i of c·αʲ is set.  Used by the scale-
+ * instance gate's prover/verifier tag propagation, where c is the known public
+ * value on the instance operand.
+ */
+void voleith_gf8_mul_matrix(uint8_t out[8], uint8_t c);
 
 /* ================================================================
  * Constraints - assertions on wire values

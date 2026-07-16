@@ -88,6 +88,31 @@ voleith_rs_build_circuit(voleith_gf8_circuit_t *c,
     int rc = -1;
     size_t i;
 
+    /* ---- V6 epoch locals ------------------------------------------- */
+    int epoch_enabled;
+    const voleith_node_hash_vt *epoch_vt = NULL;
+    size_t epoch_sk_bytes = 0;
+    size_t salt_bytes = 0;
+    size_t epoch_leaf_invin_bytes = 0;
+    size_t epoch_inode_invin_bytes = 0;
+    size_t epoch_sk_first = 0;
+    size_t salt_first = 0;
+    size_t epoch_sib_first = 0;
+    size_t epoch_dirs_inst_first = 0;
+    size_t epoch_leaf_invin_first = 0;
+    size_t epoch_path_invin_first = 0;
+    gf8_wire_id *sk_t_wires = NULL;
+    gf8_wire_id *salt_wires = NULL;
+    gf8_wire_id *epoch_sibling_wires = NULL;
+    gf8_wire_id *epoch_dir_inst_wires = NULL;
+    gf8_wire_id *owf_tail_wires = NULL;
+    gf8_wire_id ht_wires[MERKLE_VT_MAX_NODE_BYTES];
+    gf8_wire_id epoch_root_wires[MERKLE_VT_MAX_NODE_BYTES];
+    const gf8_wire_id *prf_key_wires;
+    size_t prf_key_bytes;
+    int owf_used;
+    size_t owf_preimage;
+
     if (c == NULL || cfg == NULL || layout_out == NULL)
         return -1;
     if (voleith_rs_config_validate(cfg) != 0)
@@ -100,10 +125,18 @@ voleith_rs_build_circuit(voleith_gf8_circuit_t *c,
     commit_total =
         commit_enabled ? cfg->commit_id_bytes + cfg->commit_rand_bytes : 0;
 
-    /* V2 PRF key is the AES-CMAC key = sk, so sk must be a valid AES key
-     * width.  (config_validate floors sk_bytes >= 1 but does not pin the
-     * AES width, which only the nullifier module requires.) */
-    if (nullifier_enabled && mcfg->sk_bytes != 16 && mcfg->sk_bytes != 32)
+    /* V6: the leaf secret is sk_t via the epoch subtree; membership.sk_bytes
+     * is 0 (EP.CFG), so the nullifier PRF keys off sk_t (Q5). */
+    epoch_enabled = cfg->depth_e > 0;
+    epoch_sk_bytes = epoch_enabled ? cfg->epoch_sk_bytes : 0;
+    salt_bytes = epoch_enabled ? cfg->leaf_salt_bytes : 0;
+    prf_key_bytes = epoch_enabled ? epoch_sk_bytes : mcfg->sk_bytes;
+
+    /* V2 PRF key is the AES-CMAC key, so it must be a valid AES key width.
+     * (config_validate floors membership.sk_bytes >= 1 for non-V6 and pins
+     * epoch_sk_bytes in {16,32} for V6, but the AES-width requirement only
+     * applies when the nullifier module is on.) */
+    if (nullifier_enabled && prf_key_bytes != 16 && prf_key_bytes != 32)
         return -1;
 
     tree_vt = mcfg->tree_hash;
@@ -128,7 +161,30 @@ voleith_rs_build_circuit(voleith_gf8_circuit_t *c,
         }
     }
 
-    leaf_invin_bytes = owf_vt->leaf_invin_bytes(mcfg->sk_bytes + attr_total);
+    if (epoch_enabled) {
+        epoch_vt = cfg->epoch_hash ? cfg->epoch_hash : tree_vt;
+        epoch_leaf_invin_bytes = epoch_vt->leaf_invin_bytes(epoch_sk_bytes);
+        epoch_inode_invin_bytes = epoch_vt->inode_invin_bytes();
+    }
+
+    /*
+     * OWF leaf preimage.  Non-V6: sk || attrs.  V6 + V3: epoch_root ||
+     * attrs || salt (the epoch root heads the preimage in sk's slot).  V6
+     * without V3: the leaf IS epoch_root and no OWF runs, so no OWF inv_in.
+     */
+    if (epoch_enabled) {
+        if (schema != NULL) {
+            owf_used = 1;
+            owf_preimage = W + attr_total + salt_bytes;
+        } else {
+            owf_used = 0;
+            owf_preimage = 0;
+        }
+    } else {
+        owf_used = 1;
+        owf_preimage = mcfg->sk_bytes + attr_total;
+    }
+    leaf_invin_bytes = owf_used ? owf_vt->leaf_invin_bytes(owf_preimage) : 0;
     inode_invin_bytes = tree_vt->inode_invin_bytes();
 
     base_wit = voleith_gf8_circuit_witness_count(c);
@@ -143,6 +199,26 @@ voleith_rs_build_circuit(voleith_gf8_circuit_t *c,
     for (i = 0; i < mcfg->sk_bytes; i++)
         sk_wires[i] = voleith_gf8_add_witness(c);
 
+    /* ---- [V6] 1b. sk_t + leaf salt witness (sk's slot) ------------- */
+    if (epoch_enabled) {
+        epoch_sk_first = voleith_gf8_circuit_witness_count(c);
+        sk_t_wires = calloc(epoch_sk_bytes, sizeof(*sk_t_wires));
+        if (sk_t_wires == NULL)
+            goto out;
+        for (i = 0; i < epoch_sk_bytes; i++)
+            sk_t_wires[i] = voleith_gf8_add_witness(c);
+
+        if (salt_bytes > 0) {
+            salt_first = voleith_gf8_circuit_witness_count(c);
+            salt_wires = calloc(salt_bytes, sizeof(*salt_wires));
+            if (salt_wires == NULL)
+                goto out;
+            for (i = 0; i < salt_bytes; i++)
+                salt_wires[i] = voleith_gf8_add_witness(c);
+        }
+    }
+    prf_key_wires = epoch_enabled ? sk_t_wires : sk_wires;
+
     /* ---- [V3] 2. attribute witness wires (leaf preimage tail) ------- */
     if (attr_total > 0) {
         attr_first_wit = voleith_gf8_circuit_witness_count(c);
@@ -151,6 +227,17 @@ voleith_rs_build_circuit(voleith_gf8_circuit_t *c,
             goto out;
         for (i = 0; i < attr_total; i++)
             attr_wires[i] = voleith_gf8_add_witness(c);
+    }
+
+    /* ---- [V6] epoch sibling witness wires -------------------------- */
+    if (epoch_enabled) {
+        epoch_sib_first = voleith_gf8_circuit_witness_count(c);
+        epoch_sibling_wires =
+            calloc(cfg->depth_e * W, sizeof(*epoch_sibling_wires));
+        if (epoch_sibling_wires == NULL)
+            goto out;
+        for (i = 0; i < cfg->depth_e * W; i++)
+            epoch_sibling_wires[i] = voleith_gf8_add_witness(c);
     }
 
     /* ---- 3. membership dir witness wires ---------------------------- */
@@ -168,6 +255,17 @@ voleith_rs_build_circuit(voleith_gf8_circuit_t *c,
         goto out;
     for (i = 0; i < mcfg->depth_m * W; i++)
         sibling_wires[i] = voleith_gf8_add_witness(c);
+
+    /* ---- [V6] epoch direction instance wires (first instance) ------ */
+    if (epoch_enabled) {
+        epoch_dirs_inst_first = voleith_gf8_circuit_instance_count(c);
+        epoch_dir_inst_wires =
+            calloc(cfg->depth_e, sizeof(*epoch_dir_inst_wires));
+        if (epoch_dir_inst_wires == NULL)
+            goto out;
+        for (i = 0; i < cfg->depth_e; i++)
+            epoch_dir_inst_wires[i] = voleith_gf8_add_instance(c);
+    }
 
     /* ---- 4. membership_root instance wires -------------------------- */
     root_inst_first = voleith_gf8_circuit_instance_count(c);
@@ -221,11 +319,46 @@ voleith_rs_build_circuit(voleith_gf8_circuit_t *c,
             bounds_wires[i] = voleith_gf8_add_instance(c);
     }
 
-    /* ---- A. leaf circuit: leaf_node = OWF(sk || attributes) --------- */
+    /* ---- [V6] A0. epoch subtree: h_t = leaf(sk_t); epoch_root walk --- */
+    if (epoch_enabled) {
+        epoch_leaf_invin_first = voleith_gf8_circuit_witness_count(c);
+        epoch_vt->leaf_circuit(c, sk_t_wires, epoch_sk_bytes, ht_wires);
+
+        epoch_path_invin_first = voleith_gf8_circuit_witness_count(c);
+        if (merkle_vt_gf8_path_from_leaf_node_public_dir(
+                c, epoch_vt, ht_wires, epoch_sibling_wires,
+                epoch_dir_inst_wires, cfg->depth_e, epoch_root_wires) != 0)
+            goto out;
+    }
+
+    /* ---- A. leaf circuit --------------------------------------------
+     * Non-V6: leaf_node = OWF(sk || attributes).
+     * V6 + V3: leaf_node = OWF(epoch_root || attributes || salt).
+     * V6 without V3: leaf_node := epoch_root (no OWF).
+     */
     leaf_invin_first_wit = voleith_gf8_circuit_witness_count(c);
-    if (rs_leaf_gf8_build_circuit(c, owf_vt, sk_wires, mcfg->sk_bytes,
-                                  attr_wires, attr_total, leaf_node_wires) != 0)
-        goto out;
+    if (epoch_enabled && schema == NULL) {
+        for (i = 0; i < W; i++)
+            leaf_node_wires[i] = epoch_root_wires[i];
+    } else if (epoch_enabled) {
+        size_t tail = attr_total + salt_bytes;
+        owf_tail_wires = calloc(tail > 0 ? tail : 1, sizeof(*owf_tail_wires));
+        if (owf_tail_wires == NULL)
+            goto out;
+        for (i = 0; i < attr_total; i++)
+            owf_tail_wires[i] = attr_wires[i];
+        for (i = 0; i < salt_bytes; i++)
+            owf_tail_wires[attr_total + i] = salt_wires[i];
+        if (rs_leaf_gf8_build_circuit(c, owf_vt, epoch_root_wires, W,
+                                      owf_tail_wires, tail,
+                                      leaf_node_wires) != 0)
+            goto out;
+    } else {
+        if (rs_leaf_gf8_build_circuit(c, owf_vt, sk_wires, mcfg->sk_bytes,
+                                      attr_wires, attr_total,
+                                      leaf_node_wires) != 0)
+            goto out;
+    }
 
     /* ---- B. merkle path from leaf_node to computed root ------------- */
     path_invin_first_wit = voleith_gf8_circuit_witness_count(c);
@@ -255,6 +388,26 @@ voleith_rs_build_circuit(voleith_gf8_circuit_t *c,
     layout.membership.depth_m = mcfg->depth_m;
     layout.membership.node_bytes = W;
 
+    /* ---- [V6] epoch layout ----------------------------------------- */
+    if (epoch_enabled) {
+        layout.epoch_sk_off = epoch_sk_first - base_wit;
+        layout.epoch_sk_bytes = epoch_sk_bytes;
+        if (salt_bytes > 0) {
+            layout.salt_off = salt_first - base_wit;
+            layout.salt_bytes = salt_bytes;
+        }
+        layout.epoch_siblings_off = epoch_sib_first - base_wit;
+        layout.epoch_siblings_bytes = cfg->depth_e * W;
+        layout.epoch_leaf_invin_off = epoch_leaf_invin_first - base_wit;
+        layout.epoch_leaf_invin_bytes = epoch_leaf_invin_bytes;
+        layout.epoch_path_invin_off = epoch_path_invin_first - base_wit;
+        layout.epoch_path_invin_per_level = epoch_inode_invin_bytes;
+        layout.epoch_path_invin_bytes = cfg->depth_e * epoch_inode_invin_bytes;
+        layout.inst_epoch_dirs_off = epoch_dirs_inst_first - base_inst;
+        layout.inst_epoch_dirs_bytes = cfg->depth_e;
+        layout.depth_e = cfg->depth_e;
+    }
+
     /* ---- D. [V4] commitment: C_computed = H(id || rand) ------------- */
     if (commit_enabled) {
         size_t commit_invin_first = voleith_gf8_circuit_witness_count(c);
@@ -280,11 +433,12 @@ voleith_rs_build_circuit(voleith_gf8_circuit_t *c,
 
         if (t_bytes == VOLEITH_RS_NULLIFIER_BYTES) {
             /* <= 128-bit-CR tree: raw 16-byte tag T = AES-CMAC(sk, scope). */
-            aes_cmac_gf8_circuit(c, sk_wires, mcfg->sk_bytes, scope_inst_wires,
-                                 cfg->scope_bytes, t_computed_wires);
+            aes_cmac_gf8_circuit(c, prf_key_wires, prf_key_bytes,
+                                 scope_inst_wires, cfg->scope_bytes,
+                                 t_computed_wires);
             layout.nullifier_invin_bytes =
-                aes_cmac_gf8_witness_bytes(mcfg->sk_bytes, cfg->scope_bytes) -
-                mcfg->sk_bytes;
+                aes_cmac_gf8_witness_bytes(prf_key_bytes, cfg->scope_bytes) -
+                prf_key_bytes;
         } else {
             /*
              * >= 256-bit-CR tree: T = SP 800-108 KDF-CTR-CMAC(sk, ...) at
@@ -319,15 +473,15 @@ voleith_rs_build_circuit(voleith_gf8_circuit_t *c,
             fi[p++] = voleith_gf8_add_const(c, (uint8_t)(l_bits & 0xFF));
 
             kdf_rc =
-                kdf_ctr_cmac_gf8_circuit(c, sk_wires, mcfg->sk_bytes, fi,
+                kdf_ctr_cmac_gf8_circuit(c, prf_key_wires, prf_key_bytes, fi,
                                          fi_bytes, t_computed_wires, t_bytes);
             free(fi);
             if (kdf_rc != 0)
                 goto out;
             layout.nullifier_invin_bytes =
-                kdf_ctr_cmac_gf8_witness_bytes(mcfg->sk_bytes, t_bytes,
+                kdf_ctr_cmac_gf8_witness_bytes(prf_key_bytes, t_bytes,
                                                fi_bytes) -
-                mcfg->sk_bytes;
+                prf_key_bytes;
         }
 
         for (i = 0; i < t_bytes; i++)
@@ -591,6 +745,11 @@ voleith_rs_build_circuit(voleith_gf8_circuit_t *c,
 
 out:
     free(sk_wires);
+    free(sk_t_wires);
+    free(salt_wires);
+    free(epoch_sibling_wires);
+    free(epoch_dir_inst_wires);
+    free(owf_tail_wires);
     free(attr_wires);
     free(bounds_wires);
     free(idrand_wires);

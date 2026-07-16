@@ -5,6 +5,35 @@ All notable changes to libtalos_voleith are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] [2026-07-16]
+
+V6 forward-secure ring signatures: per-identity epoch key evolution so a
+key captured at epoch t cannot sign for any earlier epoch. Ships as
+composable module bit 5, plus a free scale-by-instance gate and the first
+`.shipshape 1.1` opcode.
+
+### Added
+
+- `proof/rs_epoch_gf8.{c,h}`: V6 epoch key schedule (GGM cover keygen,
+  forward-only advance with erasure, sk_t derivation, versioned state
+  serialization) and the `voleith_rs_epoch_sign` convenience signer. Epoch
+  membership leaf is the epoch-tree root; the in-circuit epoch path walks
+  to it with public directions (bits of t), so one t-independent circuit
+  fingerprint per cfg. Config gains `depth_e`, `epoch_hash`,
+  `epoch_sk_bytes`, `leaf_salt_bytes`, `epoch_hash_preimage_ok`.
+- `GF8_WIRE_SCALE_INSTANCE` gate (`proof/gf8_circuit.c`): `c = a * b` with
+  `b` an instance wire; free (no VOLE slot). Backs the slot-free public-dir
+  epoch walk (`voleith_gf8_add_mux_instance`).
+- Shipshape format axis is now semver `MAJOR.MINOR`; a new Tier 1 opcode is
+  an additive MINOR bump. `SCALE_INSTANCE` ships as the first `.shipshape
+  1.1` opcode. New `ERR_OPCODE_VERSION` for an opcode newer than a file's
+  declared minor. See `docs/specs/SHIPSHAPE_SPEC.md` §1.4 / §4.2.5.
+- `examples/example_rs_v6_forward_secure_gf8.c`: enroll, sign at epoch 0,
+  advance, sign at epoch 5, retired-epoch refusal, verifier epoch-window
+  policy.
+- dudect release-gate targets `voleith_rs_epoch_keygen`,
+  `voleith_rs_epoch_state_advance`, `voleith_rs_epoch_derive_sk`.
+
 ## [1.9.0] 2026-07-09
 
 Erasure coding: Reed-Solomon storage and RLNC transport codecs over a new

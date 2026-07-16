@@ -727,6 +727,95 @@ test_header(void)
                     ".shipshape 1\n"
                     "field GF(2^8) irreducible 0x11B\n"
                     "stdlib crypto-v1\n") == VOLEITH_SHIPSHAPE_ERR_HEADER);
+
+    /* Format semver (SHIPSHAPE_FORMAT_VERSIONING.md): bare MAJOR == MAJOR.0,
+     * so `.shipshape 1.0` is the same as `.shipshape 1`. */
+    check("hdr: format 1.0 == 1", parse_str(".shipshape 1.0\n"
+                                            "field GF(2^8) irreducible 0x11B\n"
+                                            "stdlib crypto-v1\n") == 0);
+    /* Minor up to the parser's max (1) is accepted. */
+    check("hdr: format 1.1 accepted",
+          parse_str(".shipshape 1.1\n"
+                    "field GF(2^8) irreducible 0x11B\n"
+                    "stdlib crypto-v1\n") == 0);
+    /* A minor newer than the parser is ERR_HEADER. */
+    check("hdr: format 1.2 too new",
+          parse_str(".shipshape 1.2\n"
+                    "field GF(2^8) irreducible 0x11B\n"
+                    "stdlib crypto-v1\n") == VOLEITH_SHIPSHAPE_ERR_HEADER);
+    /* An unsupported major is ERR_HEADER (even at minor 0). */
+    check("hdr: format 2.0 unsupported major",
+          parse_str(".shipshape 2.0\n"
+                    "field GF(2^8) irreducible 0x11B\n"
+                    "stdlib crypto-v1\n") == VOLEITH_SHIPSHAPE_ERR_HEADER);
+    /* A leading zero in a version component is malformed. */
+    check("hdr: format 1.01 leading zero",
+          parse_str(".shipshape 1.01\n"
+                    "field GF(2^8) irreducible 0x11B\n"
+                    "stdlib crypto-v1\n") == VOLEITH_SHIPSHAPE_ERR_HEADER);
+    check("hdr: format 01.0 leading zero major",
+          parse_str(".shipshape 01.0\n"
+                    "field GF(2^8) irreducible 0x11B\n"
+                    "stdlib crypto-v1\n") == VOLEITH_SHIPSHAPE_ERR_HEADER);
+    /* An empty minor after the dot is malformed. */
+    check("hdr: format 1. empty minor",
+          parse_str(".shipshape 1.\n"
+                    "field GF(2^8) irreducible 0x11B\n"
+                    "stdlib crypto-v1\n") == VOLEITH_SHIPSHAPE_ERR_HEADER);
+    /* A non-numeric version is malformed. */
+    check("hdr: format 1.x non-numeric",
+          parse_str(".shipshape 1.x\n"
+                    "field GF(2^8) irreducible 0x11B\n"
+                    "stdlib crypto-v1\n") == VOLEITH_SHIPSHAPE_ERR_HEADER);
+}
+
+/* ================================================================
+ * Group H2: SCALE_INSTANCE, the first minor-1 opcode (1.10.0 / EP.SHIP).
+ * ================================================================ */
+
+static void
+test_scale_instance(void)
+{
+    /* Body: c = a * pub, pub an INSTANCE (public) wire, a a WITNESS byte. */
+    static const char body[] = "field GF(2^8) irreducible 0x11B\n"
+                               "stdlib crypto-v1\n"
+                               "WITNESS -> %a : byte\n"
+                               "INSTANCE -> %pub : byte\n"
+                               "SCALE_INSTANCE %a %pub -> %c\n";
+
+    /* Full 1.1 program with the opcode lowers cleanly. */
+    {
+        char buf[512];
+        snprintf(buf, sizeof(buf), ".shipshape 1.1\n%s", body);
+        check("scale_instance: 1.1 program parses", parse_str(buf) == 0);
+    }
+
+    /* The same program under 1.0 (or bare 1) is ERR_OPCODE_VERSION: the
+     * opcode's introduced-minor (1) exceeds the declared minor (0). */
+    {
+        char buf[512];
+        snprintf(buf, sizeof(buf), ".shipshape 1.0\n%s", body);
+        check("scale_instance: rejected at 1.0",
+              parse_str(buf) == VOLEITH_SHIPSHAPE_ERR_OPCODE_VERSION);
+        snprintf(buf, sizeof(buf), ".shipshape 1\n%s", body);
+        check("scale_instance: rejected at bare 1",
+              parse_str(buf) == VOLEITH_SHIPSHAPE_ERR_OPCODE_VERSION);
+    }
+
+    /* The multiplier %b must be an INSTANCE wire; a WITNESS multiplier is a
+     * type error (a secret multiplier would need a VOLE slot). */
+    {
+        char buf[512];
+        snprintf(buf, sizeof(buf),
+                 ".shipshape 1.1\n"
+                 "field GF(2^8) irreducible 0x11B\n"
+                 "stdlib crypto-v1\n"
+                 "WITNESS -> %%a : byte\n"
+                 "WITNESS -> %%b : byte\n"
+                 "SCALE_INSTANCE %%a %%b -> %%c\n");
+        check("scale_instance: witness multiplier => TYPE",
+              parse_str(buf) == VOLEITH_SHIPSHAPE_ERR_TYPE);
+    }
 }
 
 /* ================================================================
@@ -1750,6 +1839,7 @@ main(void)
     test_line_layer();
     test_line_layer_public();
     test_header();
+    test_scale_instance();
     test_declarations();
     test_gates();
     test_gate_types_and_errors();

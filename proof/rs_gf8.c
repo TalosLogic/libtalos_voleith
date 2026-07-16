@@ -56,6 +56,8 @@ voleith_rs_module_bitmap(const voleith_rs_config_t *cfg)
         bitmap |= VOLEITH_RS_MODULE_COMMITMENT;
     if (cfg->depth_s > 0)
         bitmap |= VOLEITH_RS_MODULE_SPENT_SET;
+    if (cfg->depth_e > 0)
+        bitmap |= VOLEITH_RS_MODULE_EPOCH;
 
     return bitmap;
 }
@@ -75,9 +77,26 @@ voleith_rs_config_validate(const voleith_rs_config_t *cfg)
      * is OWF(sk || attributes), so the V1 "sk == fixed_leaf_bytes" check
      * does not apply; the OWF-input-width check below uses the wider
      * single-compression capacity leaf_block_bytes instead.
+     *
+     * V6: the membership sk is absent (the leaf secret is sk_t via the
+     * epoch subtree), so membership.sk_bytes must be 0.  The shared
+     * structural validator predates V6 and rejects sk_bytes == 0, so run
+     * it against a copy whose sk_bytes stands in as epoch_sk_bytes purely
+     * to satisfy that >= 1 sanity rule; every other structural check
+     * (depth_m, tree_hash, owf compatibility) still runs on the real
+     * values, and the cfg-fingerprint absorbs the real sk_bytes == 0.
      */
-    if (voleith_rs_membership_validate_structural(&cfg->membership) != 0)
-        return -1;
+    if (cfg->depth_e > 0) {
+        voleith_rs_membership_config_t probe = cfg->membership;
+        if (cfg->membership.sk_bytes != 0)
+            return -1;
+        probe.sk_bytes = cfg->epoch_sk_bytes;
+        if (voleith_rs_membership_validate_structural(&probe) != 0)
+            return -1;
+    } else {
+        if (voleith_rs_membership_validate_structural(&cfg->membership) != 0)
+            return -1;
+    }
 
     if (cfg->attr_schema != NULL) {
         const voleith_rs_attr_schema_t *schema = cfg->attr_schema;
@@ -114,18 +133,84 @@ voleith_rs_config_validate(const voleith_rs_config_t *cfg)
      *   both 0 (variable-leaf OWF): no upper bound beyond the attribute
      *     cap already enforced.
      */
-    owf_vt = cfg->membership.owf_hash ? cfg->membership.owf_hash
-                                      : cfg->membership.tree_hash;
-    if (cfg->membership.sk_bytes > SIZE_MAX - attr_total)
-        return -1;
-    leaf_preimage = cfg->membership.sk_bytes + attr_total;
+    const voleith_node_hash_vt *tree_vt = cfg->membership.tree_hash;
+    int v6_on = (cfg->depth_e > 0);
+    owf_vt = cfg->membership.owf_hash ? cfg->membership.owf_hash : tree_vt;
 
-    if (owf_vt->leaf_block_bytes != 0) {
-        if (leaf_preimage > owf_vt->leaf_block_bytes)
+    /*
+     * V6 epoch tree.  When enabled, the leaf secret is sk_t derived
+     * through the epoch subtree, so membership.sk_bytes is 0 and the OWF
+     * preimage (V3 on) or the leaf itself (V3 off) is headed by the
+     * epoch_root, not a static sk.  The epoch fields are meaningful only
+     * here, so they must be zero/NULL when V6 is off (otherwise a set
+     * field would be silently dropped from the cfg-fingerprint, which
+     * absorbs the epoch section only when bit 5 is set).
+     */
+    if (v6_on) {
+        const voleith_node_hash_vt *epoch_vt =
+            cfg->epoch_hash ? cfg->epoch_hash : tree_vt;
+
+        if (cfg->depth_e > VOLEITH_RS_EPOCH_MAX_DEPTH)
             return -1;
-    } else if (owf_vt->fixed_leaf_bytes != 0) {
-        if (leaf_preimage != owf_vt->fixed_leaf_bytes)
+        /* The epoch root IS the ring leaf value (or the OWF preimage
+         * head), so its width must match the membership tree node. */
+        if (epoch_vt->node_bytes != tree_vt->node_bytes)
             return -1;
+        /* GGM seed / AES key width, and it must fit the epoch_hash's own
+         * leaf capacity (sk_t is the epoch leaf preimage). */
+        if (cfg->epoch_sk_bytes != 16u && cfg->epoch_sk_bytes != 32u)
+            return -1;
+        if (epoch_vt->leaf_block_bytes != 0) {
+            if (cfg->epoch_sk_bytes > epoch_vt->leaf_block_bytes)
+                return -1;
+        } else if (epoch_vt->fixed_leaf_bytes != 0) {
+            if (cfg->epoch_sk_bytes != epoch_vt->fixed_leaf_bytes)
+                return -1;
+        }
+        /* (membership.sk_bytes == 0 was enforced with the structural
+         * probe above.) */
+        /* Strength: the epoch tree must not be the weakest link; the
+         * preimage-ok opt-in relaxes the rule by one bit-halving (Q4). */
+        if (cfg->epoch_hash_preimage_ok) {
+            if (2u * epoch_vt->cr_bits < tree_vt->cr_bits)
+                return -1;
+        } else {
+            if (epoch_vt->cr_bits < tree_vt->cr_bits)
+                return -1;
+        }
+        /* Salt blinds V3 attributes; it needs both V6 and V3. */
+        if (cfg->leaf_salt_bytes > 0 && cfg->attr_schema == NULL)
+            return -1;
+    } else {
+        if (cfg->epoch_hash != NULL || cfg->epoch_sk_bytes != 0 ||
+            cfg->leaf_salt_bytes != 0 || cfg->epoch_hash_preimage_ok != 0)
+            return -1;
+    }
+
+    /*
+     * OWF input width bound.  With V6+V3 the preimage is
+     * epoch_root || attributes || salt (epoch_root heads it in sk's
+     * slot); with V6 and no V3 the leaf IS epoch_root and no OWF runs, so
+     * no width check applies; otherwise (V6 off) it is sk || attributes.
+     */
+    if (!(v6_on && cfg->attr_schema == NULL)) {
+        size_t head = v6_on ? tree_vt->node_bytes : cfg->membership.sk_bytes;
+        size_t salt = v6_on ? cfg->leaf_salt_bytes : 0u;
+
+        if (head > SIZE_MAX - attr_total)
+            return -1;
+        leaf_preimage = head + attr_total;
+        if (leaf_preimage > SIZE_MAX - salt)
+            return -1;
+        leaf_preimage += salt;
+
+        if (owf_vt->leaf_block_bytes != 0) {
+            if (leaf_preimage > owf_vt->leaf_block_bytes)
+                return -1;
+        } else if (owf_vt->fixed_leaf_bytes != 0) {
+            if (leaf_preimage != owf_vt->fixed_leaf_bytes)
+                return -1;
+        }
     }
 
     if (cfg->depth_s > 0) {
@@ -172,6 +257,13 @@ voleith_rs_config_fingerprint(const voleith_rs_config_t *cfg,
 
     bitmap = voleith_rs_module_bitmap(cfg);
 
+    if (bitmap & VOLEITH_RS_MODULE_EPOCH) {
+        const voleith_node_hash_vt *epoch_vt =
+            cfg->epoch_hash ? cfg->epoch_hash : cfg->membership.tree_hash;
+        if (epoch_vt->name == NULL)
+            return -1;
+    }
+
     voleith_shake256_init(&ctx);
 
     /* domain_tag holds the explicit 16-byte tag (including its two
@@ -207,6 +299,22 @@ voleith_rs_config_fingerprint(const voleith_rs_config_t *cfg,
         }
     }
 
+    if (bitmap & VOLEITH_RS_MODULE_EPOCH) {
+        const voleith_node_hash_vt *epoch_vt =
+            cfg->epoch_hash ? cfg->epoch_hash : cfg->membership.tree_hash;
+        const char *epoch_name = epoch_vt->name;
+        size_t epoch_name_len = strlen(epoch_name);
+        uint8_t flag_byte = cfg->epoch_hash_preimage_ok ? 1u : 0u;
+
+        voleith_shake256_absorb_u64_le(&ctx, (uint64_t)cfg->depth_e);
+        voleith_shake256_absorb_u32_le(&ctx, (uint32_t)epoch_name_len);
+        voleith_shake256_absorb(&ctx, (const uint8_t *)epoch_name,
+                                epoch_name_len);
+        voleith_shake256_absorb_u64_le(&ctx, (uint64_t)cfg->epoch_sk_bytes);
+        voleith_shake256_absorb_u64_le(&ctx, (uint64_t)cfg->leaf_salt_bytes);
+        voleith_shake256_absorb(&ctx, &flag_byte, 1);
+    }
+
     voleith_shake256_squeeze(&ctx, out, VOLEITH_RS_CONFIG_FINGERPRINT_BYTES);
     voleith_hash_ctx_clear(&ctx);
 
@@ -222,7 +330,7 @@ voleith_rs_config_fingerprint(const voleith_rs_config_t *cfg,
 static int
 walk_path_invin(const voleith_node_hash_vt *vt, const uint8_t *start_node,
                 const uint8_t *siblings, size_t leaf_index, size_t depth,
-                size_t per_level, uint8_t *out)
+                size_t per_level, uint8_t *out, uint8_t *root_out)
 {
     size_t W = vt->node_bytes;
     uint8_t current[MERKLE_VT_MAX_NODE_BYTES];
@@ -243,6 +351,9 @@ walk_path_invin(const voleith_node_hash_vt *vt, const uint8_t *start_node,
         }
         memcpy(current, next, W);
     }
+
+    if (rc == 0 && root_out != NULL)
+        memcpy(root_out, current, W);
 
     voleith_secure_zero(current, sizeof(current));
     voleith_secure_zero(next, sizeof(next));
@@ -275,7 +386,7 @@ pack_imt_branch(const voleith_node_hash_vt *vt, const uint8_t *low_value,
         return -1;
     }
     rc = walk_path_invin(vt, node, siblings, adj_leaf_index, depth, per_level,
-                         path_invin_out);
+                         path_invin_out, NULL);
 
     voleith_secure_zero(leaf_data, sizeof(leaf_data));
     voleith_secure_zero(node, sizeof(node));
@@ -300,8 +411,9 @@ voleith_rs_pack_witness(const voleith_rs_config_t *cfg,
     uint8_t leaf_node[MERKLE_VT_MAX_NODE_BYTES];
     int rc = -1;
 
-    if (cfg == NULL || layout == NULL || sk == NULL || path == NULL ||
-        witness_out == NULL)
+    if (cfg == NULL || layout == NULL || path == NULL || witness_out == NULL)
+        return -1;
+    if (cfg->membership.sk_bytes > 0 && sk == NULL)
         return -1;
     if (voleith_rs_config_validate(cfg) != 0)
         return -1;
@@ -312,6 +424,27 @@ voleith_rs_pack_witness(const voleith_rs_config_t *cfg,
     owf_vt = mcfg->owf_hash ? mcfg->owf_hash : mcfg->tree_hash;
     W = tree_vt->node_bytes;
     t_bytes = voleith_rs_nullifier_bytes(cfg);
+
+    /* V6 epoch: sk_t is the leaf secret and the nullifier PRF key. */
+    int epoch_enabled = cfg->depth_e > 0;
+    const voleith_node_hash_vt *epoch_vt =
+        epoch_enabled ? (cfg->epoch_hash ? cfg->epoch_hash : tree_vt) : NULL;
+    size_t epoch_sk_bytes = epoch_enabled ? cfg->epoch_sk_bytes : 0;
+    size_t salt_bytes = epoch_enabled ? cfg->leaf_salt_bytes : 0;
+    size_t prf_key_bytes = epoch_enabled ? epoch_sk_bytes : mcfg->sk_bytes;
+    const uint8_t *prf_key = epoch_enabled ? path->epoch_sk : sk;
+    uint8_t epoch_root[MERKLE_VT_MAX_NODE_BYTES];
+    uint8_t ht[MERKLE_VT_MAX_NODE_BYTES];
+
+    if (epoch_enabled) {
+        if (path->epoch_sk == NULL || path->epoch_siblings == NULL)
+            return -1;
+        if (salt_bytes > 0 && path->epoch_salt == NULL)
+            return -1;
+        if (cfg->depth_e < sizeof(size_t) * 8 &&
+            path->epoch >= ((uint64_t)1u << cfg->depth_e))
+            return -1;
+    }
 
     attr_total = layout->attr_bytes;
     commit_total = cfg->enable_commitment
@@ -326,8 +459,32 @@ voleith_rs_pack_witness(const voleith_rs_config_t *cfg,
         path->membership.leaf_index >= ((size_t)1u << ml->depth_m))
         return -1;
 
-    /* 1. sk */
-    memcpy(witness_out + ml->sk_off, sk, mcfg->sk_bytes);
+    /* 1. sk (nothing under V6, where sk_bytes == 0) */
+    if (mcfg->sk_bytes > 0)
+        memcpy(witness_out + ml->sk_off, sk, mcfg->sk_bytes);
+
+    /* 1b. [V6] sk_t + salt + epoch siblings + epoch leaf/inode inv_in */
+    if (epoch_enabled) {
+        memcpy(witness_out + layout->epoch_sk_off, path->epoch_sk,
+               epoch_sk_bytes);
+        if (salt_bytes > 0)
+            memcpy(witness_out + layout->salt_off, path->epoch_salt,
+                   salt_bytes);
+        memcpy(witness_out + layout->epoch_siblings_off, path->epoch_siblings,
+               layout->epoch_siblings_bytes);
+
+        if (epoch_vt->leaf_hash(path->epoch_sk, epoch_sk_bytes, ht) != 0)
+            goto out;
+        if (epoch_vt->leaf_build_witness(path->epoch_sk, epoch_sk_bytes,
+                                         witness_out +
+                                             layout->epoch_leaf_invin_off) != 0)
+            goto out;
+        if (walk_path_invin(
+                epoch_vt, ht, path->epoch_siblings, (size_t)path->epoch,
+                cfg->depth_e, layout->epoch_path_invin_per_level,
+                witness_out + layout->epoch_path_invin_off, epoch_root) != 0)
+            goto out;
+    }
 
     /* 2. attributes */
     if (attr_total > 0)
@@ -351,19 +508,47 @@ voleith_rs_pack_witness(const voleith_rs_config_t *cfg,
                cfg->commit_rand_bytes);
     }
 
-    /* leaf inv_in over sk || attrs */
-    if (rs_leaf_gf8_build_witness(owf_vt, sk, mcfg->sk_bytes, attrs, attr_total,
-                                  witness_out + ml->owf_invin_off) != 0)
-        return -1;
+    /* leaf_node and, when an OWF runs, its leaf inv_in.
+     *   non-V6:        leaf_node = OWF(sk || attrs)
+     *   V6 + V3:       leaf_node = OWF(epoch_root || attrs || salt)
+     *   V6 without V3: leaf_node := epoch_root (no OWF inv_in) */
+    if (epoch_enabled && cfg->attr_schema == NULL) {
+        memcpy(leaf_node, epoch_root, W);
+    } else if (epoch_enabled) {
+        size_t tail = attr_total + salt_bytes;
+        uint8_t *tailbuf = calloc(tail > 0 ? tail : 1, 1);
+        int lrc;
+
+        if (tailbuf == NULL)
+            goto out;
+        if (attr_total > 0)
+            memcpy(tailbuf, attrs, attr_total);
+        if (salt_bytes > 0)
+            memcpy(tailbuf + attr_total, path->epoch_salt, salt_bytes);
+        lrc = rs_leaf_gf8_build_witness(owf_vt, epoch_root, W, tailbuf, tail,
+                                        witness_out + ml->owf_invin_off);
+        if (lrc == 0)
+            lrc = rs_leaf_gf8_hash(owf_vt, epoch_root, W, tailbuf, tail,
+                                   leaf_node);
+        voleith_secure_zero(tailbuf, tail);
+        free(tailbuf);
+        if (lrc != 0)
+            goto out;
+    } else {
+        if (rs_leaf_gf8_build_witness(owf_vt, sk, mcfg->sk_bytes, attrs,
+                                      attr_total,
+                                      witness_out + ml->owf_invin_off) != 0)
+            goto out;
+        if (rs_leaf_gf8_hash(owf_vt, sk, mcfg->sk_bytes, attrs, attr_total,
+                             leaf_node) != 0)
+            goto out;
+    }
 
     /* membership path inv_in */
-    if (rs_leaf_gf8_hash(owf_vt, sk, mcfg->sk_bytes, attrs, attr_total,
-                         leaf_node) != 0)
-        return -1;
     if (walk_path_invin(tree_vt, leaf_node, path->membership.siblings,
                         path->membership.leaf_index, ml->depth_m,
                         ml->path_invin_per_level,
-                        witness_out + ml->path_invin_off) != 0)
+                        witness_out + ml->path_invin_off, NULL) != 0)
         goto out;
 
     /* [V4] commitment leaf-hash inv_in over id || rand */
@@ -392,23 +577,23 @@ voleith_rs_pack_witness(const voleith_rs_config_t *cfg,
 
         if (t_bytes == VOLEITH_RS_NULLIFIER_BYTES) {
             size_t buf =
-                aes_cmac_gf8_witness_bytes(mcfg->sk_bytes, cfg->scope_bytes);
+                aes_cmac_gf8_witness_bytes(prf_key_bytes, cfg->scope_bytes);
             uint8_t *tmp;
 
             tmp = calloc(buf, 1);
             if (tmp == NULL)
                 goto out;
-            aes_cmac_gf8_build_witness(sk, mcfg->sk_bytes, path->scope,
+            aes_cmac_gf8_build_witness(prf_key, prf_key_bytes, path->scope,
                                        cfg->scope_bytes, tmp, NULL);
             memcpy(witness_out + layout->nullifier_invin_off,
-                   tmp + mcfg->sk_bytes, layout->nullifier_invin_bytes);
+                   tmp + prf_key_bytes, layout->nullifier_invin_bytes);
             voleith_secure_zero(tmp, buf);
             free(tmp);
         } else {
             /* FixedInputData = Label || 0x00 || scope || [L]_2 (bits). */
             size_t fi_bytes =
                 VOLEITH_RS_NULLIFIER_KDF_LABEL_BYTES + 1 + cfg->scope_bytes + 4;
-            size_t buf = kdf_ctr_cmac_gf8_witness_bytes(mcfg->sk_bytes, t_bytes,
+            size_t buf = kdf_ctr_cmac_gf8_witness_bytes(prf_key_bytes, t_bytes,
                                                         fi_bytes);
             size_t l_bits = t_bytes * 8u;
             size_t p = 0;
@@ -434,11 +619,11 @@ voleith_rs_pack_witness(const voleith_rs_config_t *cfg,
             fi[p++] = (uint8_t)((l_bits >> 8) & 0xFF);
             fi[p++] = (uint8_t)(l_bits & 0xFF);
 
-            krc = kdf_ctr_cmac_gf8_build_witness(sk, mcfg->sk_bytes, fi,
+            krc = kdf_ctr_cmac_gf8_build_witness(prf_key, prf_key_bytes, fi,
                                                  fi_bytes, t_bytes, tmp, NULL);
             if (krc == 0)
                 memcpy(witness_out + layout->nullifier_invin_off,
-                       tmp + mcfg->sk_bytes, layout->nullifier_invin_bytes);
+                       tmp + prf_key_bytes, layout->nullifier_invin_bytes);
             voleith_secure_zero(tmp, buf);
             free(fi);
             free(tmp);
@@ -504,6 +689,8 @@ voleith_rs_pack_witness(const voleith_rs_config_t *cfg,
     rc = 0;
 out:
     voleith_secure_zero(leaf_node, sizeof(leaf_node));
+    voleith_secure_zero(ht, sizeof(ht));
+    voleith_secure_zero(epoch_root, sizeof(epoch_root));
     return rc;
 }
 
@@ -641,6 +828,9 @@ voleith_rs_compute_fs_seed(const voleith_rs_config_t *cfg,
         return -1;
     if ((bitmap & VOLEITH_RS_MODULE_SPENT_SET) && pub->spent_root == NULL)
         return -1;
+    if ((bitmap & VOLEITH_RS_MODULE_EPOCH) && cfg->depth_e < 64 &&
+        pub->epoch >= ((uint64_t)1u << cfg->depth_e))
+        return -1;
     if (bitmap & VOLEITH_RS_MODULE_PREDICATE) {
         /* Enforce pub->bounds_len against the schema-derived total before the
          * absorb loop reads pub->bounds (N10-2): EQ contributes width, RANGE
@@ -726,6 +916,11 @@ voleith_rs_compute_fs_seed(const voleith_rs_config_t *cfg,
         }
     }
 
+    /* [V6] epoch section: t as 8-byte big-endian, gated by bit 5, after
+     * the predicate section and immediately before m_len || m (design 6.4). */
+    if (bitmap & VOLEITH_RS_MODULE_EPOCH)
+        absorb_u64_be(&ctx, pub->epoch);
+
     absorb_u64_be(&ctx, (uint64_t)m_len);
     if (m_len != 0)
         voleith_shake256_absorb(&ctx, m, m_len);
@@ -763,6 +958,12 @@ rs_fill_instance(const voleith_rs_layout_t *layout,
                  const voleith_rs_public_t *pub, uint8_t *instance)
 {
     const voleith_rs_membership_layout_t *ml = &layout->membership;
+
+    /* [V6] epoch direction bytes derived from the public epoch index t; the
+     * caller never supplies them. */
+    for (size_t k = 0; k < layout->inst_epoch_dirs_bytes; k++)
+        instance[layout->inst_epoch_dirs_off + k] =
+            (uint8_t)((pub->epoch >> k) & 1u);
 
     memcpy(instance + ml->inst_root_off, pub->membership_root,
            ml->inst_root_bytes);
@@ -820,8 +1021,12 @@ voleith_rs_sign(voleith_rs_sig_t *sig_out, const voleith_rs_config_t *cfg,
     voleith_proof_t proof = {NULL, 0};
     int rc = -1;
 
-    if (sig_out == NULL || cfg == NULL || params == NULL || sk == NULL ||
-        path == NULL || pub == NULL)
+    voleith_rs_path_t local_path;
+
+    if (sig_out == NULL || cfg == NULL || params == NULL || path == NULL ||
+        pub == NULL)
+        return -1;
+    if (cfg->membership.sk_bytes > 0 && sk == NULL) /* sk absent under V6 */
         return -1;
     if (m == NULL && m_len != 0)
         return -1;
@@ -830,6 +1035,12 @@ voleith_rs_sign(voleith_rs_sig_t *sig_out, const voleith_rs_config_t *cfg,
 
     if (voleith_rs_config_validate(cfg) != 0)
         return -1;
+
+    /* pub->epoch is authoritative: the instance dirs and fs_seed derive from
+     * it, so pin the packer's epoch (which orders the epoch inv_in walk) to
+     * match, sparing the caller from setting path->epoch too. */
+    local_path = *path;
+    local_path.epoch = pub->epoch;
 
     circuit = voleith_gf8_circuit_new();
     if (circuit == NULL)
@@ -842,8 +1053,9 @@ voleith_rs_sign(voleith_rs_sig_t *sig_out, const voleith_rs_config_t *cfg,
     if (witness == NULL || instance == NULL)
         goto out;
 
-    if (voleith_rs_pack_witness(cfg, &layout, sk, attrs, path, path->commit_id,
-                                path->commit_rand, witness) != 0)
+    if (voleith_rs_pack_witness(cfg, &layout, sk, attrs, &local_path,
+                                local_path.commit_id, local_path.commit_rand,
+                                witness) != 0)
         goto out;
     if (rs_fill_instance(&layout, pub, instance) != 0)
         goto out;

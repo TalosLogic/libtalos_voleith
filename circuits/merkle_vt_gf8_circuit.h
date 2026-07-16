@@ -166,4 +166,50 @@ int merkle_vt_gf8_path_from_leaf_node_secret_dir(
     const gf8_wire_id *leaf_node, const gf8_wire_id *path_nodes,
     const gf8_wire_id *path_dirs, size_t depth, gf8_wire_id *root);
 
+/*
+ * merkle_vt_gf8_path_from_leaf_node_public_dir - verify a Merkle path
+ * with per-proof PUBLIC directions supplied as instance wires, starting
+ * from a pre-computed leaf node.
+ *
+ * Unlike merkle_vt_gf8_path_circuit (whose path_dirs are plain uint8_t
+ * constants resolved at circuit-build time, so the tree shape is baked
+ * into the fingerprint), this entry carries the direction at each level
+ * on a runtime INSTANCE wire.  The gate stream is therefore identical
+ * for every direction pattern at a fixed depth (t-independence): the
+ * concrete directions enter only as instance values at prove/verify
+ * time.  This is what lets a caller pin one circuit fingerprint per
+ * config while proving membership at an arbitrary public position, e.g.
+ * the RSv6 epoch tree at public epoch t.
+ *
+ * Like the secret-dir form, each level selects the (left, right) pair
+ * from (current, sibling) under dir.  Here the selection uses the
+ * slot-free voleith_gf8_add_mux_instance, so a level costs only the
+ * inode gate stream: zero extra VOLE slots for the swap.
+ *
+ * Booleanity: NONE is enforced, and none is required.  Each dir is a
+ * PUBLIC instance wire fixed by the verifier (library-derived from the
+ * public index), not a prover-chosen witness, so the malicious-selector
+ * attack that forces the secret-dir booleanity rule does not apply.  A
+ * non-boolean public dir would merely yield the algebraic mux result
+ * (same contract as voleith_gf8_add_mux_instance); callers derive the
+ * dir bytes from the public position and never expose that knob.
+ *
+ * c          - circuit to append to
+ * h          - node-hash vt
+ * leaf_node  - h->node_bytes wire IDs holding the leaf node value
+ * path_nodes - depth * h->node_bytes wire IDs of sibling hashes,
+ *              leaf-level first
+ * path_dirs  - depth INSTANCE wires, each carrying 0x00 or 0x01
+ * depth      - number of levels from leaf node to root
+ * root       - output: h->node_bytes wire IDs for the root
+ *
+ * Returns 0 on success, -1 if h->node_bytes exceeds
+ * MERKLE_VT_MAX_NODE_BYTES.  A dir wire that is not an INSTANCE wire is
+ * rejected by the mux builder (the circuit's ok flag is cleared).
+ */
+int merkle_vt_gf8_path_from_leaf_node_public_dir(
+    voleith_gf8_circuit_t *c, const voleith_node_hash_vt *h,
+    const gf8_wire_id *leaf_node, const gf8_wire_id *path_nodes,
+    const gf8_wire_id *path_dirs, size_t depth, gf8_wire_id *root);
+
 #endif /* VOLEITH_MERKLE_VT_GF8_CIRCUIT_H */

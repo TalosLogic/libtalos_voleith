@@ -101,6 +101,9 @@ typedef enum {
 
     /* Gates, assertions (W3.5). */
     VOLEITH_SHIPSHAPE_ERR_GATE = -15, /* gate / assertion syntax or arity */
+    VOLEITH_SHIPSHAPE_ERR_OPCODE_VERSION = -21, /* opcode newer than the file's
+                                                   declared .shipshape minor
+                                                   (format-versioning record) */
 
     /* Subcircuits, inlining (W3.6). */
     VOLEITH_SHIPSHAPE_ERR_SUBCIRCUIT = -16,   /* definition / call error */

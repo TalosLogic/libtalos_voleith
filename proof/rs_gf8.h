@@ -124,6 +124,13 @@ typedef struct {
     int enable_commitment;
     size_t commit_id_bytes;   /* id handle width (= lambda; shared with V5) */
     size_t commit_rand_bytes; /* blinding randomness width */
+
+    /* --- V6: forward-secure epoch tree (depth_e == 0 disables) --- */
+    size_t depth_e; /* log2(max epochs per identity); <= 24 */
+    const voleith_node_hash_vt *epoch_hash; /* NULL = membership.tree_hash */
+    size_t epoch_sk_bytes;                  /* GGM seed width; 16 or 32 */
+    size_t leaf_salt_bytes;     /* V3+V6 attribute-blinding salt; 0 = none */
+    int epoch_hash_preimage_ok; /* opt-in: relax epoch_hash strength rule (Q4) */
 } voleith_rs_config_t;
 
 /* ================================================================
@@ -135,6 +142,10 @@ typedef struct {
 #define VOLEITH_RS_MODULE_PREDICATE 0x04u  /* bit2: attr_schema && any pred */
 #define VOLEITH_RS_MODULE_COMMITMENT 0x08u /* bit3: enable_commitment */
 #define VOLEITH_RS_MODULE_SPENT_SET 0x10u  /* bit4: depth_s > 0 */
+#define VOLEITH_RS_MODULE_EPOCH 0x20u      /* bit5: depth_e > 0 */
+
+/* Maximum V6 epoch-tree depth (log2 of max epochs per identity). */
+#define VOLEITH_RS_EPOCH_MAX_DEPTH 24u
 
 /*
  * voleith_rs_module_bitmap - the set of enabled modules as a single
@@ -144,7 +155,7 @@ typedef struct {
  * bit0 revocation (membership.depth_r > 0), bit1 nullifier
  * (scope_bytes > 0), bit2 predicate (attr_schema != NULL and at least
  * one field's pred != NONE), bit3 commitment (enable_commitment != 0),
- * bit4 spent_set (depth_s > 0).
+ * bit4 spent_set (depth_s > 0), bit5 epoch (depth_e > 0).
  *
  * Returns 0 if cfg is NULL.  Does not validate; combine with
  * voleith_rs_config_validate when correctness of the combination
@@ -189,6 +200,18 @@ uint8_t voleith_rs_module_bitmap(const voleith_rs_config_t *cfg);
  *   commitment: enable_commitment != 0 requires commit_id_bytes >= 1 and
  *     commit_rand_bytes >= 1.
  *
+ *   epoch (V6, depth_e > 0): depth_e <= VOLEITH_RS_EPOCH_MAX_DEPTH;
+ *     epoch_hash (or tree_hash when NULL) node_bytes == tree_hash
+ *     node_bytes; epoch_sk_bytes in {16, 32} and within the epoch_hash's
+ *     leaf capacity; membership.sk_bytes == 0 (the leaf secret is sk_t
+ *     via the epoch subtree, not a static sk); strength rule
+ *     epoch_hash->cr_bits >= tree_hash->cr_bits, relaxed to
+ *     2*epoch_hash->cr_bits >= tree_hash->cr_bits when
+ *     epoch_hash_preimage_ok.  leaf_salt_bytes > 0 requires depth_e > 0
+ *     and attr_schema != NULL.  When V6 is on, the OWF leaf preimage is
+ *     epoch_root || attributes || salt (V3 on) or just epoch_root (V3
+ *     off, no OWF); the leaf-capacity bound is checked against that.
+ *
  * Returns 0 if every check passes, -1 otherwise.  Does not allocate.
  */
 int voleith_rs_config_validate(const voleith_rs_config_t *cfg);
@@ -220,6 +243,9 @@ int voleith_rs_config_validate(const voleith_rs_config_t *cfg);
  *   [if nullifier]  scope_bytes_le8 || depth_s_le8
  *   [if commitment] commit_id_bytes_le8 || commit_rand_bytes_le8
  *   [if predicate]  n_fields_le8 || (width_bytes_le8 || pred_byte)*
+ *   [if epoch]      depth_e_le8 || name_len_le4 || epoch_hash_name ||
+ *                   epoch_sk_bytes_le8 || leaf_salt_bytes_le8 ||
+ *                   epoch_hash_preimage_ok_byte
  *
  * then squeezes 16 bytes.  Revocation sizing (depth_r) is already inside
  * the membership absorber; spent-set depth_s rides with the nullifier
@@ -280,6 +306,17 @@ typedef struct {
     const uint8_t *spent_low_value;  /* voleith_rs_nullifier_bytes(cfg) */
     const uint8_t *spent_low_next;   /* voleith_rs_nullifier_bytes(cfg) */
     const uint8_t *spent_next_index; /* VOLEITH_RSV1_REV_INDEX_BYTES (8) */
+
+    /* V6 epoch subtree (depth_e > 0).  epoch_sk and epoch_salt are secret
+     * witness inputs; epoch_siblings are the public epoch-tree node hashes;
+     * epoch is the public epoch index (like `scope`, it lives here only
+     * because the packer needs it to order the epoch inode inv_in walk, and
+     * it is separately bound into fs_seed via pub->epoch).  Typically threaded
+     * from a voleith_rs_epoch_state_t by voleith_rs_epoch_sign. */
+    const uint8_t *epoch_sk;       /* epoch_sk_bytes (secret sk_t) */
+    const uint8_t *epoch_salt;     /* leaf_salt_bytes (secret; NULL if 0) */
+    const uint8_t *epoch_siblings; /* depth_e * node_bytes (public) */
+    uint64_t epoch;                /* public epoch index t */
 } voleith_rs_path_t;
 
 /*
@@ -369,6 +406,10 @@ int voleith_rs_ring_build(const voleith_rs_config_t *cfg, const uint8_t *sks,
  *                     fields with pred != NONE); required iff the
  *                     predicate module is enabled (any pred != NONE).
  *   bounds_len      - length of bounds (sanity; must match the schema).
+ *   epoch           - V6 public epoch index t; used iff cfg->depth_e > 0.
+ *                     Bound into fs_seed and, as its bits, into the epoch
+ *                     direction instance wires (the library derives those;
+ *                     callers never supply them directly).
  *
  * Fields for a disabled module are ignored.
  */
@@ -381,6 +422,7 @@ typedef struct {
     const uint8_t *spent_root;
     const uint8_t *bounds;
     size_t bounds_len;
+    uint64_t epoch;
 } voleith_rs_public_t;
 
 /*
@@ -398,6 +440,7 @@ typedef struct {
  *                 (field_idx_be8 || pred_kind ||
  *                  EQ: width_be8 || target;
  *                  RANGE: width_be8 || low || width_be8 || high)* ||
+ *   [epoch]       t_be8 ||
  *   m_len_be8 || m
  * then squeezes VOLEITH_RS_FS_SEED_BYTES bytes.  All length prefixes are
  * 8-byte big-endian (matching the V1 m_len convention).

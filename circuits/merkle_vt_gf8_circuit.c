@@ -101,6 +101,53 @@ walk_inodes_secret_dir(voleith_gf8_circuit_t *c, const voleith_node_hash_vt *h,
     }
 }
 
+/*
+ * walk_inodes_public_dir_wire - inode-chain walk for the public-dir
+ * entry whose directions arrive on runtime INSTANCE wires.  Each level
+ * selects (left, right) from (current, sibling) under dir using the
+ * slot-free voleith_gf8_add_mux_instance, so the swap costs zero VOLE
+ * slots and the gate stream is identical for every direction pattern.
+ *
+ * No booleanity check: dir is a public instance wire fixed by the
+ * verifier, not a prover-chosen witness (see the header).
+ *
+ * On entry `current` holds the W = h->node_bytes leaf-level wire IDs.
+ * On exit `current` holds the root-level wire IDs.
+ */
+static void
+walk_inodes_public_dir_wire(voleith_gf8_circuit_t *c,
+                            const voleith_node_hash_vt *h, gf8_wire_id *current,
+                            const gf8_wire_id *path_nodes,
+                            const gf8_wire_id *path_dirs, size_t depth)
+{
+    size_t W = h->node_bytes;
+
+    for (size_t level = 0; level < depth; level++) {
+        const gf8_wire_id *sibling = path_nodes + level * W;
+        gf8_wire_id dir = path_dirs[level];
+
+        /*
+         * dir == 0 -> current is the LEFT child, sibling the RIGHT:
+         *   left = current, right = sibling.
+         * dir == 1 -> current is the RIGHT child, sibling the LEFT.
+         * mux_instance(a, b, dir) = (dir == 0) ? a : b, so:
+         */
+        gf8_wire_id left[MERKLE_VT_MAX_NODE_BYTES];
+        gf8_wire_id right[MERKLE_VT_MAX_NODE_BYTES];
+        for (size_t i = 0; i < W; i++) {
+            left[i] =
+                voleith_gf8_add_mux_instance(c, current[i], sibling[i], dir);
+            right[i] =
+                voleith_gf8_add_mux_instance(c, sibling[i], current[i], dir);
+        }
+
+        gf8_wire_id next[MERKLE_VT_MAX_NODE_BYTES];
+        h->inode_circuit(c, left, right, next);
+        for (size_t i = 0; i < W; i++)
+            current[i] = next[i];
+    }
+}
+
 int
 merkle_vt_gf8_path_circuit(voleith_gf8_circuit_t *c,
                            const voleith_node_hash_vt *h,
@@ -140,6 +187,29 @@ merkle_vt_gf8_path_circuit_secret_dir(voleith_gf8_circuit_t *c,
     h->leaf_circuit(c, leaf_data, leaf_data_bytes, current);
 
     walk_inodes_secret_dir(c, h, current, path_nodes, path_dirs, depth);
+
+    for (size_t i = 0; i < W; i++)
+        root[i] = current[i];
+    return 0;
+}
+
+int
+merkle_vt_gf8_path_from_leaf_node_public_dir(voleith_gf8_circuit_t *c,
+                                             const voleith_node_hash_vt *h,
+                                             const gf8_wire_id *leaf_node,
+                                             const gf8_wire_id *path_nodes,
+                                             const gf8_wire_id *path_dirs,
+                                             size_t depth, gf8_wire_id *root)
+{
+    if (h->node_bytes > MERKLE_VT_MAX_NODE_BYTES)
+        return -1;
+    size_t W = h->node_bytes;
+
+    gf8_wire_id current[MERKLE_VT_MAX_NODE_BYTES];
+    for (size_t i = 0; i < W; i++)
+        current[i] = leaf_node[i];
+
+    walk_inodes_public_dir_wire(c, h, current, path_nodes, path_dirs, depth);
 
     for (size_t i = 0; i < W; i++)
         root[i] = current[i];

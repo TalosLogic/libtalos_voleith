@@ -140,6 +140,7 @@ typedef struct {
     size_t buf_len;
     const voleith_shipshape_limits_t *eff;
     int stdlib_version; /* 1 = crypto-v1; 2 = crypto-v2 */
+    int format_minor;   /* declared `.shipshape` minor (major is fixed at 1) */
 } ss_parse_ctx_t;
 
 /* A growable list of wire ids: call arguments (`++` chains and whole-vector
@@ -177,7 +178,7 @@ static int is_dec_digit(unsigned char);
 static int hex_val(unsigned char);
 static void lex_next_word(ss_lexer_t *, const char **, size_t *);
 static int match_header_line(ss_lexer_t *, const char *const *);
-static int parse_header(ss_lexer_t *, int *);
+static int parse_header(ss_lexer_t *, int *, int *);
 
 /* Symbol table and declarations (W3.4). */
 static int tok_word_is(const ss_token_t *, const char *);
@@ -565,6 +566,98 @@ lex_next_word(ss_lexer_t *lx, const char **word, size_t *wlen)
  * ================================================================ */
 
 /*
+ * Format-version support (docs/private/SHIPSHAPE_FORMAT_VERSIONING.md).  The
+ * format axis is semver MAJOR.MINOR.  This parser dispatches solely to the
+ * major-1 opcode table and accepts declared minors up to SS_FORMAT_MAX_MINOR.
+ * A new Tier 1 opcode is an additive MINOR bump; SCALE_INSTANCE is the first
+ * minor-1 opcode (see SS_MINOR_SCALE_INSTANCE and parse_gate_line).
+ */
+#define SS_FORMAT_MAJOR 1
+#define SS_FORMAT_MAX_MINOR 1
+
+/* introduced_minor column of the major-1 opcode table: every spec 4-5 opcode
+ * is 0; SCALE_INSTANCE is the first minor-1 addition. */
+#define SS_MINOR_SCALE_INSTANCE 1
+
+/*
+ * Parse a single non-negative decimal component of the version token from the
+ * slice [s, s+n): all digits, no leading zero unless the value is exactly 0
+ * (Rule 1).  Returns the value in *out, or a negative ERR_HEADER on a
+ * malformed component.
+ */
+static int
+parse_version_component(const char *s, size_t n, unsigned *out)
+{
+    unsigned v = 0;
+
+    if (n == 0 || n > 9) /* empty, or absurdly long: reject rather than wrap */
+        return VOLEITH_SHIPSHAPE_ERR_HEADER;
+    if (n > 1 && s[0] == '0') /* leading zero (and not the bare "0") */
+        return VOLEITH_SHIPSHAPE_ERR_HEADER;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9')
+            return VOLEITH_SHIPSHAPE_ERR_HEADER;
+        v = v * 10u + (unsigned)(s[i] - '0');
+    }
+    *out = v;
+    return 0;
+}
+
+/*
+ * Parse the `.shipshape MAJOR[.MINOR]` version line (Rule 1/2).  Bare MAJOR
+ * means MAJOR.0.  Rejects an unsupported major or a minor newer than this
+ * parser with ERR_HEADER.  On success sets *minor to the declared minor.
+ */
+static int
+parse_version_line(ss_lexer_t *lx, int *minor)
+{
+    const char *w;
+    size_t wl, dot;
+    unsigned major, mnr;
+    int r;
+
+    /* Skip blank / comment-only lines; stop on the first content line. */
+    for (;;) {
+        r = voleith_shipshape_lex_read_line(lx);
+        if (r == 1)
+            return VOLEITH_SHIPSHAPE_ERR_HEADER; /* magic line missing */
+        if (r < 0)
+            return r;
+        lex_next_word(lx, &w, &wl);
+        if (wl != 0)
+            break;
+    }
+    if (wl != sizeof(".shipshape") - 1 ||
+        voleith_const_memcmp(w, ".shipshape", wl) != 0)
+        return VOLEITH_SHIPSHAPE_ERR_HEADER;
+
+    /* Version token: MAJOR or MAJOR.MINOR. */
+    lex_next_word(lx, &w, &wl);
+    if (wl == 0)
+        return VOLEITH_SHIPSHAPE_ERR_HEADER;
+    for (dot = 0; dot < wl && w[dot] != '.'; dot++)
+        ;
+    if ((r = parse_version_component(w, dot, &major)) != 0)
+        return r;
+    if (dot == wl) {
+        mnr = 0; /* bare MAJOR == MAJOR.0 */
+    } else if ((r = parse_version_component(w + dot + 1, wl - dot - 1, &mnr)) !=
+               0) {
+        return r;
+    }
+
+    /* No trailing tokens on the version line. */
+    lex_next_word(lx, &w, &wl);
+    if (wl != 0)
+        return VOLEITH_SHIPSHAPE_ERR_HEADER;
+
+    if (major != SS_FORMAT_MAJOR || mnr > SS_FORMAT_MAX_MINOR)
+        return VOLEITH_SHIPSHAPE_ERR_HEADER; /* unsupported major / newer minor */
+    *minor = (int)mnr;
+    return 0;
+}
+
+/*
  * Match one header line against `expect`, a NULL-terminated array of exact
  * token spellings.  Blank and comment-only lines before the header line are
  * skipped (FORMAT 2.2, 3.1).  The match is case-sensitive and admits no
@@ -616,9 +709,8 @@ match_header_line(ss_lexer_t *lx, const char *const *expect)
  * success or a negative voleith_shipshape_error_t.
  */
 static int
-parse_header(ss_lexer_t *lx, int *version)
+parse_header(ss_lexer_t *lx, int *version, int *format_minor)
 {
-    static const char *const version_line[] = {".shipshape", "1", NULL};
     static const char *const field_line[] = {"field", "GF(2^8)", "irreducible",
                                              "0x11B", NULL};
     static const char kw_stdlib[] = "stdlib";
@@ -628,7 +720,7 @@ parse_header(ss_lexer_t *lx, int *version)
     size_t wl;
     int r;
 
-    if ((r = match_header_line(lx, version_line)) != 0)
+    if ((r = parse_version_line(lx, format_minor)) != 0)
         return r;
     if ((r = match_header_line(lx, field_line)) != 0)
         return r;
@@ -1260,6 +1352,33 @@ gate_mul(ss_parse_ctx_t *ctx, ss_gp_t *gp)
 }
 
 /*
+ * SCALE_INSTANCE a b -> c: c = a * b in GF(2^8), where b MUST be an instance
+ * (public) wire.  Free (no VOLE slot), since a public multiplier is a
+ * per-proof GF(2)-linear map on a.  A minor-1 opcode (format-versioning
+ * record); the declared-minor gate is in parse_gate_line.  The instance-kind
+ * requirement is enforced here for a precise ERR_TYPE and again in the builder
+ * / circuit_validate.
+ */
+static int
+gate_scale_instance(ss_parse_ctx_t *ctx, ss_gp_t *gp)
+{
+    gf8_wire_id a, b, c;
+
+    if (gp_operand(gp, ctx, &a, NULL) != 0 ||
+        gp_operand(gp, ctx, &b, NULL) != 0)
+        return gp->err;
+    if ((size_t)b >= voleith_gf8_circuit_wire_count(ctx->circuit) ||
+        voleith_gf8_circuit_wires(ctx->circuit)[b].kind != GF8_WIRE_INSTANCE)
+        return VOLEITH_SHIPSHAPE_ERR_TYPE; /* multiplier must be public */
+    if (budget_wires(ctx, 1) != 0 || budget_gates(ctx, 1) != 0)
+        return VOLEITH_SHIPSHAPE_ERR_LIMIT;
+    c = voleith_gf8_add_scale_instance(ctx->circuit, a, b);
+    if (c == GF8_WIRE_ID_INVALID || !voleith_gf8_circuit_ok(ctx->circuit))
+        return VOLEITH_SHIPSHAPE_ERR_ALLOC;
+    return gp_bind(gp, ctx, c, 0);
+}
+
+/*
  * MUX sel a b -> c (ISA 2.5; surface order sel, a, b).  The selector must be
  * `bit`; the check happens before the three-gate expansion (Goal 4).  Lowers
  * via voleith_gf8_add_mux to diff = ADD(b,a), prod = MUL(sel,diff),
@@ -1530,6 +1649,12 @@ parse_gate_line(ss_parse_ctx_t *ctx, ss_lexer_t *lx, const ss_token_t *head)
         r = gate_square(ctx, &gp);
     else if (tok_word_is(head, "MUL"))
         r = gate_mul(ctx, &gp);
+    else if (tok_word_is(head, "SCALE_INSTANCE"))
+        /* minor-1 opcode: gate on the file's declared .shipshape minor before
+         * building (format-versioning record). */
+        r = ctx->format_minor < SS_MINOR_SCALE_INSTANCE
+                ? VOLEITH_SHIPSHAPE_ERR_OPCODE_VERSION
+                : gate_scale_instance(ctx, &gp);
     else if (tok_word_is(head, "MUX"))
         r = gate_mux(ctx, &gp);
     else if (tok_word_is(head, "INV"))
@@ -3005,7 +3130,7 @@ parse_body(voleith_shipshape_parsed_t *out, const char *buf, size_t len,
         return r;
     }
 
-    r = parse_header(&lx, &ctx.stdlib_version);
+    r = parse_header(&lx, &ctx.stdlib_version, &ctx.format_minor);
     if (r != 0)
         goto done;
 

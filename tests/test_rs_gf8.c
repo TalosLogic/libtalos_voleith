@@ -26,6 +26,12 @@
  *     - field binding: changing a module sizing field changes it
  *     - NULL args rejected
  *     - combined-config KAT pin (regression guard)
+ *   V6 epoch module (EP.CFG)
+ *     - bitmap bit 5 set iff depth_e > 0
+ *     - validate: node/cr/epoch_sk/salt/capacity/strength shapes, the
+ *       preimage_ok relaxation, sk_bytes==0 rule, and epoch-fields-set-
+ *       while-off guard
+ *     - fingerprint: per-field binding + epoch-config KAT pin (bootstrap)
  */
 
 #include "rs_gf8.h"
@@ -37,6 +43,7 @@
 #include "merkle_vt_gf8_helpers.h"
 #include "node_hash_vt.h"
 #include "ring_sig_v1_gf8.h"
+#include "rs_epoch_gf8.h"
 #include "rs_gf8_circuit.h"
 #include "rs_leaf_gf8_circuit.h"
 #include "rs_membership_gf8_circuit.h"
@@ -587,6 +594,262 @@ test_fingerprint_kat_pin(void)
         printf("  (KAT not yet pinned: copy the bytes above into "
                "kat_expected and set RS_CFG_KAT_PINNED to 1)\n");
         (void)kat_expected;
+    }
+}
+
+/* ================================================================
+ * EP.CFG: V6 epoch module (bitmap bit 5, validate, fingerprint).
+ * ================================================================ */
+
+/*
+ * Stub vts exercising the V6 strength rule.  validate/fingerprint read
+ * only .name and the size fields, never the (NULL) circuit callbacks, so
+ * these are safe here.  node_bytes 32 matches the grostl-256-fixed tree
+ * used by epoch_cfg() so the node-width check passes and the cr_bits
+ * comparison is what is under test.
+ */
+static const voleith_node_hash_vt epoch_stub_cr128 = {.name = "stub32-cr128",
+                                                      .node_bytes = 32,
+                                                      .cr_bits = 128,
+                                                      .fixed_leaf_bytes = 32,
+                                                      .leaf_block_bytes = 64};
+static const voleith_node_hash_vt epoch_stub_cr64 = {.name = "stub32-cr64",
+                                                     .node_bytes = 32,
+                                                     .cr_bits = 64,
+                                                     .fixed_leaf_bytes = 32,
+                                                     .leaf_block_bytes = 64};
+static const voleith_node_hash_vt epoch_stub_cap16 = {.name = "stub32-cap16",
+                                                      .node_bytes = 32,
+                                                      .cr_bits = 128,
+                                                      .fixed_leaf_bytes = 16,
+                                                      .leaf_block_bytes = 16};
+
+/* Valid V6-only base: grostl-256-fixed tree (node32, cr128), epoch tree =
+ * tree_hash, sk_t width 32, membership sk absent. */
+static voleith_rs_config_t
+epoch_cfg(void)
+{
+    voleith_rs_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.membership.tree_hash = &voleith_node_hash_grostl256_fixed;
+    cfg.membership.owf_hash = NULL;
+    cfg.membership.sk_bytes = 0; /* V6: absent */
+    cfg.membership.depth_m = 3;
+    cfg.depth_e = 8;
+    cfg.epoch_hash = NULL; /* = tree_hash */
+    cfg.epoch_sk_bytes = 32;
+    return cfg;
+}
+
+static void
+test_epoch_bitmap(void)
+{
+    voleith_rs_config_t cfg = epoch_cfg();
+    check("bitmap: epoch bit (depth_e > 0)",
+          voleith_rs_module_bitmap(&cfg) == VOLEITH_RS_MODULE_EPOCH);
+
+    cfg.scope_bytes = 12; /* V2 nullifier keys off sk_t (Q5) */
+    check("bitmap: epoch + nullifier",
+          voleith_rs_module_bitmap(&cfg) ==
+              (VOLEITH_RS_MODULE_EPOCH | VOLEITH_RS_MODULE_NULLIFIER));
+
+    cfg = epoch_cfg();
+    cfg.depth_e = 0;
+    cfg.membership.sk_bytes = 32; /* non-V6 again */
+    check("bitmap: depth_e == 0 clears epoch bit",
+          (voleith_rs_module_bitmap(&cfg) & VOLEITH_RS_MODULE_EPOCH) == 0);
+}
+
+static void
+test_epoch_validate(void)
+{
+    static const voleith_rs_attr_field_t fields[] = {
+        {8, VOLEITH_RS_ATTR_PRED_RANGE},
+    };
+    voleith_rs_attr_schema_t schema = {fields, 1};
+    voleith_rs_config_t cfg;
+
+    /* --- accepts --- */
+    cfg = epoch_cfg();
+    check("epoch validate: V6-only accepted",
+          voleith_rs_config_validate(&cfg) == 0);
+
+    cfg = epoch_cfg();
+    cfg.epoch_sk_bytes = 16;
+    check("epoch validate: epoch_sk_bytes 16 accepted",
+          voleith_rs_config_validate(&cfg) == 0);
+
+    cfg = epoch_cfg();
+    cfg.epoch_hash = &voleith_node_hash_hirose_fixed32; /* node32, cr128 */
+    check("epoch validate: explicit epoch_hash (node/cr match) accepted",
+          voleith_rs_config_validate(&cfg) == 0);
+
+    cfg = epoch_cfg();
+    cfg.epoch_hash = &epoch_stub_cr128; /* node32, cr128 == tree */
+    check("epoch validate: epoch_hash cr == tree cr accepted (default rule)",
+          voleith_rs_config_validate(&cfg) == 0);
+
+    cfg = epoch_cfg();
+    cfg.attr_schema = &schema; /* V6 + V3: leaf = OWF(epoch_root||attrs) */
+    check("epoch validate: V6+V3 accepted",
+          voleith_rs_config_validate(&cfg) == 0);
+
+    cfg = epoch_cfg();
+    cfg.attr_schema = &schema;
+    cfg.leaf_salt_bytes = 8; /* 32 root + 8 attr + 8 salt = 48 <= 64 */
+    check("epoch validate: V6+V3+salt within capacity accepted",
+          voleith_rs_config_validate(&cfg) == 0);
+
+    cfg = epoch_cfg();
+    cfg.epoch_hash = &epoch_stub_cr64; /* cr64 < tree cr128 */
+    cfg.epoch_hash_preimage_ok = 1;    /* 2*64 >= 128 */
+    check("epoch validate: preimage_ok relaxes strength (2*cr>=tree)",
+          voleith_rs_config_validate(&cfg) == 0);
+
+    /* --- rejects --- */
+    cfg = epoch_cfg();
+    cfg.depth_e = VOLEITH_RS_EPOCH_MAX_DEPTH + 1;
+    check("epoch validate: depth_e over cap rejected",
+          voleith_rs_config_validate(&cfg) == -1);
+
+    cfg = epoch_cfg();
+    cfg.epoch_hash = &voleith_node_hash_aes_dm; /* node16 != tree node32 */
+    check("epoch validate: epoch_hash node width mismatch rejected",
+          voleith_rs_config_validate(&cfg) == -1);
+
+    cfg = epoch_cfg();
+    cfg.epoch_sk_bytes = 24; /* not 16 or 32 */
+    check("epoch validate: epoch_sk_bytes not in {16,32} rejected",
+          voleith_rs_config_validate(&cfg) == -1);
+
+    cfg = epoch_cfg();
+    cfg.epoch_hash = &epoch_stub_cap16; /* leaf_block 16 < sk 32 */
+    check("epoch validate: epoch_sk over epoch_hash capacity rejected",
+          voleith_rs_config_validate(&cfg) == -1);
+
+    cfg = epoch_cfg();
+    cfg.membership.sk_bytes = 16; /* must be 0 under V6 */
+    check("epoch validate: nonzero membership.sk_bytes rejected",
+          voleith_rs_config_validate(&cfg) == -1);
+
+    cfg = epoch_cfg();
+    cfg.epoch_hash = &epoch_stub_cr64; /* cr64 < tree cr128, no relax */
+    check("epoch validate: weak epoch_hash rejected without preimage_ok",
+          voleith_rs_config_validate(&cfg) == -1);
+
+    cfg = epoch_cfg();
+    cfg.leaf_salt_bytes = 8; /* salt without V3 (no attr_schema) */
+    check("epoch validate: salt without attributes rejected",
+          voleith_rs_config_validate(&cfg) == -1);
+
+    cfg = epoch_cfg();
+    cfg.attr_schema = &schema;
+    cfg.leaf_salt_bytes = 32; /* 32 + 8 + 32 = 72 > 64 capacity */
+    check("epoch validate: salt over leaf capacity rejected",
+          voleith_rs_config_validate(&cfg) == -1);
+
+    /* Epoch fields set while V6 is off: silently-dropped-field guard. */
+    cfg = canonical_cfg();
+    cfg.epoch_sk_bytes = 16;
+    check("epoch validate: epoch_sk_bytes with depth_e==0 rejected",
+          voleith_rs_config_validate(&cfg) == -1);
+    cfg = canonical_cfg();
+    cfg.leaf_salt_bytes = 8;
+    check("epoch validate: leaf_salt_bytes with depth_e==0 rejected",
+          voleith_rs_config_validate(&cfg) == -1);
+    cfg = canonical_cfg();
+    cfg.epoch_hash = &voleith_node_hash_aes_dm;
+    check("epoch validate: epoch_hash with depth_e==0 rejected",
+          voleith_rs_config_validate(&cfg) == -1);
+    cfg = canonical_cfg();
+    cfg.epoch_hash_preimage_ok = 1;
+    check("epoch validate: preimage_ok with depth_e==0 rejected",
+          voleith_rs_config_validate(&cfg) == -1);
+}
+
+/*
+ * Epoch fingerprint: determinism, per-field binding, and a KAT pin.
+ *
+ * BOOTSTRAP: RS_CFG_EPOCH_KAT_PINNED starts at 0 so the test prints the
+ * computed fingerprint without hard-failing; copy the printed bytes into
+ * epoch_kat and flip the flag to 1 to arm the regression check.  Same
+ * pattern as test_fingerprint_kat_pin.
+ */
+#define RS_CFG_EPOCH_KAT_PINNED 1
+static void
+test_epoch_fingerprint(void)
+{
+    voleith_rs_config_t ref = epoch_cfg();
+    voleith_rs_config_t cfg;
+    uint8_t fp_ref[VOLEITH_RS_CONFIG_FINGERPRINT_BYTES];
+    uint8_t fp[VOLEITH_RS_CONFIG_FINGERPRINT_BYTES];
+
+    MUST_OK_FP(voleith_rs_config_fingerprint(&ref, fp_ref));
+    check("epoch fingerprint: deterministic",
+          voleith_rs_config_fingerprint(&ref, fp) == 0 &&
+              memcmp(fp, fp_ref, sizeof(fp)) == 0);
+
+    cfg = epoch_cfg();
+    cfg.depth_e = 9;
+    check("epoch fingerprint: depth_e bound",
+          voleith_rs_config_fingerprint(&cfg, fp) == 0 &&
+              memcmp(fp, fp_ref, sizeof(fp)) != 0);
+
+    cfg = epoch_cfg();
+    cfg.epoch_sk_bytes = 16;
+    check("epoch fingerprint: epoch_sk_bytes bound",
+          voleith_rs_config_fingerprint(&cfg, fp) == 0 &&
+              memcmp(fp, fp_ref, sizeof(fp)) != 0);
+
+    cfg = epoch_cfg();
+    cfg.epoch_hash = &voleith_node_hash_hirose_fixed32; /* different name */
+    check("epoch fingerprint: epoch_hash name bound",
+          voleith_rs_config_fingerprint(&cfg, fp) == 0 &&
+              memcmp(fp, fp_ref, sizeof(fp)) != 0);
+
+    cfg = epoch_cfg();
+    cfg.epoch_hash_preimage_ok = 1;
+    check("epoch fingerprint: preimage_ok flag bound",
+          voleith_rs_config_fingerprint(&cfg, fp) == 0 &&
+              memcmp(fp, fp_ref, sizeof(fp)) != 0);
+
+    /* leaf_salt_bytes bound (needs V3 to validate, but the fingerprint
+     * absorbs it whenever the epoch bit is set). */
+    {
+        static const voleith_rs_attr_field_t f[] = {
+            {8, VOLEITH_RS_ATTR_PRED_NONE}};
+        voleith_rs_attr_schema_t s = {f, 1};
+        voleith_rs_config_t a = epoch_cfg();
+        voleith_rs_config_t b = epoch_cfg();
+        uint8_t fpa[VOLEITH_RS_CONFIG_FINGERPRINT_BYTES];
+        uint8_t fpb[VOLEITH_RS_CONFIG_FINGERPRINT_BYTES];
+        a.attr_schema = &s;
+        b.attr_schema = &s;
+        b.leaf_salt_bytes = 8;
+        MUST_OK_FP(voleith_rs_config_fingerprint(&a, fpa));
+        check("epoch fingerprint: leaf_salt_bytes bound",
+              voleith_rs_config_fingerprint(&b, fpb) == 0 &&
+                  memcmp(fpa, fpb, sizeof(fpa)) != 0);
+    }
+
+    /* KAT pin (bootstrap). */
+    {
+        static const uint8_t epoch_kat[VOLEITH_RS_CONFIG_FINGERPRINT_BYTES] = {
+            0x1f, 0x43, 0x15, 0x31, 0xc2, 0xbe, 0xde, 0x47,
+            0x09, 0x5f, 0x01, 0xc1, 0x88, 0xb1, 0xa9, 0xb7};
+        MUST_OK_FP(voleith_rs_config_fingerprint(&ref, fp));
+        printf("  RS.CFG epoch-config fingerprint:");
+        for (size_t i = 0; i < sizeof(fp); i++)
+            printf(" %02x", fp[i]);
+        printf("\n");
+        if (RS_CFG_EPOCH_KAT_PINNED) {
+            check("epoch kat: matches pinned constant",
+                  memcmp(fp, epoch_kat, sizeof(fp)) == 0);
+        } else {
+            printf("  (epoch KAT not yet pinned: copy the bytes above into "
+                   "epoch_kat and set RS_CFG_EPOCH_KAT_PINNED to 1)\n");
+            (void)epoch_kat;
+        }
     }
 }
 
@@ -2695,6 +2958,865 @@ test_rs_determinism(void)
     voleith_gf8_circuit_free(c2);
 }
 
+/* Build a 4-leaf membership ring with the signer at leaf 0. */
+static void
+v6_build_ring4(const voleith_node_hash_vt *vt, const uint8_t *leaf0,
+               uint8_t *root_out, uint8_t *sibs_out)
+{
+    size_t W = vt->node_bytes;
+    uint8_t *leaves = calloc(4, W);
+    memcpy(leaves, leaf0, W);
+    for (size_t m = 1; m < 4; m++)
+        for (size_t i = 0; i < W; i++)
+            leaves[m * W + i] = (uint8_t)(0x11 * m + i);
+    MUST_OK_FP(voleith_merkle_vt_build(vt, leaves, 4, root_out));
+    MUST_OK_FP(voleith_merkle_vt_compute_path(vt, leaves, 4, 0, sibs_out));
+    free(leaves);
+}
+
+/*
+ * EP.CIRC: end-to-end build + pack + eval of the V6 epoch circuit for
+ * V6-only, V6+V3(+salt), and V6+V2 configs, with wrong sk_t / sibling / t
+ * rejected.  grostl-256-fixed tree (node 32), depth_e 3, depth_m 2.
+ */
+static void
+test_rs_v6_circuit(void)
+{
+    const voleith_node_hash_vt *vt = &voleith_node_hash_grostl256_fixed;
+    const size_t W = 32, DE = 3, DM = 2, SB = 32;
+    uint8_t master[32];
+    for (size_t i = 0; i < 32; i++)
+        master[i] = (uint8_t)(0xC0 + i);
+
+    /* ---- V6-only ---- */
+    {
+        voleith_rs_config_t cfg;
+        voleith_rs_epoch_state_t st;
+        voleith_rs_layout_t L;
+        voleith_rs_path_t path;
+        uint8_t epoch_root[32], sk_t[32], epoch_sibs[3 * 32];
+        uint8_t mroot[32], msibs[2 * 32];
+        uint64_t t = 5;
+        uint8_t *witness, *instance;
+        voleith_gf8_circuit_t *c;
+
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.membership.tree_hash = vt;
+        cfg.membership.depth_m = DM;
+        cfg.membership.sk_bytes = 0;
+        cfg.depth_e = DE;
+        cfg.epoch_sk_bytes = SB;
+
+        MUST_OK_FP(
+            voleith_rs_epoch_keygen(&cfg, master, NULL, &st, epoch_root));
+        MUST_OK_FP(voleith_rs_epoch_derive_sk(&st, t, sk_t));
+        MUST_OK_FP(voleith_rs_epoch_path(&st, t, epoch_sibs));
+
+        v6_build_ring4(vt, epoch_root, mroot, msibs); /* leaf0 = epoch_root */
+
+        c = voleith_gf8_circuit_new();
+        check("v6-only: build_circuit ok",
+              voleith_rs_build_circuit(c, &cfg, &L) == 0);
+        check("v6-only: layout has epoch section",
+              L.depth_e == DE && L.epoch_sk_bytes == SB &&
+                  L.inst_epoch_dirs_bytes == DE);
+
+        memset(&path, 0, sizeof(path));
+        path.membership.leaf_index = 0;
+        path.membership.siblings = msibs;
+        path.epoch_sk = sk_t;
+        path.epoch_siblings = epoch_sibs;
+        path.epoch = t;
+
+        witness = calloc(L.witness_bytes, 1);
+        check("v6-only: pack ok",
+              voleith_rs_pack_witness(&cfg, &L, NULL, NULL, &path, NULL, NULL,
+                                      witness) == 0);
+        instance = calloc(L.instance_bytes, 1);
+        for (size_t k = 0; k < DE; k++)
+            instance[L.inst_epoch_dirs_off + k] = (uint8_t)((t >> k) & 1u);
+        memcpy(instance + L.membership.inst_root_off, mroot, W);
+
+        check("v6-only: eval == 1", eval_circuit(c, witness, instance) == 1);
+
+        witness[L.epoch_sk_off] ^= 0x01;
+        check("v6-only: wrong sk_t eval == 0",
+              eval_circuit(c, witness, instance) == 0);
+        witness[L.epoch_sk_off] ^= 0x01;
+
+        witness[L.epoch_siblings_off] ^= 0x01;
+        check("v6-only: wrong epoch sibling eval == 0",
+              eval_circuit(c, witness, instance) == 0);
+        witness[L.epoch_siblings_off] ^= 0x01;
+
+        witness[L.membership.siblings_off] ^= 0x01;
+        check("v6-only: wrong membership sibling eval == 0",
+              eval_circuit(c, witness, instance) == 0);
+        witness[L.membership.siblings_off] ^= 0x01;
+
+        instance[L.inst_epoch_dirs_off] ^= 0x01;
+        check("v6-only: wrong epoch t (dir) eval == 0",
+              eval_circuit(c, witness, instance) == 0);
+        instance[L.inst_epoch_dirs_off] ^= 0x01;
+
+        free(witness);
+        free(instance);
+        voleith_gf8_circuit_free(c);
+        voleith_rs_epoch_state_clear(&st);
+    }
+
+    /* ---- V6 + V3 + salt ---- */
+    {
+        static const voleith_rs_attr_field_t f[] = {
+            {4, VOLEITH_RS_ATTR_PRED_NONE}};
+        voleith_rs_attr_schema_t schema = {f, 1};
+        voleith_rs_config_t cfg;
+        voleith_rs_epoch_state_t st;
+        voleith_rs_layout_t L;
+        voleith_rs_path_t path;
+        uint8_t epoch_root[32], sk_t[32], epoch_sibs[3 * 32];
+        uint8_t mroot[32], msibs[2 * 32], leaf0[32], tail[12], salt[8];
+        uint8_t attrs[4] = {7, 0, 0, 0};
+        uint64_t t = 2;
+        uint8_t *witness, *instance;
+        voleith_gf8_circuit_t *c;
+
+        for (size_t i = 0; i < 8; i++)
+            salt[i] = (uint8_t)(0xE0 + i);
+
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.membership.tree_hash = vt;
+        cfg.membership.depth_m = DM;
+        cfg.membership.sk_bytes = 0;
+        cfg.depth_e = DE;
+        cfg.epoch_sk_bytes = SB;
+        cfg.attr_schema = &schema;
+        cfg.leaf_salt_bytes = 8;
+
+        MUST_OK_FP(
+            voleith_rs_epoch_keygen(&cfg, master, salt, &st, epoch_root));
+        MUST_OK_FP(voleith_rs_epoch_derive_sk(&st, t, sk_t));
+        MUST_OK_FP(voleith_rs_epoch_path(&st, t, epoch_sibs));
+
+        /* leaf0 = OWF(epoch_root || attrs || salt) */
+        memcpy(tail, attrs, 4);
+        memcpy(tail + 4, salt, 8);
+        MUST_OK_FP(rs_leaf_gf8_hash(vt, epoch_root, W, tail, 12, leaf0));
+        v6_build_ring4(vt, leaf0, mroot, msibs);
+
+        c = voleith_gf8_circuit_new();
+        check("v6+v3: build_circuit ok",
+              voleith_rs_build_circuit(c, &cfg, &L) == 0);
+
+        memset(&path, 0, sizeof(path));
+        path.membership.leaf_index = 0;
+        path.membership.siblings = msibs;
+        path.epoch_sk = sk_t;
+        path.epoch_salt = salt;
+        path.epoch_siblings = epoch_sibs;
+        path.epoch = t;
+
+        witness = calloc(L.witness_bytes, 1);
+        check("v6+v3: pack ok",
+              voleith_rs_pack_witness(&cfg, &L, NULL, attrs, &path, NULL, NULL,
+                                      witness) == 0);
+        instance = calloc(L.instance_bytes, 1);
+        for (size_t k = 0; k < DE; k++)
+            instance[L.inst_epoch_dirs_off + k] = (uint8_t)((t >> k) & 1u);
+        memcpy(instance + L.membership.inst_root_off, mroot, W);
+
+        check("v6+v3: eval == 1", eval_circuit(c, witness, instance) == 1);
+
+        witness[L.salt_off] ^= 0x01;
+        check("v6+v3: wrong salt eval == 0",
+              eval_circuit(c, witness, instance) == 0);
+        witness[L.salt_off] ^= 0x01;
+
+        witness[L.attr_off] ^= 0x01;
+        check("v6+v3: wrong attr eval == 0",
+              eval_circuit(c, witness, instance) == 0);
+        witness[L.attr_off] ^= 0x01;
+
+        free(witness);
+        free(instance);
+        voleith_gf8_circuit_free(c);
+        voleith_rs_epoch_state_clear(&st);
+    }
+
+    /* ---- V6 + V2 (nullifier keyed off sk_t) ---- */
+    {
+        voleith_rs_config_t cfg;
+        voleith_rs_epoch_state_t st;
+        voleith_rs_layout_t L;
+        voleith_rs_path_t path;
+        uint8_t epoch_root[32], sk_t[32], epoch_sibs[3 * 32];
+        uint8_t mroot[32], msibs[2 * 32], scope[12], t_tag[16];
+        uint64_t t = 3;
+        uint8_t *witness, *instance, *cmac_tmp;
+        size_t cmac_buf;
+        voleith_gf8_circuit_t *c;
+
+        for (size_t i = 0; i < 12; i++)
+            scope[i] = (uint8_t)(0x50 + i);
+
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.membership.tree_hash = vt;
+        cfg.membership.depth_m = DM;
+        cfg.membership.sk_bytes = 0;
+        cfg.depth_e = DE;
+        cfg.epoch_sk_bytes = SB;
+        cfg.scope_bytes = 12;
+
+        MUST_OK_FP(
+            voleith_rs_epoch_keygen(&cfg, master, NULL, &st, epoch_root));
+        MUST_OK_FP(voleith_rs_epoch_derive_sk(&st, t, sk_t));
+        MUST_OK_FP(voleith_rs_epoch_path(&st, t, epoch_sibs));
+
+        /* T = AES-CMAC(sk_t, scope) (16-byte, grostl-256-fixed cr128). */
+        cmac_buf = aes_cmac_gf8_witness_bytes(SB, 12);
+        cmac_tmp = calloc(cmac_buf, 1);
+        aes_cmac_gf8_build_witness(sk_t, SB, scope, 12, cmac_tmp, t_tag);
+        free(cmac_tmp);
+
+        v6_build_ring4(vt, epoch_root, mroot, msibs);
+
+        c = voleith_gf8_circuit_new();
+        check("v6+v2: build_circuit ok",
+              voleith_rs_build_circuit(c, &cfg, &L) == 0);
+
+        memset(&path, 0, sizeof(path));
+        path.membership.leaf_index = 0;
+        path.membership.siblings = msibs;
+        path.epoch_sk = sk_t;
+        path.epoch_siblings = epoch_sibs;
+        path.epoch = t;
+        path.scope = scope;
+
+        witness = calloc(L.witness_bytes, 1);
+        check("v6+v2: pack ok",
+              voleith_rs_pack_witness(&cfg, &L, NULL, NULL, &path, NULL, NULL,
+                                      witness) == 0);
+        instance = calloc(L.instance_bytes, 1);
+        for (size_t k = 0; k < DE; k++)
+            instance[L.inst_epoch_dirs_off + k] = (uint8_t)((t >> k) & 1u);
+        memcpy(instance + L.membership.inst_root_off, mroot, W);
+        memcpy(instance + L.inst_scope_off, scope, 12);
+        memcpy(instance + L.inst_t_off, t_tag, 16);
+
+        check("v6+v2: eval == 1", eval_circuit(c, witness, instance) == 1);
+
+        instance[L.inst_t_off] ^= 0x01;
+        check("v6+v2: wrong T eval == 0",
+              eval_circuit(c, witness, instance) == 0);
+        instance[L.inst_t_off] ^= 0x01;
+
+        free(witness);
+        free(instance);
+        voleith_gf8_circuit_free(c);
+        voleith_rs_epoch_state_clear(&st);
+    }
+}
+
+/* EP.SIGN: end-to-end epoch_sign -> verify roundtrips, wrong-epoch reject. */
+static void
+test_rs_v6_sign(void)
+{
+    const voleith_node_hash_vt *vt = &voleith_node_hash_grostl256_fixed;
+    const size_t DE = 3, DM = 2, SB = 32;
+    const voleith_params_t *params = &voleith_params_em_128f;
+    const char *msg = "v6 sign";
+    size_t mlen = strlen(msg);
+    uint8_t master[32], epoch_root[32], mroot[32], msibs[2 * 32];
+    voleith_rs_config_t cfg;
+    voleith_rs_epoch_state_t st;
+    uint64_t epochs[3] = {0, 4, 7}; /* T = 8: first, mid, last */
+
+    for (size_t i = 0; i < 32; i++)
+        master[i] = (uint8_t)(0x21 + i);
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.membership.tree_hash = vt;
+    cfg.membership.depth_m = DM;
+    cfg.membership.sk_bytes = 0;
+    cfg.depth_e = DE;
+    cfg.epoch_sk_bytes = SB;
+
+    MUST_OK_FP(voleith_rs_epoch_keygen(&cfg, master, NULL, &st, epoch_root));
+    v6_build_ring4(vt, epoch_root, mroot, msibs);
+
+    for (size_t i = 0; i < 3; i++) {
+        uint64_t e = epochs[i];
+        voleith_rs_path_t path;
+        voleith_rs_public_t pub, pub_bad;
+        voleith_rs_sig_t sig;
+        char name[64];
+
+        memset(&path, 0, sizeof(path));
+        path.membership.leaf_index = 0;
+        path.membership.siblings = msibs;
+        memset(&pub, 0, sizeof(pub));
+        pub.membership_root = mroot;
+        pub.epoch = e;
+        memset(&sig, 0, sizeof(sig));
+
+        snprintf(name, sizeof(name), "v6 sign: epoch %llu roundtrip",
+                 (unsigned long long)e);
+        check(name,
+              voleith_rs_epoch_sign(&sig, &st, &cfg, params, NULL, &path, &pub,
+                                    (const uint8_t *)msg, mlen) == 0 &&
+                  voleith_rs_verify(&sig, &cfg, params, &pub,
+                                    (const uint8_t *)msg, mlen) == 0);
+
+        pub_bad = pub;
+        pub_bad.epoch = e ^ 1u;
+        snprintf(name, sizeof(name), "v6 sign: epoch %llu wrong-t reject",
+                 (unsigned long long)e);
+        check(name, voleith_rs_verify(&sig, &cfg, params, &pub_bad,
+                                      (const uint8_t *)msg, mlen) != 0);
+
+        voleith_rs_sig_free(&sig);
+    }
+
+    voleith_rs_epoch_state_clear(&st);
+}
+
+/* EP.SIGN: V6+V2 nullifier is per-epoch (keyed off sk_t). */
+static void
+test_rs_v6_nullifier_epoch(void)
+{
+    const voleith_node_hash_vt *vt = &voleith_node_hash_grostl256_fixed;
+    const size_t DE = 3, DM = 2, SB = 32;
+    const voleith_params_t *params = &voleith_params_em_128f;
+    uint8_t master[32], epoch_root[32], mroot[32], msibs[2 * 32];
+    uint8_t scope[12], sk0[32], sk1[32], T0[16], T0b[16], T1[16];
+    uint8_t *cmac_tmp;
+    size_t cbuf;
+    voleith_rs_config_t cfg;
+    voleith_rs_epoch_state_t st;
+
+    for (size_t i = 0; i < 32; i++)
+        master[i] = (uint8_t)(0x81 + i);
+    for (size_t i = 0; i < 12; i++)
+        scope[i] = (uint8_t)(0x30 + i);
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.membership.tree_hash = vt;
+    cfg.membership.depth_m = DM;
+    cfg.membership.sk_bytes = 0;
+    cfg.depth_e = DE;
+    cfg.epoch_sk_bytes = SB;
+    cfg.scope_bytes = 12;
+
+    MUST_OK_FP(voleith_rs_epoch_keygen(&cfg, master, NULL, &st, epoch_root));
+
+    cbuf = aes_cmac_gf8_witness_bytes(SB, 12);
+    cmac_tmp = calloc(cbuf, 1);
+    MUST_OK_FP(voleith_rs_epoch_derive_sk(&st, 0, sk0));
+    MUST_OK_FP(voleith_rs_epoch_derive_sk(&st, 1, sk1));
+    aes_cmac_gf8_build_witness(sk0, SB, scope, 12, cmac_tmp, T0);
+    aes_cmac_gf8_build_witness(sk0, SB, scope, 12, cmac_tmp, T0b);
+    aes_cmac_gf8_build_witness(sk1, SB, scope, 12, cmac_tmp, T1);
+    check("v6+v2: same epoch, same scope -> equal T", memcmp(T0, T0b, 16) == 0);
+    check("v6+v2: adjacent epochs -> unequal T", memcmp(T0, T1, 16) != 0);
+
+    /* Full roundtrip at epoch 2 with the published T. */
+    {
+        uint8_t sk2[32], T2[16];
+        voleith_rs_path_t path;
+        voleith_rs_public_t pub;
+        voleith_rs_sig_t sig;
+
+        MUST_OK_FP(voleith_rs_epoch_derive_sk(&st, 2, sk2));
+        aes_cmac_gf8_build_witness(sk2, SB, scope, 12, cmac_tmp, T2);
+        v6_build_ring4(vt, epoch_root, mroot, msibs);
+
+        memset(&path, 0, sizeof(path));
+        path.membership.leaf_index = 0;
+        path.membership.siblings = msibs;
+        path.scope = scope;
+        memset(&pub, 0, sizeof(pub));
+        pub.membership_root = mroot;
+        pub.scope = scope;
+        pub.nullifier = T2;
+        pub.epoch = 2;
+        memset(&sig, 0, sizeof(sig));
+
+        check("v6+v2: sign+verify roundtrip",
+              voleith_rs_epoch_sign(&sig, &st, &cfg, params, NULL, &path, &pub,
+                                    NULL, 0) == 0 &&
+                  voleith_rs_verify(&sig, &cfg, params, &pub, NULL, 0) == 0);
+        voleith_rs_sig_free(&sig);
+    }
+
+    free(cmac_tmp);
+    voleith_rs_epoch_state_clear(&st);
+}
+
+/* EP.SIGN: epoch fs_seed section (bootstrap KAT + per-epoch distinctness). */
+#define RS_V6_FS_KAT_PINNED 1
+static void
+test_rs_v6_fs_seed(void)
+{
+    voleith_rs_config_t cfg;
+    voleith_rs_public_t pub;
+    uint8_t mroot[32];
+    uint8_t fs1[VOLEITH_RS_FS_SEED_BYTES], fs2[VOLEITH_RS_FS_SEED_BYTES];
+    static const uint8_t kat[VOLEITH_RS_FS_SEED_BYTES] = {
+        0x2c, 0xc3, 0x2e, 0x9d, 0x83, 0xd7, 0xbe, 0xa8,
+        0x0e, 0x02, 0x87, 0x57, 0x94, 0x5c, 0x38, 0x15};
+    const char *msg = "epoch fs";
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.membership.tree_hash = &voleith_node_hash_grostl256_fixed;
+    cfg.membership.depth_m = 3;
+    cfg.membership.sk_bytes = 0;
+    cfg.depth_e = 4;
+    cfg.epoch_sk_bytes = 32;
+    for (size_t i = 0; i < 32; i++)
+        mroot[i] = (uint8_t)(0x11 + i);
+
+    memset(&pub, 0, sizeof(pub));
+    pub.membership_root = mroot;
+    pub.epoch = 5;
+    MUST_OK_FP(voleith_rs_compute_fs_seed(&cfg, &pub, (const uint8_t *)msg,
+                                          strlen(msg), fs1));
+    pub.epoch = 6;
+    MUST_OK_FP(voleith_rs_compute_fs_seed(&cfg, &pub, (const uint8_t *)msg,
+                                          strlen(msg), fs2));
+    check("v6 fs_seed: distinct epochs differ",
+          memcmp(fs1, fs2, sizeof(fs1)) != 0);
+
+    printf("  EP.SIGN epoch fs_seed (t=5):");
+    for (size_t i = 0; i < sizeof(fs1); i++)
+        printf(" %02x", fs1[i]);
+    printf("\n");
+    if (RS_V6_FS_KAT_PINNED)
+        check("v6 fs_seed: matches pinned", memcmp(fs1, kat, sizeof(fs1)) == 0);
+    else {
+        printf("  (v6 fs_seed KAT not yet pinned: copy the t=5 bytes into kat "
+               "and set RS_V6_FS_KAT_PINNED to 1)\n");
+        (void)kat;
+    }
+}
+
+/* All-modules-off (1.8.0) layout is unchanged by the V6 struct additions. */
+static void
+test_rs_v6_layout_off(void)
+{
+    voleith_rs_config_t cfg = canonical_cfg();
+    voleith_rs_layout_t L;
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+
+    MUST_OK_FP(voleith_rs_build_circuit(c, &cfg, &L));
+    check("v6-off: no epoch section in layout",
+          L.depth_e == 0 && L.epoch_sk_off == 0 && L.epoch_sk_bytes == 0 &&
+              L.salt_bytes == 0 && L.epoch_siblings_bytes == 0 &&
+              L.epoch_leaf_invin_bytes == 0 && L.epoch_path_invin_bytes == 0 &&
+              L.inst_epoch_dirs_bytes == 0);
+    voleith_gf8_circuit_free(c);
+}
+
+/* Base aes-dm V6 config (node 16, epoch_sk 16), so the IMT / ring helpers
+ * (all 16-byte) compose directly. */
+static voleith_rs_config_t
+v6_aesdm_cfg(void)
+{
+    voleith_rs_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.membership.tree_hash = &voleith_node_hash_aes_dm;
+    cfg.membership.depth_m = 2;
+    cfg.membership.sk_bytes = 0;
+    cfg.depth_e = 3;
+    cfg.epoch_sk_bytes = 16;
+    return cfg;
+}
+
+/* Does hay contain needle? (leak-detection smoke.) */
+static int
+mem_contains(const uint8_t *hay, size_t hay_len, const uint8_t *needle,
+             size_t needle_len)
+{
+    if (needle_len == 0 || needle_len > hay_len)
+        return 0;
+    for (size_t i = 0; i + needle_len <= hay_len; i++)
+        if (memcmp(hay + i, needle, needle_len) == 0)
+            return 1;
+    return 0;
+}
+
+/*
+ * EP.TEST: forward security at the signature level.
+ *   - state reload mid-lifecycle: sign@0, serialize, reload, advance, sign@3
+ *   - advance-past-then-sign refusal (epoch_sign at a retired epoch)
+ *   - thief: forging a retired epoch with a future seed fails at sign (X-10)
+ */
+static void
+test_rs_v6_forward_security(void)
+{
+    const voleith_node_hash_vt *vt = &voleith_node_hash_aes_dm;
+    const voleith_params_t *params = &voleith_params_em_128f;
+    const char *msg = "v6 fs";
+    size_t mlen = strlen(msg);
+    uint8_t master[16], epoch_root[16], mroot[16], msibs[2 * 16];
+    voleith_rs_config_t cfg = v6_aesdm_cfg();
+    voleith_rs_epoch_state_t st, st1;
+    voleith_rs_path_t base_path;
+    voleith_rs_public_t pub0, pub2, pub3;
+    voleith_rs_sig_t sig0, sig3, sigx, sigt;
+    uint8_t *buf;
+    size_t need;
+    uint8_t sk_wrong[16], sibs2[3 * 16];
+    voleith_rs_path_t thief;
+
+    for (size_t i = 0; i < 16; i++)
+        master[i] = (uint8_t)(0x21 + i);
+
+    MUST_OK_FP(voleith_rs_epoch_keygen(&cfg, master, NULL, &st, epoch_root));
+    v6_build_ring4(vt, epoch_root, mroot, msibs);
+
+    memset(&base_path, 0, sizeof(base_path));
+    base_path.membership.leaf_index = 0;
+    base_path.membership.siblings = msibs;
+    memset(&pub0, 0, sizeof(pub0));
+    pub0.membership_root = mroot;
+    pub0.epoch = 0;
+    pub2 = pub0;
+    pub2.epoch = 2;
+    pub3 = pub0;
+    pub3.epoch = 3;
+
+    /* Serialize the fresh (t=0) state before signing / advancing. */
+    need = voleith_rs_epoch_state_serialized_len(&st);
+    buf = malloc(need);
+    MUST_OK_FP(voleith_rs_epoch_state_serialize(&st, buf, need, NULL));
+
+    memset(&sig0, 0, sizeof(sig0));
+    check("v6 fs: sign@0 + verify",
+          voleith_rs_epoch_sign(&sig0, &st, &cfg, params, NULL, &base_path,
+                                &pub0, (const uint8_t *)msg, mlen) == 0 &&
+              voleith_rs_verify(&sig0, &cfg, params, &pub0,
+                                (const uint8_t *)msg, mlen) == 0);
+
+    /* Reload a fresh copy, advance to 3, sign@3. */
+    MUST_OK_FP(voleith_rs_epoch_state_load(&st1, &cfg, buf, need));
+    MUST_OK_FP(voleith_rs_epoch_state_advance(&st1, 3));
+    memset(&sig3, 0, sizeof(sig3));
+    check("v6 fs: reload + advance, sign@3 + verify",
+          voleith_rs_epoch_sign(&sig3, &st1, &cfg, params, NULL, &base_path,
+                                &pub3, (const uint8_t *)msg, mlen) == 0 &&
+              voleith_rs_verify(&sig3, &cfg, params, &pub3,
+                                (const uint8_t *)msg, mlen) == 0);
+    check("v6 fs: earlier sig@0 still verifies",
+          voleith_rs_verify(&sig0, &cfg, params, &pub0, (const uint8_t *)msg,
+                            mlen) == 0);
+
+    /* Advance-past-then-sign refusal: st1 is at t=3, epoch 2 is retired. */
+    memset(&sigx, 0, sizeof(sigx));
+    check("v6 fs: advance-past sign refused",
+          voleith_rs_epoch_sign(&sigx, &st1, &cfg, params, NULL, &base_path,
+                                &pub2, (const uint8_t *)msg, mlen) == -1);
+
+    /* Thief: forge epoch 2 with a future seed (sk_4) and epoch-2 siblings.
+     * The epoch subtree yields the wrong h at position 2, so the epoch root
+     * (hence the membership root assert) mismatches and sign fails. */
+    MUST_OK_FP(voleith_rs_epoch_derive_sk(&st, 4, sk_wrong)); /* st still t=0 */
+    MUST_OK_FP(voleith_rs_epoch_path(&st, 2, sibs2));
+    thief = base_path;
+    thief.epoch_sk = sk_wrong;
+    thief.epoch_siblings = sibs2;
+    thief.epoch = 2;
+    memset(&sigt, 0, sizeof(sigt));
+    check("v6 fs: thief wrong-seed sign fails",
+          voleith_rs_sign(&sigt, &cfg, params, NULL, NULL, &thief, &pub2,
+                          (const uint8_t *)msg, mlen) == -1);
+
+    voleith_rs_sig_free(&sig0);
+    voleith_rs_sig_free(&sig3);
+    free(buf);
+    voleith_rs_epoch_state_clear(&st);
+    voleith_rs_epoch_state_clear(&st1);
+}
+
+/*
+ * EP.TEST: composition matrix.
+ *   - V6 + V4: sign a claimable signature, then claim it (roundtrip + wrong).
+ *   - V6 + V3 + salt: honest sign verifies; a wrong salt fails at sign.
+ *   - V6 + revocation: non-revoked epoch root signs; a revoked epoch root
+ *     cannot even produce a lookup witness; the pre-revocation sig verifies.
+ */
+static void
+test_rs_v6_composition(void)
+{
+    const voleith_node_hash_vt *vt = &voleith_node_hash_aes_dm;
+    const voleith_params_t *params = &voleith_params_em_128f;
+    uint8_t master[16];
+    for (size_t i = 0; i < 16; i++)
+        master[i] = (uint8_t)(0x33 + i);
+
+    /* ---- V6 + V4 claim ---- */
+    {
+        voleith_rs_config_t cfg = v6_aesdm_cfg();
+        voleith_rs_epoch_state_t st;
+        voleith_rs_path_t path;
+        voleith_rs_public_t pub;
+        voleith_rs_sig_t sig;
+        voleith_rs_claim_t claim;
+        uint8_t epoch_root[16], mroot[16], msibs[2 * 16];
+        uint8_t id[16], rand[16], idrand[32], C[16], bad[16];
+
+        cfg.enable_commitment = 1;
+        cfg.commit_id_bytes = 16;
+        cfg.commit_rand_bytes = 16;
+        for (size_t i = 0; i < 16; i++) {
+            id[i] = (uint8_t)(0xA0 + i);
+            rand[i] = (uint8_t)(0x5C - i);
+        }
+        memcpy(idrand, id, 16);
+        memcpy(idrand + 16, rand, 16);
+
+        MUST_OK_FP(
+            voleith_rs_epoch_keygen(&cfg, master, NULL, &st, epoch_root));
+        v6_build_ring4(vt, epoch_root, mroot, msibs);
+        MUST_OK_FP(vt->leaf_hash(idrand, 32, C));
+
+        memset(&path, 0, sizeof(path));
+        path.membership.leaf_index = 0;
+        path.membership.siblings = msibs;
+        path.commit_id = id;
+        path.commit_rand = rand;
+        memset(&pub, 0, sizeof(pub));
+        pub.membership_root = mroot;
+        pub.commitment = C;
+        pub.epoch = 1;
+        memset(&sig, 0, sizeof(sig));
+
+        check("v6+v4: sign + verify",
+              voleith_rs_epoch_sign(&sig, &st, &cfg, params, NULL, &path, &pub,
+                                    NULL, 0) == 0 &&
+                  voleith_rs_verify(&sig, &cfg, params, &pub, NULL, 0) == 0);
+        check("v6+v4: claim roundtrip",
+              voleith_rs_claim_produce(&cfg, id, rand, &claim) == 0 &&
+                  voleith_rs_claim_verify(&cfg, C, id, rand) == 0);
+        memcpy(bad, rand, 16);
+        bad[0] ^= 0x01;
+        check("v6+v4: wrong claim opening rejected",
+              voleith_rs_claim_verify(&cfg, C, id, bad) == -1);
+
+        voleith_rs_sig_free(&sig);
+        voleith_rs_epoch_state_clear(&st);
+    }
+
+    /* ---- V6 + V3 + salt: wrong salt fails at sign ---- */
+    {
+        static const voleith_rs_attr_field_t f[] = {
+            {4, VOLEITH_RS_ATTR_PRED_NONE}};
+        voleith_rs_attr_schema_t schema = {f, 1};
+        voleith_rs_config_t cfg = v6_aesdm_cfg();
+        voleith_rs_epoch_state_t st;
+        voleith_rs_path_t path, badpath;
+        voleith_rs_public_t pub;
+        voleith_rs_sig_t sig, sigbad;
+        uint8_t epoch_root[16], mroot[16], msibs[2 * 16], leaf0[16];
+        uint8_t attrs[4] = {9, 0, 0, 0}, salt[8], wrong_salt[8];
+        uint8_t sk_t[16], epoch_sibs[3 * 16], tail[12];
+
+        cfg.attr_schema = &schema;
+        cfg.leaf_salt_bytes = 8;
+        for (size_t i = 0; i < 8; i++)
+            salt[i] = (uint8_t)(0xE0 + i);
+
+        MUST_OK_FP(
+            voleith_rs_epoch_keygen(&cfg, master, salt, &st, epoch_root));
+        memcpy(tail, attrs, 4);
+        memcpy(tail + 4, salt, 8);
+        MUST_OK_FP(rs_leaf_gf8_hash(vt, epoch_root, 16, tail, 12, leaf0));
+        v6_build_ring4(vt, leaf0, mroot, msibs);
+
+        memset(&path, 0, sizeof(path));
+        path.membership.leaf_index = 0;
+        path.membership.siblings = msibs;
+        memset(&pub, 0, sizeof(pub));
+        pub.membership_root = mroot;
+        pub.epoch = 1;
+        memset(&sig, 0, sizeof(sig));
+        check("v6+v3+salt: honest sign + verify",
+              voleith_rs_epoch_sign(&sig, &st, &cfg, params, attrs, &path, &pub,
+                                    NULL, 0) == 0 &&
+                  voleith_rs_verify(&sig, &cfg, params, &pub, NULL, 0) == 0);
+
+        /* Wrong salt via the explicit entry: the OWF leaf changes, so the
+         * membership root assert fails and sign returns -1. */
+        MUST_OK_FP(voleith_rs_epoch_derive_sk(&st, 1, sk_t));
+        MUST_OK_FP(voleith_rs_epoch_path(&st, 1, epoch_sibs));
+        memcpy(wrong_salt, salt, 8);
+        wrong_salt[0] ^= 0x01;
+        badpath = path;
+        badpath.epoch_sk = sk_t;
+        badpath.epoch_siblings = epoch_sibs;
+        badpath.epoch_salt = wrong_salt;
+        badpath.epoch = 1;
+        memset(&sigbad, 0, sizeof(sigbad));
+        check("v6+v3+salt: wrong salt fails at sign",
+              voleith_rs_sign(&sigbad, &cfg, params, NULL, attrs, &badpath,
+                              &pub, NULL, 0) == -1);
+
+        voleith_rs_sig_free(&sig);
+        voleith_rs_epoch_state_clear(&st);
+    }
+
+    /* ---- V6 + revocation ---- */
+    {
+        voleith_rs_config_t cfg = v6_aesdm_cfg();
+        voleith_rs_epoch_state_t st;
+        voleith_rs_path_t path;
+        voleith_rs_public_t pub;
+        voleith_rs_sig_t sig;
+        uint8_t epoch_root[16], mroot[16], msibs[2 * 16];
+        uint8_t rvals[4][16], rnexts[4][16], ridxs[4][8], rev_root[16],
+            rev_sib[32];
+        size_t rev_adj;
+        /* revoked IMT with epoch_root present as a record value */
+        uint8_t qvals[4][16], qnexts[4][16], qidxs[4][8], q_root[16], q_sib[32],
+            ffv[16];
+        voleith_imt_record_t qimt[4];
+        size_t q_adj;
+
+        cfg.membership.depth_r = 2;
+        MUST_OK_FP(
+            voleith_rs_epoch_keygen(&cfg, master, NULL, &st, epoch_root));
+        v6_build_ring4(vt, epoch_root, mroot, msibs);
+        build_imt4(vt, rvals, rnexts, ridxs, rev_root, epoch_root, &rev_adj,
+                   rev_sib);
+
+        memset(&path, 0, sizeof(path));
+        path.membership.leaf_index = 0;
+        path.membership.siblings = msibs;
+        path.membership.rev_adj_leaf_index = rev_adj;
+        path.membership.rev_siblings = rev_sib;
+        path.membership.rev_low_value = rvals[rev_adj];
+        path.membership.rev_low_next = rnexts[rev_adj];
+        path.membership.rev_next_index = ridxs[rev_adj];
+        memset(&pub, 0, sizeof(pub));
+        pub.membership_root = mroot;
+        pub.revocation_root = rev_root;
+        pub.epoch = 1;
+        memset(&sig, 0, sizeof(sig));
+        check("v6+rev: non-revoked sign + verify",
+              voleith_rs_epoch_sign(&sig, &st, &cfg, params, NULL, &path, &pub,
+                                    NULL, 0) == 0 &&
+                  voleith_rs_verify(&sig, &cfg, params, &pub, NULL, 0) == 0);
+
+        /* Revoked: epoch_root is a member of the revocation set, so the
+         * non-membership lookup fails and no signing witness exists. */
+        memset(ffv, 0xFF, 16);
+        memset(qvals[0], 0, 16);
+        memcpy(qnexts[0], epoch_root, 16);
+        spent_le_index(qidxs[0], 1);
+        memcpy(qvals[1], epoch_root, 16);
+        memcpy(qnexts[1], epoch_root, 16);
+        spent_le_index(qidxs[1], 2);
+        memcpy(qvals[2], epoch_root, 16);
+        memcpy(qnexts[2], epoch_root, 16);
+        spent_le_index(qidxs[2], 3);
+        memcpy(qvals[3], epoch_root, 16);
+        memcpy(qnexts[3], ffv, 16);
+        spent_le_index(qidxs[3], 0);
+        for (size_t i = 0; i < 4; i++) {
+            qimt[i].value = qvals[i];
+            qimt[i].next_value = qnexts[i];
+            qimt[i].next_index = qidxs[i];
+        }
+        MUST_OK_FP(voleith_imt_vt_build(vt, qimt, 4, 16, 8, q_root));
+        check("v6+rev: revoked epoch root cannot sign (no lookup witness)",
+              voleith_imt_vt_lookup_nonmember(vt, qimt, 4, 16, 8, epoch_root,
+                                              &q_adj, q_sib) == -1);
+        check("v6+rev: pre-revocation signature still verifies",
+              voleith_rs_verify(&sig, &cfg, params, &pub, NULL, 0) == 0);
+
+        voleith_rs_sig_free(&sig);
+        voleith_rs_epoch_state_clear(&st);
+    }
+}
+
+/*
+ * EP.TEST: anonymity smoke.  Two identities enrolled in one ring sign the
+ * same message at the same epoch under identical public inputs; the proofs
+ * are equal length, both verify, differ, and leak neither the signer's
+ * epoch siblings nor its membership siblings.
+ */
+static void
+test_rs_v6_anonymity(void)
+{
+    const voleith_node_hash_vt *vt = &voleith_node_hash_aes_dm;
+    const voleith_params_t *params = &voleith_params_em_128f;
+    const size_t W = 16;
+    const char *msg = "anon";
+    size_t mlen = strlen(msg);
+    voleith_rs_config_t cfg = v6_aesdm_cfg();
+    voleith_rs_epoch_state_t stA, stB;
+    uint8_t masterA[16], masterB[16], rootA[16], rootB[16];
+    uint8_t leaves[4 * 16], mroot[16], sibsA[2 * 16], sibsB[2 * 16];
+    uint8_t epsibsA[3 * 16];
+    voleith_rs_path_t pathA, pathB;
+    voleith_rs_public_t pub;
+    voleith_rs_sig_t sigA, sigB;
+    uint64_t e = 2;
+
+    for (size_t i = 0; i < 16; i++) {
+        masterA[i] = (uint8_t)(0x11 + i);
+        masterB[i] = (uint8_t)(0x91 + i);
+    }
+    MUST_OK_FP(voleith_rs_epoch_keygen(&cfg, masterA, NULL, &stA, rootA));
+    MUST_OK_FP(voleith_rs_epoch_keygen(&cfg, masterB, NULL, &stB, rootB));
+
+    memcpy(leaves, rootA, W);
+    memcpy(leaves + W, rootB, W);
+    for (size_t m = 2; m < 4; m++)
+        for (size_t i = 0; i < W; i++)
+            leaves[m * W + i] = (uint8_t)(0x40 * m + i);
+    MUST_OK_FP(voleith_merkle_vt_build(vt, leaves, 4, mroot));
+    MUST_OK_FP(voleith_merkle_vt_compute_path(vt, leaves, 4, 0, sibsA));
+    MUST_OK_FP(voleith_merkle_vt_compute_path(vt, leaves, 4, 1, sibsB));
+
+    memset(&pub, 0, sizeof(pub));
+    pub.membership_root = mroot;
+    pub.epoch = e;
+
+    memset(&pathA, 0, sizeof(pathA));
+    pathA.membership.leaf_index = 0;
+    pathA.membership.siblings = sibsA;
+    memset(&pathB, 0, sizeof(pathB));
+    pathB.membership.leaf_index = 1;
+    pathB.membership.siblings = sibsB;
+
+    memset(&sigA, 0, sizeof(sigA));
+    memset(&sigB, 0, sizeof(sigB));
+    MUST_OK_FP(voleith_rs_epoch_sign(&sigA, &stA, &cfg, params, NULL, &pathA,
+                                     &pub, (const uint8_t *)msg, mlen));
+    MUST_OK_FP(voleith_rs_epoch_sign(&sigB, &stB, &cfg, params, NULL, &pathB,
+                                     &pub, (const uint8_t *)msg, mlen));
+
+    check("v6 anon: both verify under identical pub",
+          voleith_rs_verify(&sigA, &cfg, params, &pub, (const uint8_t *)msg,
+                            mlen) == 0 &&
+              voleith_rs_verify(&sigB, &cfg, params, &pub, (const uint8_t *)msg,
+                                mlen) == 0);
+    check("v6 anon: equal-length proofs", sigA.len == sigB.len);
+    check("v6 anon: proofs differ",
+          sigA.len == sigB.len && memcmp(sigA.data, sigB.data, sigA.len) != 0);
+
+    MUST_OK_FP(voleith_rs_epoch_path(&stA, e, epsibsA));
+    check("v6 anon: no epoch-sibling leak in proof",
+          mem_contains(sigA.data, sigA.len, epsibsA, W) == 0);
+    check("v6 anon: no membership-sibling leak in proof",
+          mem_contains(sigA.data, sigA.len, sibsA, W) == 0);
+
+    voleith_rs_sig_free(&sigA);
+    voleith_rs_sig_free(&sigB);
+    voleith_rs_epoch_state_clear(&stA);
+    voleith_rs_epoch_state_clear(&stB);
+}
+
 int
 main(void)
 {
@@ -2706,6 +3828,17 @@ main(void)
     test_fingerprint_module_binding();
     test_fingerprint_field_binding();
     test_fingerprint_kat_pin();
+    test_epoch_bitmap();
+    test_epoch_validate();
+    test_epoch_fingerprint();
+    test_rs_v6_circuit();
+    test_rs_v6_sign();
+    test_rs_v6_nullifier_epoch();
+    test_rs_v6_fs_seed();
+    test_rs_v6_forward_security();
+    test_rs_v6_composition();
+    test_rs_v6_anonymity();
+    test_rs_v6_layout_off();
     test_rs_leaf();
     test_rs_nullifier();
     test_rs_nullifier_wide();

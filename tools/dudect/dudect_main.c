@@ -44,6 +44,9 @@ extern const dudect_target_t target_voleith_confrlnc_permute_inverse;
 extern const dudect_target_t target_voleith_perm_gf16_route;
 extern const dudect_target_t target_voleith_confrlnc_validate_key;
 extern const dudect_target_t target_voleith_confrlnc_keygen;
+extern const dudect_target_t target_voleith_rs_epoch_keygen;
+extern const dudect_target_t target_voleith_rs_epoch_state_advance;
+extern const dudect_target_t target_voleith_rs_epoch_derive_sk;
 
 static const dudect_target_t *const target_registry[] = {
     &target_sentinel_leak,
@@ -67,6 +70,9 @@ static const dudect_target_t *const target_registry[] = {
     &target_voleith_perm_gf16_route,
     &target_voleith_confrlnc_validate_key,
     &target_voleith_confrlnc_keygen,
+    &target_voleith_rs_epoch_keygen,
+    &target_voleith_rs_epoch_state_advance,
+    &target_voleith_rs_epoch_derive_sk,
     NULL,
 };
 
