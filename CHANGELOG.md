@@ -5,6 +5,34 @@ All notable changes to libtalos_voleith are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.1] [2026-07-23]
+
+Patch release: no public API change. voleith's layer-0 symmetric primitives
+move into libtalos_ichor, a shared first-party core, so the talos libraries
+consume one vetted copy instead of duplicating primitive code per repo.
+
+### Changed
+
+- AES, SHAKE/SHA3, Grøstl, Hirose, CPU dispatch, and secure-zero are now
+  supplied by **libtalos_ichor** (first-party, bundled as a `third_party/`
+  submodule; clone with `--recursive`). `core/{aes,cpu,hash,hirose,util,
+  grostl}.h` are alias shims; `field.*` and `prg.*` stay voleith-side. No
+  behavior or ABI change. See `docs/DESIGN.md`.
+- AES/Grøstl lean-build fallback notice is re-emitted from
+  `voleith_backend_notice()` via ichor's `<ichor/backend.h>` health query
+  (ichor itself does no I/O); consumer-visible stderr notice and
+  `VOLEITH_QUIET` behavior unchanged.
+- The `_sw` ctest software-floor profile now forces backends via ichor's
+  `ICHOR_FORCE_BACKEND=aes:bitsliced,clmul:scalar` (was the now-removed
+  `VOLEITH_FORCE_BACKEND`); forcing routes through the shared ichor CPU-feature
+  probe.
+
+### Removed
+
+- Duplicated AES/Grøstl primitive tests and their dudect targets (now owned
+  by ichor's own KAT / timing evidence). Field / erasure / RS tests and
+  targets are unchanged.
+
 ## [1.10.0] [2026-07-16]
 
 V6 forward-secure ring signatures: per-identity epoch key evolution so a

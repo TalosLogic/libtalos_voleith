@@ -21,6 +21,7 @@
 #include "../vole/vc.h"
 
 #include "../core/util.h"
+#include "../core/backend_notice.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -407,6 +408,9 @@ voleith_prove_commit(voleith_prover_commit_t **ctx_out,
     if (!ctx_out || !params || !circuit || !witness || !fs_seed ||
         !commitment_out)
         return -1;
+    /* One-shot lean-build fallback notice for the ichor-owned AES / Grøstl
+     * backends (field notice stays lazy in core/field.c). */
+    voleith_backend_notice();
     /* X-7: full parameter validation at the public API boundary. */
     if (voleith_params_validate(params) != 0)
         return -1;
@@ -826,6 +830,9 @@ voleith_verify_reconstruct(voleith_verifier_reconstruct_t **ctx_out,
     if (!ctx_out || !proof || !proof->data || !params || !circuit ||
         !commitment_out)
         return -1;
+
+    /* One-shot lean-build fallback notice (see voleith_prove_commit). */
+    voleith_backend_notice();
 
     if (voleith_proof_header_parse(&h, proof->data, proof->len) != 0)
         return -1;

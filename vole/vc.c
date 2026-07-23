@@ -12,6 +12,7 @@
 #include "prg.h"
 #include "hash.h"
 #include "util.h"
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -201,17 +202,34 @@ hash_h1(int lambda, const uint8_t *msg, size_t msg_len, uint8_t *out)
     uint8_t domain = 0x01;
 
     voleith_hash_ctx_t ctx;
+    /*
+     * Fresh context, absorbed then squeezed once, so the absorb cannot return
+     * the finalized error; asserted for debug-build documentation.  hash_h1 is
+     * void and internal but its callers are the VOLE commit / reconstruct
+     * paths, so it is asserted rather than made int to avoid cascading the
+     * return up through them.
+     *
+     * TODO(v1.11.0 / next minor bump): make hash_h1 return int and thread the
+     * transcript error through the VOLE commit / reconstruct callers instead of
+     * asserting.
+     */
+    int rc;
     if (lambda == 128) {
         voleith_shake128_init(&ctx);
-        voleith_shake128_absorb(&ctx, msg, msg_len);
-        voleith_shake128_absorb(&ctx, &domain, 1);
+        rc = voleith_shake128_absorb(&ctx, msg, msg_len);
+        assert(rc == 0);
+        rc = voleith_shake128_absorb(&ctx, &domain, 1);
+        assert(rc == 0);
         voleith_shake128_squeeze(&ctx, out, out_bytes);
     } else {
         voleith_shake256_init(&ctx);
-        voleith_shake256_absorb(&ctx, msg, msg_len);
-        voleith_shake256_absorb(&ctx, &domain, 1);
+        rc = voleith_shake256_absorb(&ctx, msg, msg_len);
+        assert(rc == 0);
+        rc = voleith_shake256_absorb(&ctx, &domain, 1);
+        assert(rc == 0);
         voleith_shake256_squeeze(&ctx, out, out_bytes);
     }
+    (void)rc;
     voleith_hash_ctx_clear(&ctx);
 }
 

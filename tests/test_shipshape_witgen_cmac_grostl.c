@@ -113,7 +113,7 @@ run_case(const char *name, const char *src, const uint8_t *ext, size_t ext_len)
 }
 
 /*
- * Build and run a cmac/* equivalence case for one (key_bytes, msg_len) pair.
+ * Build and run a cmac/<...> equivalence case for one (key_bytes, msg_len) pair.
  * The .ship source declares a key and a msg witness vector (byte[msg_len], or
  * byte[0] for the empty message) and makes one call to `fqn`.  ext is
  * key || msg = key_bytes + msg_len arbitrary bytes.
@@ -139,7 +139,7 @@ run_cmac_case(const char *name, const char *fqn, size_t key_bytes,
 }
 
 /*
- * Build and run a grostl/* equivalence case for one msg_len.  The .ship source
+ * Build and run a grostl/<...> equivalence case for one msg_len.  The .ship source
  * declares a msg witness vector (byte[msg_len], or byte[0] for the empty
  * message) and makes one call to `fqn`.  ext is msg = msg_len arbitrary bytes.
  */

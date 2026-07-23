@@ -9,8 +9,8 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
 #   <TEST_NAME>     -- hardware profile: best backend selected at runtime
 #   <TEST_NAME>_sw  -- software profile: all domains forced to fallback paths
 #
-# Additional source files (e.g., shared test helpers like aes_kat_runner.c) may be
-# supplied after the main TEST_SOURCE.
+# Additional source files (shared test helpers) may be supplied after the
+# main TEST_SOURCE.
 function(voleith_add_test TEST_NAME TEST_SOURCE)
     add_executable(${TEST_NAME} ${TEST_SOURCE} ${ARGN})
     target_link_libraries(${TEST_NAME} voleith_core)
@@ -19,6 +19,16 @@ function(voleith_add_test TEST_NAME TEST_SOURCE)
     # third_party/) locate the repo root at runtime.
     target_compile_definitions(${TEST_NAME} PRIVATE
         VOLEITH_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
+    # The core shim headers gate the test-only dispatch-reset / cpu-features-
+    # override aliases (voleith_aes_dispatch_reset, voleith_cpu_features_override)
+    # behind ICHOR_ENABLE_FORCE_BACKEND.  ichor exports that macro PUBLIC on the
+    # ichor target, but voleith_core links ichor PRIVATE, so it does not reach a
+    # test TU that includes core/aes.h or core/cpu.h.  Define it directly on the
+    # test target (the variable is ON whenever tests are configured).
+    if(ICHOR_ENABLE_FORCE_BACKEND)
+        target_compile_definitions(${TEST_NAME} PRIVATE ICHOR_ENABLE_FORCE_BACKEND)
+    endif()
 
     # Add intrinsics compile flags for test source files that use them directly.
     get_target_property(LIB_DEFS voleith_core INTERFACE_COMPILE_DEFINITIONS)
@@ -35,15 +45,20 @@ function(voleith_add_test TEST_NAME TEST_SOURCE)
     add_test(NAME ${TEST_NAME} COMMAND $<TARGET_FILE:${TEST_NAME}>)
 
     # Software profile: forces all dispatch domains to their fallback paths so
-    # the software backends are validated even on hardware-capable hosts.
+    # the software backends are validated even on hardware-capable hosts.  All
+    # backend forcing routes through ichor's ICHOR_FORCE_BACKEND (its
+    # ichor_cpu_features() masks the probed feature word; voleith's field
+    # dispatch reads that same masked word).  aes:bitsliced also forces Grostl
+    # soft (it rides the AES S-box backend); clmul:scalar forces the voleith
+    # field backend scalar (it rides the CLMUL/PMULL feature bits).
     add_test(NAME ${TEST_NAME}_sw COMMAND $<TARGET_FILE:${TEST_NAME}>)
     set_tests_properties(${TEST_NAME}_sw PROPERTIES
-        ENVIRONMENT "VOLEITH_FORCE_BACKEND=aes:bitsliced,field:scalar,grostl:soft")
+        ENVIRONMENT "ICHOR_FORCE_BACKEND=aes:bitsliced,clmul:scalar")
 endfunction()
 
 # Register a test that only runs in the hardware profile (no _sw variant).
 # Use for tests that verify the detection layer itself rather than backend
-# correctness.  The _sw profile's VOLEITH_FORCE_BACKEND override makes
+# correctness.  The _sw profile's ICHOR_FORCE_BACKEND override makes
 # hardware cross-check assertions trivially wrong for those tests.
 function(voleith_add_hw_test TEST_NAME TEST_SOURCE)
     add_executable(${TEST_NAME} ${TEST_SOURCE} ${ARGN})
@@ -89,16 +104,8 @@ voleith_label_test(test_erasure_rs_chunk_cert slow)
 voleith_add_test(test_erasure_rs_retriever test_erasure_rs_retriever.c)
 voleith_add_test(test_rs_consistency test_rs_consistency.c)
 voleith_add_test(test_rs_wire test_rs_wire.c)
-voleith_add_test(test_aes test_aes.c aes_kat_runner.c)
-voleith_add_test(test_aes_ct64 test_aes_ct64.c aes_kat_runner.c)
-voleith_add_test(test_grostl test_grostl.c)
-voleith_add_test(test_hirose test_hirose.c)
 voleith_add_test(test_node_hash_hirose_gf8 test_node_hash_hirose_gf8.c)
-voleith_add_test(test_grostl_kat test_grostl_kat.c)
-voleith_add_test(test_grostl_mct test_grostl_mct.c)
-voleith_label_test(test_grostl_mct slow)
 voleith_add_test(test_prg test_prg.c)
-voleith_add_test(test_hash test_hash.c)
 voleith_add_test(test_vc test_vc.c)
 voleith_add_test(test_convert test_convert.c)
 voleith_add_test(test_voleith test_voleith.c)
@@ -142,8 +149,6 @@ voleith_add_test(test_gf8_proof test_gf8_proof.c)
 voleith_add_test(test_ring_sig_v1_gf8 test_ring_sig_v1_gf8.c)
 voleith_add_test(test_rs_gf8 test_rs_gf8.c)
 voleith_add_test(test_rs_epoch_gf8 test_rs_epoch_gf8.c)
-voleith_add_hw_test(test_cpu_features test_cpu_features.c)
-voleith_add_test(test_cpu_dispatch test_cpu_dispatch.c)
 voleith_add_test(test_lean_build_warning test_lean_build_warning.c)
 voleith_add_test(test_bristol_parser test_bristol_parser.c)
 target_compile_definitions(test_bristol_parser PRIVATE

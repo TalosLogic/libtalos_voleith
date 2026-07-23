@@ -1281,7 +1281,7 @@ test_subcircuits(void)
     gf8_wire_id a, b;
     int r;
 
-    /* A user/* call inlines its body: the circuit equals the hand-built one. */
+    /* A user/<...> call inlines its body: the circuit equals the hand-built one. */
     c = voleith_gf8_circuit_new();
     a = voleith_gf8_add_witness(c);
     b = voleith_gf8_add_witness(c);
@@ -1380,7 +1380,7 @@ test_subcircuit_errors(void)
     voleith_shipshape_parsed_t p;
     int r;
 
-    /* A stdlib/* definition is rejected (definitions are user/*, S4). */
+    /* A stdlib/<...> definition is rejected (definitions are user/<...>, S4). */
     r = parse_decls(HDR "subcircuit stdlib/crypto/aes/sbox (%x : byte) {\n"
                         "ASSERT_ZERO %x\n"
                         "}\n",
@@ -1753,7 +1753,7 @@ test_registry_errors(void)
     check("registry: unknown name => REGISTRY",
           r == VOLEITH_SHIPSHAPE_ERR_REGISTRY);
 
-    /* The kdf/* entries are crypto-v2: rejected as unknown (SPEC 7.5). */
+    /* The kdf/<...> entries are crypto-v2: rejected as unknown (SPEC 7.5). */
     r = parse_decls(HDR "stdlib/crypto/kdf/ctr_cmac_aes_128(%k) -> %o\n", &p);
     check("registry: deferred kdf entry => REGISTRY",
           r == VOLEITH_SHIPSHAPE_ERR_REGISTRY);

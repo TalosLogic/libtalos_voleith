@@ -48,6 +48,7 @@ cert_compute_fs_seed(voleith_rs_cr_profile_t cr, size_t n_chunks, int secret,
     uint8_t cr_byte = (uint8_t)cr;
     uint8_t mode_byte = secret ? 1u : 0u;
     uint8_t n_le[8], idx_le[8];
+    int rc = 0;
 
     if (voleith_params_fingerprint(params, params_fp) != 0)
         return -1;
@@ -58,17 +59,26 @@ cert_compute_fs_seed(voleith_rs_cr_profile_t cr, size_t n_chunks, int secret,
     }
 
     voleith_shake256_init(&ctx);
-    voleith_shake256_absorb(&ctx, &version, 1);
-    voleith_shake256_absorb(&ctx, (const uint8_t *)CERT_FS_DOMAIN_TAG,
-                            CERT_FS_DOMAIN_TAG_BYTES);
-    voleith_shake256_absorb(&ctx, params_fp, sizeof(params_fp));
-    voleith_shake256_absorb(&ctx, &cr_byte, 1);
-    voleith_shake256_absorb(&ctx, n_le, sizeof(n_le));
-    voleith_shake256_absorb(&ctx, &mode_byte, 1);
+    rc |= voleith_shake256_absorb(&ctx, &version, 1);
+    rc |= voleith_shake256_absorb(&ctx, (const uint8_t *)CERT_FS_DOMAIN_TAG,
+                                  CERT_FS_DOMAIN_TAG_BYTES);
+    rc |= voleith_shake256_absorb(&ctx, params_fp, sizeof(params_fp));
+    rc |= voleith_shake256_absorb(&ctx, &cr_byte, 1);
+    rc |= voleith_shake256_absorb(&ctx, n_le, sizeof(n_le));
+    rc |= voleith_shake256_absorb(&ctx, &mode_byte, 1);
     if (!secret)
-        voleith_shake256_absorb(&ctx, idx_le, sizeof(idx_le));
-    voleith_shake256_absorb(&ctx, R, digb);
-    voleith_shake256_absorb(&ctx, chunk_digest, digb);
+        rc |= voleith_shake256_absorb(&ctx, idx_le, sizeof(idx_le));
+    rc |= voleith_shake256_absorb(&ctx, R, digb);
+    rc |= voleith_shake256_absorb(&ctx, chunk_digest, digb);
+
+    /* nonzero only on absorb-after-squeeze (unreachable here, single squeeze
+     * below); propagated defensively rather than silently dropped. */
+    if (rc != 0) {
+        voleith_hash_ctx_clear(&ctx);
+        voleith_secure_zero(params_fp, sizeof(params_fp));
+        return -1;
+    }
+
     voleith_shake256_squeeze(&ctx, out, VOLEITH_RS_CHUNK_CERT_FS_SEED_BYTES);
 
     voleith_hash_ctx_clear(&ctx);

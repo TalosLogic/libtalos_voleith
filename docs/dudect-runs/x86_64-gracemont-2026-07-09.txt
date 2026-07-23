@@ -189,3 +189,18 @@ v1.10.0 RSv6 forward-secure key-schedule gate status -- 2026-07-13
   The in-circuit V6 additions (SCALE_INSTANCE-based epoch directions)
   add no secret-input primitives beyond the existing GF(2^8) gate set
   already gated in Run 1.
+
+
+================================================================
+Migration note -- 2026-07-18 (v1.10.1, libtalos_ichor)
+================================================================
+
+  As of v1.10.1 the AES-CT64 (aes_ct64_*) and primitive Grostl
+  (grostl256_msg / grostl512_msg) timing targets moved to
+  libtalos_ichor together with the primitives themselves; their
+  constant-time evidence now lives in ichor's own dudect trail.  The
+  Run blocks above remain the accurate record of what voleith's
+  harness produced on their stated dates; future voleith runs no
+  longer emit those rows.  The Grostl in-circuit witness-builder
+  target (voleith_grostl256_gf8_build_witness_msg) and all field /
+  erasure / RS targets stay voleith-side and continue here.

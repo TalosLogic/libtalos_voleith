@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  *
  * parsers/shipshape_witgen_aes.h - Tier 2a native witness backends for the
- * FIXED aes/* registry entries (W8.3b).
+ * FIXED aes/<...> registry entries (W8.3b).
  *
- * Registers fast, hash-pinned witness backends for the seven FIXED aes/*
+ * Registers fast, hash-pinned witness backends for the seven FIXED aes/<...>
  * crypto-v1 registry entries (sbox, keyschedule_128, encrypt_rounds_128,
  * encrypt_128, keyschedule_256, encrypt_rounds_256, encrypt_256).  Each
  * backend wraps the matching builder in circuits/aes_gf8_circuit.h, which
@@ -21,7 +21,7 @@
 #define VOLEITH_PARSERS_SHIPSHAPE_WITGEN_AES_H
 
 /*
- * Register the seven FIXED aes/* witness backends with the Tier 2a dispatch
+ * Register the seven FIXED aes/<...> witness backends with the Tier 2a dispatch
  * registry (parsers/shipshape_witgen_dispatch.h).
  *
  * Each entry is resolved by scanning the frozen crypto-v1 registry for its

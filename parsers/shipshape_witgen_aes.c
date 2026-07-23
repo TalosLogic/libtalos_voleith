@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  *
  * parsers/shipshape_witgen_aes.c - Tier 2a native witness backends for the
- * FIXED aes/* registry entries (W8.3b).
+ * FIXED aes/<...> registry entries (W8.3b).
  *
  * Each backend wraps the matching builder in circuits/aes_gf8_circuit.h.  Those
  * builders emit inv_in bytes in the exact circuit-evaluation order the generic

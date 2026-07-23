@@ -651,7 +651,7 @@ aes128_circuit(voleith_circuit_t *c, const wire_id key[128],
     /* Round 0: AddRoundKey. */
     add_round_key(c, state, rk[0]);
 
-    /* Rounds 1–9: SubBytes + ShiftRows + MixColumns + AddRoundKey. */
+    /* Rounds 1-9: SubBytes + ShiftRows + MixColumns + AddRoundKey. */
     for (int round = 1; round <= 9; round++) {
         sub_bytes(c, state);
         shift_rows(state);

@@ -20,6 +20,7 @@
 #include "../core/hash.h"
 #include "../core/util.h"
 
+#include <assert.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -84,22 +85,38 @@ voleith_rs_membership_absorb_canonical(
     const char *tree_name;
     size_t owf_name_len;
     size_t tree_name_len;
+    int rc = 0;
 
     owf_vt = cfg->owf_hash ? cfg->owf_hash : cfg->tree_hash;
     owf_name = owf_vt->name;
     tree_name = cfg->tree_hash->name;
 
     owf_name_len = strlen(owf_name);
-    voleith_shake256_absorb_u32_le(ctx, (uint32_t)owf_name_len);
-    voleith_shake256_absorb(ctx, (const uint8_t *)owf_name, owf_name_len);
+    rc |= voleith_shake256_absorb_u32_le(ctx, (uint32_t)owf_name_len);
+    rc |= voleith_shake256_absorb(ctx, (const uint8_t *)owf_name, owf_name_len);
 
     tree_name_len = strlen(tree_name);
-    voleith_shake256_absorb_u32_le(ctx, (uint32_t)tree_name_len);
-    voleith_shake256_absorb(ctx, (const uint8_t *)tree_name, tree_name_len);
+    rc |= voleith_shake256_absorb_u32_le(ctx, (uint32_t)tree_name_len);
+    rc |=
+        voleith_shake256_absorb(ctx, (const uint8_t *)tree_name, tree_name_len);
 
-    voleith_shake256_absorb_u64_le(ctx, (uint64_t)cfg->sk_bytes);
-    voleith_shake256_absorb_u64_le(ctx, (uint64_t)cfg->depth_m);
-    voleith_shake256_absorb_u64_le(ctx, (uint64_t)cfg->depth_r);
+    rc |= voleith_shake256_absorb_u64_le(ctx, (uint64_t)cfg->sk_bytes);
+    rc |= voleith_shake256_absorb_u64_le(ctx, (uint64_t)cfg->depth_m);
+    rc |= voleith_shake256_absorb_u64_le(ctx, (uint64_t)cfg->depth_r);
+
+    /*
+     * A nonzero rc means the caller passed a ctx that had already been
+     * squeezed (absorb-after-finalize), a caller sequencing bug.  This
+     * function is public (reachable through include/voleith_gf8.h) and void,
+     * so the error cannot be propagated without a signature change; it is
+     * asserted here to catch the misuse in debug builds.
+     *
+     * TODO(v1.11.0 / next minor bump): change this to return int (an additive,
+     * source-compatible change, hence a minor bump) and have callers check it.
+     */
+    assert(rc == 0 &&
+           "voleith_rs_membership_absorb_canonical into squeezed ctx");
+    (void)rc;
 }
 
 int

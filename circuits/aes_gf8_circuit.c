@@ -302,7 +302,7 @@ aes128_gf8_encrypt_rk(voleith_gf8_circuit_t *c, const gf8_wire_id rk[11][16],
     /* Round 0: AddRoundKey. */
     add_round_key_gf8(c, state, rk[0]);
 
-    /* Rounds 1–9: SubBytes + ShiftRows + MixColumns + AddRoundKey.
+    /* Rounds 1-9: SubBytes + ShiftRows + MixColumns + AddRoundKey.
      * Each SubBytes adds 16 S-box witnesses. */
     for (int round = 1; round <= 9; round++) {
         sub_bytes_gf8(c, state);

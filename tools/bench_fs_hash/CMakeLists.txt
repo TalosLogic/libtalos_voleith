@@ -30,6 +30,11 @@ add_library(voleith_core_bench_hw STATIC ${_BENCH_CORE_SOURCES})
 target_include_directories(voleith_core_bench_hw
     PUBLIC ${VOLEITH_CORE_INCLUDES}
 )
+# These bench copies recompile the core sources, whose headers are now shims
+# over <ichor/*.h>; link ichor PUBLIC so ichor's include directory reaches both
+# the lib's own compile and the bench executables (bench_fs_hash.c includes
+# core/*.h too).  Never installed, so PUBLIC leaks nothing.
+target_link_libraries(voleith_core_bench_hw PUBLIC ichor)
 if(HAVE_CLMUL)
     target_compile_definitions(voleith_core_bench_hw PUBLIC VOLEITH_HAVE_CLMUL)
     target_compile_options(voleith_core_bench_hw PRIVATE -mpclmul -msse2 -msse4.1)
@@ -59,6 +64,7 @@ add_library(voleith_core_bench_sw STATIC ${_BENCH_CORE_SOURCES})
 target_include_directories(voleith_core_bench_sw
     PUBLIC ${VOLEITH_CORE_INCLUDES}
 )
+target_link_libraries(voleith_core_bench_sw PUBLIC ichor)
 
 unset(_BENCH_CORE_SOURCES)
 

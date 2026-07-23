@@ -2,107 +2,47 @@
  * Copyright (c) 2026 Jason Crawford
  * SPDX-License-Identifier: AGPL-3.0-only
  *
- * hash.h - SHA-3-256, SHAKE-128, SHAKE-256 (FIPS 202)
+ * hash.h - alias shim over <ichor/hash.h>.
  *
- * Implements the Keccak-based hash functions needed by the VOLEitH protocol:
- *   - SHA3-256:  fixed 32-byte digest
- *   - SHAKE-128: extendable-output function, 128-bit security
- *   - SHAKE-256: extendable-output function, 256-bit security
+ * SHA3-256 and SHAKE-128/256 (FIPS 202) moved to libtalos_ichor.  voleith's
+ * Fiat-Shamir transcript and serialization call sites are kept
+ * source-compatible by aliasing the voleith_* names to their ichor_*
+ * originals.  See docs/private/ICHOR_MIGRATION_1_10_1.md.
  *
- * All functions use the Keccak-f[1600] permutation (24 rounds) with the
- * sponge construction from FIPS 202.
- *
- * Incremental API (init/absorb/squeeze) is provided for SHAKE, which is
- * needed for Fiat-Shamir transcript construction. SHA3-256 has both
- * incremental and one-shot interfaces.
+ * One deliberate signature change is adopted, not hidden: ichor's seven
+ * *_absorb functions return int (0 on success, VOLEITH_HASH_ERR_FINALIZED if
+ * called after squeeze/finalize) where voleith's returned void.  The aliases
+ * therefore forward the int-returning form; voleith's absorb call sites check
+ * the return so a mistaken absorb after squeeze is caught instead of silently
+ * ignored.
  */
 
 #ifndef VOLEITH_HASH_H
 #define VOLEITH_HASH_H
 
-#include <stdint.h>
-#include <stddef.h>
+#include <ichor/hash.h>
 
-/* Keccak sponge context - shared by all SHA-3/SHAKE variants */
-typedef struct {
-    uint64_t state[25]; /* 1600-bit Keccak state as 25 lanes */
-    size_t
-        rate; /* rate in bytes (168 for SHAKE-128, 136 for SHAKE-256/SHA3-256) */
-    size_t absorbed; /* bytes absorbed in current block (0..rate-1) */
-    uint8_t
-        suffix; /* domain separation + first pad bit (0x06 for SHA-3, 0x1f for SHAKE) */
-    int finalized; /* nonzero after finalize/squeeze has been called */
-} voleith_hash_ctx_t;
+#define VOLEITH_HASH_ERR_FINALIZED ICHOR_HASH_ERR_FINALIZED
 
-/*
- * SHA3-256: one-shot interface
- *
- * out:  32-byte output buffer for the digest
- * data: input data
- * len:  input length in bytes
- */
-void voleith_sha3_256(uint8_t out[32], const uint8_t *data, size_t len);
+typedef ichor_hash_ctx_t voleith_hash_ctx_t;
 
-/*
- * SHA3-256: incremental interface
- */
-void voleith_sha3_256_init(voleith_hash_ctx_t *ctx);
-void voleith_sha3_256_absorb(voleith_hash_ctx_t *ctx, const uint8_t *data,
-                             size_t len);
-void voleith_sha3_256_finalize(voleith_hash_ctx_t *ctx, uint8_t out[32]);
+#define voleith_sha3_256 ichor_sha3_256
+#define voleith_sha3_256_init ichor_sha3_256_init
+#define voleith_sha3_256_absorb ichor_sha3_256_absorb
+#define voleith_sha3_256_finalize ichor_sha3_256_finalize
 
-/*
- * SHAKE-128: incremental interface
- *
- * Call init, then absorb (one or more times), then squeeze (one or more times).
- * Once squeeze is called, no further absorb calls are allowed.
- */
-void voleith_shake128_init(voleith_hash_ctx_t *ctx);
-void voleith_shake128_absorb(voleith_hash_ctx_t *ctx, const uint8_t *data,
-                             size_t len);
-void voleith_shake128_squeeze(voleith_hash_ctx_t *ctx, uint8_t *out,
-                              size_t len);
+#define voleith_shake128_init ichor_shake128_init
+#define voleith_shake128_absorb ichor_shake128_absorb
+#define voleith_shake128_squeeze ichor_shake128_squeeze
+#define voleith_shake128_absorb_u32_le ichor_shake128_absorb_u32_le
+#define voleith_shake128_absorb_u64_le ichor_shake128_absorb_u64_le
 
-/*
- * Absorb a 32-bit value into a SHAKE-128 context as four little-endian
- * bytes.  Convenience wrapper used by canonical serialization paths
- * (proof header fingerprints, etc.) where every length / operand /
- * counter is encoded in u32_le and absorbed individually.
- */
-void voleith_shake128_absorb_u32_le(voleith_hash_ctx_t *ctx, uint32_t v);
+#define voleith_shake256_init ichor_shake256_init
+#define voleith_shake256_absorb ichor_shake256_absorb
+#define voleith_shake256_squeeze ichor_shake256_squeeze
+#define voleith_shake256_absorb_u32_le ichor_shake256_absorb_u32_le
+#define voleith_shake256_absorb_u64_le ichor_shake256_absorb_u64_le
 
-/*
- * Absorb a 64-bit value into a SHAKE-128 context as eight little-endian
- * bytes.  Same canonical-serialization use case as the u32_le helper
- * for fields that need the wider range (lengths, counts, depths).
- */
-void voleith_shake128_absorb_u64_le(voleith_hash_ctx_t *ctx, uint64_t v);
-
-/*
- * SHAKE-256: incremental interface
- *
- * Same usage pattern as SHAKE-128.
- */
-void voleith_shake256_init(voleith_hash_ctx_t *ctx);
-void voleith_shake256_absorb(voleith_hash_ctx_t *ctx, const uint8_t *data,
-                             size_t len);
-void voleith_shake256_squeeze(voleith_hash_ctx_t *ctx, uint8_t *out,
-                              size_t len);
-
-/*
- * SHAKE-256 little-endian integer absorbers - same shape as the
- * SHAKE-128 helpers above.
- */
-void voleith_shake256_absorb_u32_le(voleith_hash_ctx_t *ctx, uint32_t v);
-void voleith_shake256_absorb_u64_le(voleith_hash_ctx_t *ctx, uint64_t v);
-
-/*
- * Securely zero all state in ctx.
- *
- * Call after the final squeeze when the context has absorbed secret data
- * (e.g. VOLE keys, commitment seeds) so that the sponge state is not
- * left in memory.
- */
-void voleith_hash_ctx_clear(voleith_hash_ctx_t *ctx);
+#define voleith_hash_ctx_clear ichor_hash_ctx_clear
 
 #endif /* VOLEITH_HASH_H */

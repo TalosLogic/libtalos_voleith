@@ -86,7 +86,7 @@ adv_n(const char *buf, size_t len)
 static void
 test_goal2_rules(void)
 {
-    /* (i) Defining a stdlib name is forbidden: definitions are user/* only
+    /* (i) Defining a stdlib name is forbidden: definitions are user/<...> only
      * (STDLIB Goal 2 (i); FORMAT S4). */
     check("goal2: stdlib definition => SUBCIRCUIT",
           adv(HDR "subcircuit stdlib/crypto/aes/sbox (%x : byte) -> "
@@ -101,7 +101,7 @@ test_goal2_rules(void)
                   "stdlib/crypto/aes/nope(%x) -> %y\n") ==
               VOLEITH_SHIPSHAPE_ERR_REGISTRY);
 
-    /* (ii) The kdf/* entries are deferred to crypto-v2; under crypto-v1 they
+    /* (ii) The kdf/<...> entries are deferred to crypto-v2; under crypto-v1 they
      * are simply unknown names (SPEC 7.5). */
     check("goal2: deferred crypto-v2 entry => REGISTRY",
           adv(HDR "WITNESS -> %k : byte[16]\n"

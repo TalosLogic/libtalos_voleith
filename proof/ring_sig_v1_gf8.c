@@ -39,6 +39,7 @@ voleith_rsv1_config_fingerprint(
     static const uint8_t domain_tag[] =
         VOLEITH_RSV1_CONFIG_FINGERPRINT_DOMAIN_TAG "\x00";
     const voleith_node_hash_vt *owf_vt;
+    int rc = 0;
 
     if (cfg == NULL || out == NULL)
         return -1;
@@ -54,9 +55,16 @@ voleith_rsv1_config_fingerprint(
     /* Subtract 1 to drop the compiler's implicit '\0' on the string
      * literal; only the explicit 0x00 we appended belongs in the
      * absorbed bytes.  Same idiom as params_fingerprint.c. */
-    voleith_shake256_absorb(&ctx, domain_tag, sizeof(domain_tag) - 1);
+    rc |= voleith_shake256_absorb(&ctx, domain_tag, sizeof(domain_tag) - 1);
 
+    /* voleith_rs_membership_absorb_canonical is public and void; it asserts
+     * its own absorb status internally (see rs_membership_gf8.c). */
     voleith_rs_membership_absorb_canonical(&ctx, cfg);
+
+    if (rc != 0) {
+        voleith_hash_ctx_clear(&ctx);
+        return -1;
+    }
 
     voleith_shake256_squeeze(&ctx, out, VOLEITH_RSV1_CONFIG_FINGERPRINT_BYTES);
     voleith_hash_ctx_clear(&ctx);
@@ -167,6 +175,7 @@ voleith_rsv1_compute_fs_seed(const voleith_rs_membership_config_t *cfg,
     uint8_t m_len_be[8];
     uint8_t version = VOLEITH_RSV1_FS_SEED_FMT_VERSION;
     size_t W;
+    int rc = 0;
 
     if (cfg == NULL || membership_root == NULL || out == NULL)
         return -1;
@@ -185,20 +194,29 @@ voleith_rsv1_compute_fs_seed(const voleith_rs_membership_config_t *cfg,
         m_len_be[i] = (uint8_t)(((uint64_t)m_len >> (56 - 8 * i)) & 0xffu);
 
     voleith_shake256_init(&ctx);
-    voleith_shake256_absorb(&ctx, &version, 1);
-    voleith_shake256_absorb(&ctx, voleith_rsv1_domain_tag,
-                            VOLEITH_RSV1_DOMAIN_TAG_BYTES);
-    voleith_shake256_absorb(&ctx, fp, sizeof(fp));
-    voleith_shake256_absorb(&ctx, membership_root, W);
+    rc |= voleith_shake256_absorb(&ctx, &version, 1);
+    rc |= voleith_shake256_absorb(&ctx, voleith_rsv1_domain_tag,
+                                  VOLEITH_RSV1_DOMAIN_TAG_BYTES);
+    rc |= voleith_shake256_absorb(&ctx, fp, sizeof(fp));
+    rc |= voleith_shake256_absorb(&ctx, membership_root, W);
     if (revocation_root_or_null != NULL) {
-        voleith_shake256_absorb(&ctx, revocation_root_or_null, W);
+        rc |= voleith_shake256_absorb(&ctx, revocation_root_or_null, W);
     } else {
         memset(zero_node, 0, W);
-        voleith_shake256_absorb(&ctx, zero_node, W);
+        rc |= voleith_shake256_absorb(&ctx, zero_node, W);
     }
-    voleith_shake256_absorb(&ctx, m_len_be, sizeof(m_len_be));
+    rc |= voleith_shake256_absorb(&ctx, m_len_be, sizeof(m_len_be));
     if (m_len != 0)
-        voleith_shake256_absorb(&ctx, m, m_len);
+        rc |= voleith_shake256_absorb(&ctx, m, m_len);
+
+    /* nonzero only on absorb-after-squeeze (unreachable here, single squeeze
+     * below); propagated defensively rather than silently dropped. */
+    if (rc != 0) {
+        voleith_hash_ctx_clear(&ctx);
+        voleith_secure_zero(fp, sizeof(fp));
+        voleith_secure_zero(zero_node, sizeof(zero_node));
+        return -1;
+    }
 
     voleith_shake256_squeeze(&ctx, out, VOLEITH_RSV1_FS_SEED_BYTES);
     voleith_hash_ctx_clear(&ctx);

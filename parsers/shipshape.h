@@ -24,7 +24,7 @@
  * clamping, the lexer, the three-line header, declarations / wire table /
  * refinement types, gates / assertions / sugar with canonicalization,
  * subcircuit definitions / call inlining / region side table, and the
- * Tier 2a `stdlib/crypto/*` registry.  Two conformant parsers lower any
+ * Tier 2a `stdlib/crypto/<...>` registry.  Two conformant parsers lower any
  * v1 `.ship` file to a byte-identical wire and constraint table, and hence
  * the identical 16-byte fingerprint (ISA 5.5); the bundled cross-parser
  * corpus in tests/test_shipshape_conformance.c is the release gate for
@@ -184,10 +184,10 @@ typedef struct {
  *
  * `inputs` / `n_inputs`: the call's flattened input wire ids in
  * signature order (one entry per byte of each argument, left to right).
- * Populated by the parser for `stdlib/crypto/*` registry calls (both FIXED
+ * Populated by the parser for `stdlib/crypto/<...>` registry calls (both FIXED
  * and PARAMETRIC) so that Tier 2a witness-backend dispatch can assemble the
  * per-region external-input slice without re-parsing the call site.  NULL
- * and 0 for `user/*` regions, which never dispatch.  Owned by the parsed
+ * and 0 for `user/<...>` regions, which never dispatch.  Owned by the parsed
  * result; freed by voleith_shipshape_parsed_free().
  */
 typedef struct {

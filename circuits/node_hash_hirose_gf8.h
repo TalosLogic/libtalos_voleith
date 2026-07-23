@@ -63,7 +63,7 @@
  * Exposed both as a #define (for stack-allocated buffers in callers
  * that need a compile-time constant) and via the
  * hirose_gf8_iteration_witness_bytes() accessor (for ABI symmetry
- * with the rest of the circuits/*_witness_bytes API).
+ * with the rest of the circuits/<...>_witness_bytes API).
  */
 #define HIROSE_GF8_ITERATION_WITNESS_BYTES 500
 

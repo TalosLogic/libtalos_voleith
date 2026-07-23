@@ -272,7 +272,7 @@ count_and_gates(voleith_merkle_hash_t hash, size_t target_bits,
  *   byte  1       low_value       (8 bits)
  *   byte  2       low_next        (8 bits)
  *   byte  3       next_index      (8 bits)
- *   bytes 4–51    path_nodes      (3 × 16 bytes = 384 bits)
+ *   bytes 4-51    path_nodes      (3 × 16 bytes = 384 bits)
  *   byte 52 [0:2] path_dirs       (3 bits)
  * Total: 419 bits → 53 bytes.
  * ================================================================ */
@@ -344,7 +344,7 @@ eval_nonmember_circuit(uint8_t target_val, uint8_t low_value_val,
 }
 
 /* ================================================================
- * Tests 1–3: AND gate counts
+ * Tests 1-3: AND gate counts
  *
  * DM,   8-bit  target,  8-bit  index, depth=3:
  *   leaf hash:  7,200  (24-bit leaf = partial block, 1 AES)
@@ -385,7 +385,7 @@ test_and_gate_counts(void)
 }
 
 /* ================================================================
- * Tests 4–5: Correctness (circuit root matches software reference)
+ * Tests 4-5: Correctness (circuit root matches software reference)
  *
  * Tree: 8 sorted leaves; prove target=25 non-membership via leaf[1].
  * Leaf[1]: value=20, next_value=30, next_index=2.
@@ -431,7 +431,7 @@ test_correctness(void)
 }
 
 /* ================================================================
- * Tests 7–8: Path direction coverage
+ * Tests 7-8: Path direction coverage
  *
  * leaf[0]: index 0 = 0b000, path_dirs = {0, 0, 0} (all-left path)
  *   path_nodes = {lh[1], L1[1], L2[1]}, target = 15
@@ -481,7 +481,7 @@ test_path_directions(void)
 }
 
 /* ================================================================
- * Tests 9–10: Leaf field binding
+ * Tests 9-10: Leaf field binding
  *
  * All three fields (low_value, low_next, next_index) must be committed to
  * by the leaf hash.  Changing any one field while keeping the correct path

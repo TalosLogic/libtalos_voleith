@@ -141,7 +141,7 @@ int voleith_shipshape_registry_signature(
 /*
  * Instantiation cost of entry idx at parameter param, from the normative
  * the Shipshape spec 7.2 formulas: *blocks receives the derived block
- * count (AES calls for cmac/*, compressions for grostl/*; 1 for FIXED
+ * count (AES calls for cmac/<...>, compressions for grostl/<...>; 1 for FIXED
  * entries) and *invs the INV count, which equals the witness slots the
  * body adds.  The parser checks blocks against MAX_BLOCKS_PER_OPCODE and
  * uses invs as a lower bound on the wire growth, both before emitting

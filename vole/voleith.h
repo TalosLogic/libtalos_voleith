@@ -70,10 +70,14 @@ typedef struct {
  * iv:    16-byte initialization vector (same as used in commit)
  * com:   commitment from voleith_commit (provides hcom, u, c, ellhat, tau)
  * delta: output, lambda/8 bytes of challenge material
+ *
+ * Returns 0 on success, -1 on an internal transcript error (unreachable with
+ * a fresh context).  This function is internal (not reachable through the
+ * public umbrella headers).
  */
-void voleith_challenge_from_commitment(const uint8_t iv[16],
-                                       const voleith_commitment_t *com,
-                                       uint8_t *delta);
+int voleith_challenge_from_commitment(const uint8_t iv[16],
+                                      const voleith_commitment_t *com,
+                                      uint8_t *delta);
 
 /*
  * Decode a lambda-bit challenge into per-vector challenge indices.

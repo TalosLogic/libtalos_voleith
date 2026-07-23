@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  *
  * parsers/shipshape_witgen_cmac_grostl.c - Tier 2a native witness backends for
- * the PARAMETRIC cmac/* and grostl/* registry entries (W8.3c).
+ * the PARAMETRIC cmac/<...> and grostl/<...> registry entries (W8.3c).
  *
  * Each backend wraps the matching builder in circuits/aes_cmac_gf8_circuit.h
  * or circuits/grostl_gf8_circuit.h.  Those builders emit inv_in bytes in the
@@ -13,7 +13,7 @@
  * lives here: the builder is both the implementation and the equivalence
  * oracle.
  *
- * Unlike the FIXED aes/* backends, these are PARAMETRIC: the message length is
+ * Unlike the FIXED aes/<...> backends, these are PARAMETRIC: the message length is
  * variable, so the witness buffer is sized at runtime and must be heap
  * allocated.  Each backend allocates with calloc, copies the inv tail into the
  * region span, and secure-zeroes the scratch before free (it may hold key or

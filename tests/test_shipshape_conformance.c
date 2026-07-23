@@ -398,7 +398,7 @@ test_region_placement(void)
     int r;
 
     /*
-     * A user/* call and the equivalent inlined gates produce the identical
+     * A user/<...> call and the equivalent inlined gates produce the identical
      * fingerprint: the region table (1 entry vs 0) does not enter the hash.
      */
     same_fp("region: subcircuit call hashes as inlined gates",

@@ -9,6 +9,7 @@
 
 #include "fiat_shamir.h"
 #include "util.h"
+#include <assert.h>
 
 /* ================================================================
  * Internal helpers - dispatch to SHAKE128 or SHAKE256
@@ -23,13 +24,17 @@ shake_init(voleith_transcript_t *t)
         voleith_shake256_init(&t->ctx);
 }
 
-static void
+/*
+ * Returns 0 on success, VOLEITH_HASH_ERR_FINALIZED if the transcript has
+ * already been squeezed (absorb-after-finalize).  The public transcript
+ * wrappers are void, so they assert this internally; see the note there.
+ */
+static int
 shake_absorb(voleith_transcript_t *t, const uint8_t *data, size_t len)
 {
     if (t->lambda == 128)
-        voleith_shake128_absorb(&t->ctx, data, len);
-    else
-        voleith_shake256_absorb(&t->ctx, data, len);
+        return voleith_shake128_absorb(&t->ctx, data, len);
+    return voleith_shake256_absorb(&t->ctx, data, len);
 }
 
 static void
@@ -59,15 +64,29 @@ void
 voleith_transcript_absorb(voleith_transcript_t *t, const uint8_t *data,
                           size_t len)
 {
-    shake_absorb(t, data, len);
+    /*
+     * A nonzero return means absorb-after-squeeze, a caller sequencing bug
+     * (this transcript has already produced a challenge).  This function is
+     * public and void, so the error cannot be propagated without a signature
+     * change; it is asserted here to catch the misuse in debug builds.
+     * Planned for v1.11.0: change this to return int (an additive,
+     * source-compatible change, hence a minor bump).
+     */
+    int rc = shake_absorb(t, data, len);
+    assert(rc == 0 && "voleith_transcript_absorb after squeeze");
+    (void)rc;
 }
 
 void
 voleith_transcript_squeeze(voleith_transcript_t *t, uint8_t *out, size_t len)
 {
     if (!t->squeezed) {
-        /* Append the domain separator byte before finalizing (FAEST spec 3.3) */
-        shake_absorb(t, &t->domain_sep, 1);
+        /* Append the domain separator byte before finalizing (FAEST spec 3.3).
+         * Guarded by !squeezed, so this absorb precedes any squeeze and cannot
+         * return the finalized error; asserted for consistency. */
+        int rc = shake_absorb(t, &t->domain_sep, 1);
+        assert(rc == 0);
+        (void)rc;
         t->squeezed = 1;
     }
     shake_squeeze(t, out, len);

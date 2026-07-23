@@ -244,6 +244,7 @@ voleith_rs_config_fingerprint(const voleith_rs_config_t *cfg,
         VOLEITH_RS_CONFIG_FINGERPRINT_DOMAIN_TAG;
     const voleith_node_hash_vt *owf_vt;
     uint8_t bitmap;
+    int rc = 0;
 
     if (cfg == NULL || out == NULL)
         return -1;
@@ -270,32 +271,36 @@ voleith_rs_config_fingerprint(const voleith_rs_config_t *cfg,
      * padding NULs) plus the string literal's implicit terminator;
      * subtract 1 to drop only that terminator.  Same idiom as
      * ring_sig_v1_gf8.c / params_fingerprint.c. */
-    voleith_shake256_absorb(&ctx, domain_tag, sizeof(domain_tag) - 1);
+    rc |= voleith_shake256_absorb(&ctx, domain_tag, sizeof(domain_tag) - 1);
 
+    /* voleith_rs_membership_absorb_canonical is public and void; it asserts
+     * its own absorb status internally (see rs_membership_gf8.c). */
     voleith_rs_membership_absorb_canonical(&ctx, &cfg->membership);
 
-    voleith_shake256_absorb(&ctx, &bitmap, 1);
+    rc |= voleith_shake256_absorb(&ctx, &bitmap, 1);
 
     if (bitmap & VOLEITH_RS_MODULE_NULLIFIER) {
-        voleith_shake256_absorb_u64_le(&ctx, (uint64_t)cfg->scope_bytes);
-        voleith_shake256_absorb_u64_le(&ctx, (uint64_t)cfg->depth_s);
+        rc |= voleith_shake256_absorb_u64_le(&ctx, (uint64_t)cfg->scope_bytes);
+        rc |= voleith_shake256_absorb_u64_le(&ctx, (uint64_t)cfg->depth_s);
     }
 
     if (bitmap & VOLEITH_RS_MODULE_COMMITMENT) {
-        voleith_shake256_absorb_u64_le(&ctx, (uint64_t)cfg->commit_id_bytes);
-        voleith_shake256_absorb_u64_le(&ctx, (uint64_t)cfg->commit_rand_bytes);
+        rc |= voleith_shake256_absorb_u64_le(&ctx,
+                                             (uint64_t)cfg->commit_id_bytes);
+        rc |= voleith_shake256_absorb_u64_le(&ctx,
+                                             (uint64_t)cfg->commit_rand_bytes);
     }
 
     if (bitmap & VOLEITH_RS_MODULE_PREDICATE) {
         const voleith_rs_attr_schema_t *schema = cfg->attr_schema;
 
-        voleith_shake256_absorb_u64_le(&ctx, (uint64_t)schema->n_fields);
+        rc |= voleith_shake256_absorb_u64_le(&ctx, (uint64_t)schema->n_fields);
         for (size_t i = 0; i < schema->n_fields; i++) {
             uint8_t pred_byte = (uint8_t)schema->fields[i].pred;
 
-            voleith_shake256_absorb_u64_le(
+            rc |= voleith_shake256_absorb_u64_le(
                 &ctx, (uint64_t)schema->fields[i].width_bytes);
-            voleith_shake256_absorb(&ctx, &pred_byte, 1);
+            rc |= voleith_shake256_absorb(&ctx, &pred_byte, 1);
         }
     }
 
@@ -306,13 +311,22 @@ voleith_rs_config_fingerprint(const voleith_rs_config_t *cfg,
         size_t epoch_name_len = strlen(epoch_name);
         uint8_t flag_byte = cfg->epoch_hash_preimage_ok ? 1u : 0u;
 
-        voleith_shake256_absorb_u64_le(&ctx, (uint64_t)cfg->depth_e);
-        voleith_shake256_absorb_u32_le(&ctx, (uint32_t)epoch_name_len);
-        voleith_shake256_absorb(&ctx, (const uint8_t *)epoch_name,
-                                epoch_name_len);
-        voleith_shake256_absorb_u64_le(&ctx, (uint64_t)cfg->epoch_sk_bytes);
-        voleith_shake256_absorb_u64_le(&ctx, (uint64_t)cfg->leaf_salt_bytes);
-        voleith_shake256_absorb(&ctx, &flag_byte, 1);
+        rc |= voleith_shake256_absorb_u64_le(&ctx, (uint64_t)cfg->depth_e);
+        rc |= voleith_shake256_absorb_u32_le(&ctx, (uint32_t)epoch_name_len);
+        rc |= voleith_shake256_absorb(&ctx, (const uint8_t *)epoch_name,
+                                      epoch_name_len);
+        rc |=
+            voleith_shake256_absorb_u64_le(&ctx, (uint64_t)cfg->epoch_sk_bytes);
+        rc |= voleith_shake256_absorb_u64_le(&ctx,
+                                             (uint64_t)cfg->leaf_salt_bytes);
+        rc |= voleith_shake256_absorb(&ctx, &flag_byte, 1);
+    }
+
+    /* nonzero only on absorb-after-squeeze (unreachable here, single squeeze
+     * below); propagated defensively rather than silently dropped. */
+    if (rc != 0) {
+        voleith_hash_ctx_clear(&ctx);
+        return -1;
     }
 
     voleith_shake256_squeeze(&ctx, out, VOLEITH_RS_CONFIG_FINGERPRINT_BYTES);
@@ -781,13 +795,14 @@ out:
  * Composed Fiat-Shamir seed (RS.FS).
  * ================================================================ */
 
-static void
+/* Returns the underlying absorb status (0, or VOLEITH_HASH_ERR_FINALIZED). */
+static int
 absorb_u64_be(voleith_hash_ctx_t *ctx, uint64_t v)
 {
     uint8_t b[8];
     for (size_t i = 0; i < 8; i++)
         b[i] = (uint8_t)((v >> (56 - 8 * i)) & 0xffu);
-    voleith_shake256_absorb(ctx, b, sizeof(b));
+    return voleith_shake256_absorb(ctx, b, sizeof(b));
 }
 
 int
@@ -802,6 +817,7 @@ voleith_rs_compute_fs_seed(const voleith_rs_config_t *cfg,
     uint8_t zero_node[MERKLE_VT_MAX_NODE_BYTES];
     uint8_t bitmap;
     size_t W;
+    int rc = 0;
 
     if (cfg == NULL || pub == NULL || out == NULL)
         return -1;
@@ -852,35 +868,35 @@ voleith_rs_compute_fs_seed(const voleith_rs_config_t *cfg,
     }
 
     voleith_shake256_init(&ctx);
-    voleith_shake256_absorb(&ctx, &version, 1);
+    rc |= voleith_shake256_absorb(&ctx, &version, 1);
     /* Drop only the string literal's implicit terminator; the two padding
      * NULs in the 16-byte tag are absorbed. */
-    voleith_shake256_absorb(&ctx, domain_tag, sizeof(domain_tag) - 1);
-    voleith_shake256_absorb(&ctx, fp, sizeof(fp));
-    voleith_shake256_absorb(&ctx, &bitmap, 1);
+    rc |= voleith_shake256_absorb(&ctx, domain_tag, sizeof(domain_tag) - 1);
+    rc |= voleith_shake256_absorb(&ctx, fp, sizeof(fp));
+    rc |= voleith_shake256_absorb(&ctx, &bitmap, 1);
 
-    voleith_shake256_absorb(&ctx, pub->membership_root, W);
+    rc |= voleith_shake256_absorb(&ctx, pub->membership_root, W);
 
     /* revocation_root_or_zero: absorbed unconditionally (§1.4). */
     if (pub->revocation_root != NULL) {
-        voleith_shake256_absorb(&ctx, pub->revocation_root, W);
+        rc |= voleith_shake256_absorb(&ctx, pub->revocation_root, W);
     } else {
         memset(zero_node, 0, W);
-        voleith_shake256_absorb(&ctx, zero_node, W);
+        rc |= voleith_shake256_absorb(&ctx, zero_node, W);
     }
 
     if (bitmap & VOLEITH_RS_MODULE_COMMITMENT)
-        voleith_shake256_absorb(&ctx, pub->commitment, W);
+        rc |= voleith_shake256_absorb(&ctx, pub->commitment, W);
 
     if (bitmap & VOLEITH_RS_MODULE_NULLIFIER) {
-        absorb_u64_be(&ctx, (uint64_t)cfg->scope_bytes);
-        voleith_shake256_absorb(&ctx, pub->scope, cfg->scope_bytes);
-        voleith_shake256_absorb(&ctx, pub->nullifier,
-                                voleith_rs_nullifier_bytes(cfg));
+        rc |= absorb_u64_be(&ctx, (uint64_t)cfg->scope_bytes);
+        rc |= voleith_shake256_absorb(&ctx, pub->scope, cfg->scope_bytes);
+        rc |= voleith_shake256_absorb(&ctx, pub->nullifier,
+                                      voleith_rs_nullifier_bytes(cfg));
     }
 
     if (bitmap & VOLEITH_RS_MODULE_SPENT_SET)
-        voleith_shake256_absorb(&ctx, pub->spent_root, W);
+        rc |= voleith_shake256_absorb(&ctx, pub->spent_root, W);
 
     if (bitmap & VOLEITH_RS_MODULE_PREDICATE) {
         const voleith_rs_attr_schema_t *schema = cfg->attr_schema;
@@ -891,7 +907,7 @@ voleith_rs_compute_fs_seed(const voleith_rs_config_t *cfg,
             if (schema->fields[i].pred != VOLEITH_RS_ATTR_PRED_NONE)
                 n_pred++;
 
-        absorb_u64_be(&ctx, n_pred);
+        rc |= absorb_u64_be(&ctx, n_pred);
         for (size_t i = 0; i < schema->n_fields; i++) {
             size_t w = schema->fields[i].width_bytes;
             uint8_t kind = (uint8_t)schema->fields[i].pred;
@@ -899,18 +915,18 @@ voleith_rs_compute_fs_seed(const voleith_rs_config_t *cfg,
             if (schema->fields[i].pred == VOLEITH_RS_ATTR_PRED_NONE)
                 continue;
 
-            absorb_u64_be(&ctx, (uint64_t)i);
-            voleith_shake256_absorb(&ctx, &kind, 1);
+            rc |= absorb_u64_be(&ctx, (uint64_t)i);
+            rc |= voleith_shake256_absorb(&ctx, &kind, 1);
             if (schema->fields[i].pred == VOLEITH_RS_ATTR_PRED_EQ) {
-                absorb_u64_be(&ctx, (uint64_t)w);
-                voleith_shake256_absorb(&ctx, pub->bounds + cursor, w);
+                rc |= absorb_u64_be(&ctx, (uint64_t)w);
+                rc |= voleith_shake256_absorb(&ctx, pub->bounds + cursor, w);
                 cursor += w;
             } else { /* RANGE */
-                absorb_u64_be(&ctx, (uint64_t)w);
-                voleith_shake256_absorb(&ctx, pub->bounds + cursor, w);
+                rc |= absorb_u64_be(&ctx, (uint64_t)w);
+                rc |= voleith_shake256_absorb(&ctx, pub->bounds + cursor, w);
                 cursor += w;
-                absorb_u64_be(&ctx, (uint64_t)w);
-                voleith_shake256_absorb(&ctx, pub->bounds + cursor, w);
+                rc |= absorb_u64_be(&ctx, (uint64_t)w);
+                rc |= voleith_shake256_absorb(&ctx, pub->bounds + cursor, w);
                 cursor += w;
             }
         }
@@ -919,11 +935,20 @@ voleith_rs_compute_fs_seed(const voleith_rs_config_t *cfg,
     /* [V6] epoch section: t as 8-byte big-endian, gated by bit 5, after
      * the predicate section and immediately before m_len || m (design 6.4). */
     if (bitmap & VOLEITH_RS_MODULE_EPOCH)
-        absorb_u64_be(&ctx, pub->epoch);
+        rc |= absorb_u64_be(&ctx, pub->epoch);
 
-    absorb_u64_be(&ctx, (uint64_t)m_len);
+    rc |= absorb_u64_be(&ctx, (uint64_t)m_len);
     if (m_len != 0)
-        voleith_shake256_absorb(&ctx, m, m_len);
+        rc |= voleith_shake256_absorb(&ctx, m, m_len);
+
+    /* nonzero only on absorb-after-squeeze (unreachable here, single squeeze
+     * below); propagated defensively rather than silently dropped. */
+    if (rc != 0) {
+        voleith_hash_ctx_clear(&ctx);
+        voleith_secure_zero(fp, sizeof(fp));
+        voleith_secure_zero(zero_node, sizeof(zero_node));
+        return -1;
+    }
 
     voleith_shake256_squeeze(&ctx, out, VOLEITH_RS_FS_SEED_BYTES);
     voleith_hash_ctx_clear(&ctx);

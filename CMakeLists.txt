@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 cmake_minimum_required(VERSION 3.16)
-project(libvoleith VERSION 1.10.0 LANGUAGES C)
+project(libvoleith VERSION 1.10.1 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -197,30 +197,117 @@ unset(_ARMV8_PMULL_SRC)
 voleith_report_aes_backend()
 voleith_report_field_backend()
 
+# ---------------------------------------------------------------------------
+# libtalos_ichor: shared layer-0 symmetric core (AES, SHA-3/SHAKE, Grostl,
+# carry-less multiply, AES-DM/Hirose, CPU dispatch, secure-zero), vendored as a
+# git submodule under third_party/.  For 1.10.1 it is consumed via
+# add_subdirectory: voleith owns the single ichor build.  The ExternalProject /
+# dependency-injection model libtalos_syndrome uses is revisited only when
+# voleith builds syndrome in-tree.  See docs/private/ICHOR_MIGRATION_1_10_1.md.
+# ---------------------------------------------------------------------------
+
+# Map voleith's four build variants (sw / clmul / aesni / clmul_aesni) onto
+# ichor's matching backend options, so a lean voleith build yields a lean ichor
+# and the same backend matrix is exercised on both sides.  These plain set()s
+# take precedence over ichor's option() defaults (policy CMP0077, NEW under our
+# 3.16 minimum).
+set(ICHOR_AES_NI    ${VOLEITH_AES_NI})
+set(ICHOR_ARMV8_AES ${VOLEITH_ARMV8_AES})
+set(ICHOR_CLMUL     ${VOLEITH_CLMUL})
+set(ICHOR_PMULL     ${VOLEITH_PMULL})
+
+# ichor carries its own KAT / dudect suites in its own tree; do not build them
+# inside voleith.
+set(ICHOR_BUILD_TESTS  OFF)
+set(ICHOR_BUILD_DUDECT OFF)
+
+# voleith's dudect harness (tools/dudect) recompiles voleith's own core with no
+# hardware flags and must likewise measure ichor's software primitive paths,
+# independent of this configure's hardware backend selection.  Ask ichor for its
+# software-only companion target (ichor_soft) so the harness links that instead
+# of the possibly-hardware `ichor`; the main library and the hardware test
+# profile keep the accelerated `ichor`.
+if(VOLEITH_BUILD_DUDECT)
+    set(ICHOR_BUILD_SOFT_LIB ON)
+endif()
+
+# The ICHOR_FORCE_BACKEND env override and the dispatch-reset / cpu-features-
+# override hooks compile in only under ICHOR_ENABLE_FORCE_BACKEND.  voleith's
+# backend-sweep and dudect builds need them (the voleith_*_dispatch_reset /
+# voleith_cpu_features_override shims resolve to these); a release build carries
+# neither the env parser nor the hooks.
+if(VOLEITH_BUILD_TESTS OR VOLEITH_BUILD_DUDECT)
+    set(ICHOR_ENABLE_FORCE_BACKEND ON)
+endif()
+
+# Enforce the supported ichor version range [MIN, MAX) (semver SameMajorVersion)
+# against <ichor/version.h>.  That header is authoritative: ichor's own CMake
+# fails to configure if it drifts from project(VERSION).  Parsing it here (rather
+# than reading a subdirectory-scoped CMake variable) works regardless of how
+# ichor is pulled in and fails fast if the submodule is not initialized.  A
+# compile-time guard in core/ichor_compat.h re-checks the major at TU compile.
+set(VOLEITH_ICHOR_VERSION_MIN 1.0.0)
+set(VOLEITH_ICHOR_VERSION_MAX 2.0.0)
+set(_voleith_ichor_version_h
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libtalos_ichor/include/ichor/version.h")
+if(NOT EXISTS "${_voleith_ichor_version_h}")
+    message(FATAL_ERROR
+        "ichor/version.h not found at '${_voleith_ichor_version_h}'. Initialize "
+        "the submodule (git submodule update --init --recursive) or pin an ichor "
+        ">= ${VOLEITH_ICHOR_VERSION_MIN}.")
+endif()
+file(STRINGS "${_voleith_ichor_version_h}" _voleith_ichor_ver_lines
+    REGEX "#define ICHOR_VERSION_(MAJOR|MINOR|PATCH)")
+string(REGEX MATCH "ICHOR_VERSION_MAJOR ([0-9]+)" _ "${_voleith_ichor_ver_lines}")
+set(_voleith_ichor_major "${CMAKE_MATCH_1}")
+string(REGEX MATCH "ICHOR_VERSION_MINOR ([0-9]+)" _ "${_voleith_ichor_ver_lines}")
+set(_voleith_ichor_minor "${CMAKE_MATCH_1}")
+string(REGEX MATCH "ICHOR_VERSION_PATCH ([0-9]+)" _ "${_voleith_ichor_ver_lines}")
+set(_voleith_ichor_patch "${CMAKE_MATCH_1}")
+if(_voleith_ichor_major STREQUAL "" OR _voleith_ichor_minor STREQUAL "" OR
+   _voleith_ichor_patch STREQUAL "")
+    message(FATAL_ERROR
+        "could not parse ICHOR_VERSION_* from '${_voleith_ichor_version_h}'")
+endif()
+set(VOLEITH_ICHOR_VERSION
+    "${_voleith_ichor_major}.${_voleith_ichor_minor}.${_voleith_ichor_patch}")
+if(VOLEITH_ICHOR_VERSION VERSION_LESS VOLEITH_ICHOR_VERSION_MIN OR
+   NOT VOLEITH_ICHOR_VERSION VERSION_LESS VOLEITH_ICHOR_VERSION_MAX)
+    message(FATAL_ERROR
+        "libtalos_ichor ${VOLEITH_ICHOR_VERSION} is outside the supported range "
+        "[${VOLEITH_ICHOR_VERSION_MIN}, ${VOLEITH_ICHOR_VERSION_MAX}). Update the "
+        "submodule pin or port voleith to the new ichor major.")
+endif()
+message(STATUS
+    "voleith: libtalos_ichor ${VOLEITH_ICHOR_VERSION} "
+    "(supported range [${VOLEITH_ICHOR_VERSION_MIN}, ${VOLEITH_ICHOR_VERSION_MAX}))")
+
+add_subdirectory(third_party/libtalos_ichor)
+
+# voleith's internal core/*.h are now thin shims over <ichor/*.h>, so every
+# in-tree target that compiles a TU including a core header (tests, tools,
+# examples) needs ichor's include directory.  Exposed below as a
+# BUILD_INTERFACE usage requirement on voleith_core: it reaches build-tree
+# dependents but is stripped from the installed / exported interface, so
+# external consumers of voleith are NOT handed ichor's headers (the sibling
+# QC-MDPC library pulls ichor on its own).  The link dependency itself still
+# propagates via the PRIVATE ichor link (LINK_ONLY) so symbols resolve.
+set(VOLEITH_ICHOR_INCLUDE_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libtalos_ichor/include")
+
 # Source files for core library
 set(VOLEITH_CORE_SOURCES
-    core/cpu.c
-    core/cpu_x86.c
-    core/cpu_aarch64.c
-    core/cpu_generic.c
+    # AES / CPU-detect / hash / hirose / util / grostl primitives moved to
+    # libtalos_ichor (linked target `ichor`); see
+    # docs/private/ICHOR_MIGRATION_1_10_1.md.  Only the voleith-specific field
+    # arithmetic and the tweakable AES-CTR PRG stay here.
     core/field.c
     core/field_clmul.c
     core/field_pmull.c
     core/field_scalar.c
     core/field16.c
-    core/aes.c
-    core/aes_aesni.c
-    core/aes_armv8.c
-    core/aes_ct64.c
-    core/aes_ct64_ops.c
-    core/grostl.c
-    core/grostl_aesni.c
-    core/grostl_armv8.c
-    core/grostl_soft.c
-    core/hirose.c
     core/prg.c
-    core/hash.c
-    core/util.c
+    core/backend_notice.c
     vole/vc.c
     vole/convert.c
     vole/voleith.c
@@ -343,21 +430,16 @@ function(voleith_apply_hw_flags TARGET)
     endif()
 endfunction()
 
-# Per-TU compile flags for AES and field backend files.
+# Per-TU compile flags for the field backend files.
 #
 # Only the respective backend TU needs the ISA instruction flags.  The
 # flags are directory-scoped (CMake 3.16 compatible), so they apply to
 # every target in this CMakeLists.txt that compiles these source files.
 # For targets that do not define the corresponding VOLEITH_HAVE_* macro,
 # the files compile to empty objects and the extra flags are harmless.
-if(HAVE_AES_NI)
-    set_source_files_properties(core/aes_aesni.c PROPERTIES
-        COMPILE_FLAGS "-maes -msse2 -mssse3")
-endif()
-if(HAVE_ARMV8_AES AND ARMV8_CRYPTO_FLAGS)
-    set_source_files_properties(core/aes_armv8.c PROPERTIES
-        COMPILE_FLAGS "${ARMV8_CRYPTO_FLAGS}")
-endif()
+#
+# The AES / Grøstl per-TU flags moved to libtalos_ichor along with those
+# sources; only the voleith-owned field carryless-mul backends remain.
 if(HAVE_CLMUL)
     set_source_files_properties(core/field_clmul.c PROPERTIES
         COMPILE_FLAGS "-mpclmul -msse2 -msse4.1")
@@ -366,20 +448,21 @@ if(HAVE_PMULL AND ARMV8_CRYPTO_FLAGS)
     set_source_files_properties(core/field_pmull.c PROPERTIES
         COMPILE_FLAGS "${ARMV8_CRYPTO_FLAGS}")
 endif()
-if(HAVE_AES_NI)
-    set_source_files_properties(core/grostl_aesni.c PROPERTIES
-        COMPILE_FLAGS "-maes -msse2 -mssse3")
-endif()
-if(HAVE_ARMV8_AES AND ARMV8_CRYPTO_FLAGS)
-    set_source_files_properties(core/grostl_armv8.c PROPERTIES
-        COMPILE_FLAGS "${ARMV8_CRYPTO_FLAGS}")
-endif()
 
 # Production static library (libtalos_voleith.a)
 add_library(voleith_core STATIC ${VOLEITH_CORE_SOURCES})
 set_target_properties(voleith_core PROPERTIES OUTPUT_NAME talos_voleith)
 target_include_directories(voleith_core PUBLIC ${VOLEITH_CORE_INCLUDES})
 voleith_apply_hw_flags(voleith_core)
+
+# Link the shared layer-0 core.  PRIVATE: ichor's headers are an internal
+# implementation detail and must not be re-exported to external consumers of
+# voleith (the sibling QC-MDPC library pulls ichor on its own).  For the static
+# archive CMake still propagates the ichor link dependency (LINK_ONLY) to final
+# executables so symbols resolve; only the include directories stay private.
+target_link_libraries(voleith_core PRIVATE ichor)
+target_include_directories(voleith_core PUBLIC
+    "$<BUILD_INTERFACE:${VOLEITH_ICHOR_INCLUDE_DIR}>")
 
 # Optional shared library (libtalos_voleith.so / .dylib)
 if(VOLEITH_BUILD_SHARED)
@@ -391,6 +474,9 @@ if(VOLEITH_BUILD_SHARED)
     )
     target_include_directories(voleith_core_shared PUBLIC ${VOLEITH_CORE_INCLUDES})
     voleith_apply_hw_flags(voleith_core_shared)
+    target_link_libraries(voleith_core_shared PRIVATE ichor)
+    target_include_directories(voleith_core_shared PUBLIC
+        "$<BUILD_INTERFACE:${VOLEITH_ICHOR_INCLUDE_DIR}>")
 endif()
 
 if(VOLEITH_BUILD_TESTS)

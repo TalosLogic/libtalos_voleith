@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  *
  * parsers/shipshape_witgen_cmac_grostl.h - Tier 2a native witness backends for
- * the PARAMETRIC cmac/* and grostl/* registry entries (W8.3c).
+ * the PARAMETRIC cmac/<...> and grostl/<...> registry entries (W8.3c).
  *
  * Registers structural-name-keyed witness backends for the six PARAMETRIC
  * crypto-v1 entries (cmac/aes_128, cmac/aes_256, grostl/hash_256,
@@ -32,7 +32,7 @@
 #define VOLEITH_PARSERS_SHIPSHAPE_WITGEN_CMAC_GROSTL_H
 
 /*
- * Register the two PARAMETRIC cmac/* witness backends (cmac/aes_128,
+ * Register the two PARAMETRIC cmac/<...> witness backends (cmac/aes_128,
  * cmac/aes_256) with the Tier 2a dispatch registry through the
  * structural-name-keying path.
  *
@@ -44,7 +44,7 @@
 int voleith_shipshape_witgen_register_cmac(void);
 
 /*
- * Register the four PARAMETRIC grostl/* witness backends (hash_256,
+ * Register the four PARAMETRIC grostl/<...> witness backends (hash_256,
  * hash_256_t27, hash_512, hash_512_t59) with the Tier 2a dispatch registry.
  * Two handlers serve the four names: the t27 / t59 variants differ only in
  * output byte count, not in the inv_in witness trace.

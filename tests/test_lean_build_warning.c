@@ -2,15 +2,20 @@
  * Copyright (c) 2026 Jason Crawford
  * SPDX-License-Identifier: AGPL-3.0-only
  *
- * test_lean_build_warning.c - lean-build mismatch notice.
+ * test_lean_build_warning.c - lean-build fallback notice (AES / Grøstl).
  *
- * Validates that voleith_aes_dispatch_init() emits a notice on stderr
- * when the host CPU has AES-NI but the library was built without the
- * aes-ni backend (VOLEITH_HAVE_AES_NI not defined), and that the notice
- * is suppressed by VOLEITH_QUIET=1.
+ * The AES and Grøstl backends live in libtalos_ichor, which does no I/O and
+ * only exposes backend health via <ichor/backend.h>.  voleith turns an
+ * ICHOR_BACKEND_FALLBACK verdict into a one-shot stderr notice through
+ * voleith_backend_notice() (fired from the public proof entry points).  This
+ * test validates that voleith_backend_notice() emits the notice when the host
+ * CPU has a hardware AES backend that was opted out at compile time, that it
+ * fires at most once, and that VOLEITH_QUIET=1 suppresses it.
  *
- * In fat builds (VOLEITH_HAVE_AES_NI defined) no notice is emitted and
- * the test exits immediately with PASS.
+ * The active fallback is detected at runtime (ichor_aes_backend_health), not
+ * from a compiled-in macro, so the test works regardless of whether ichor's
+ * build defines propagate to this TU.  On a fat build (hardware backend
+ * present) the notice path is not reachable and the test exits with PASS.
  */
 
 #include <stdio.h>
@@ -18,8 +23,10 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "aes.h"
 #include "cpu.h"
+#include "backend_notice.h"
+
+#include <ichor/backend.h>
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -40,8 +47,6 @@ static int tests_passed = 0;
     do {                                                                       \
         printf("FAIL: %s\n", msg);                                             \
     } while (0)
-
-#ifndef VOLEITH_HAVE_AES_NI
 
 static int
 stderr_capture_start(int *read_end, int *saved_fd)
@@ -92,14 +97,14 @@ test_quiet_suppresses(void)
     TEST("VOLEITH_QUIET=1 suppresses lean-build notice");
 
     setenv("VOLEITH_QUIET", "1", 1);
-    voleith_aes_dispatch_reset();
+    voleith_backend_notice_reset();
 
     if (stderr_capture_start(&read_fd, &saved_fd) < 0) {
         FAIL("pipe setup failed");
         unsetenv("VOLEITH_QUIET");
         return;
     }
-    voleith_aes_dispatch_init();
+    voleith_backend_notice();
     stderr_capture_stop(read_fd, saved_fd, buf, sizeof(buf));
     unsetenv("VOLEITH_QUIET");
 
@@ -115,15 +120,15 @@ test_notice_fires(void)
     int read_fd, saved_fd;
     char buf[512];
 
-    TEST("lean-build notice fires on first dispatch init");
+    TEST("lean-build notice fires on first report");
 
-    voleith_aes_dispatch_reset();
+    voleith_backend_notice_reset();
 
     if (stderr_capture_start(&read_fd, &saved_fd) < 0) {
         FAIL("pipe setup failed");
         return;
     }
-    voleith_aes_dispatch_init();
+    voleith_backend_notice();
     stderr_capture_stop(read_fd, saved_fd, buf, sizeof(buf));
 
     if (strstr(buf, "voleith: notice:") != NULL)
@@ -140,13 +145,15 @@ test_notice_once(void)
 
     TEST("lean-build notice fires at most once per process");
 
-    voleith_aes_dispatch_reset();
+    voleith_backend_notice_reset();
+    /* Consume the once-guard with a first (discarded) report. */
+    voleith_backend_notice();
 
     if (stderr_capture_start(&read_fd, &saved_fd) < 0) {
         FAIL("pipe setup failed");
         return;
     }
-    voleith_aes_dispatch_init();
+    voleith_backend_notice();
     stderr_capture_stop(read_fd, saved_fd, buf, sizeof(buf));
 
     if (strstr(buf, "voleith: notice:") == NULL)
@@ -155,46 +162,37 @@ test_notice_once(void)
         FAIL("notice printed a second time");
 }
 
-#endif /* !VOLEITH_HAVE_AES_NI */
-
 int
 main(void)
 {
-    printf("lean-build mismatch warning tests\n");
+    printf("lean-build fallback notice tests\n");
 
-#ifdef VOLEITH_HAVE_AES_NI
-    /*
-     * Fat build: all backends compiled in, no lean-build notice
-     * expected.  This variant is a pass-through.
-     */
-    printf("  (fat build; no lean-build warning tests to run)\n");
-    printf("\n1/1 tests passed\n");
-    return 0;
-#else
     unsigned host = voleith_cpu_features();
 
-    if (!(host & VOLEITH_CPU_AES_NI)) {
-        /*
-         * Lean build but host has no AES-NI: the warning path is
-         * unreachable (the feature bit check inside dispatch_init is
-         * false).  Skip gracefully.
-         */
-        printf("  (host has no AES-NI; lean-build warning path not"
+    if (!(host & (VOLEITH_CPU_AES_NI | VOLEITH_CPU_ARMV8_AES))) {
+        /* Host has no hardware AES: the fallback is the only choice, so the
+         * notice path is not reachable.  Skip gracefully. */
+        printf("  (host has no hardware AES backend; notice path not"
                " reachable, skipping)\n");
         printf("\n1/1 tests passed\n");
         return 0;
     }
 
-    /*
-     * Run quiet-suppression test first: when VOLEITH_QUIET is set the
-     * atomic flag inside dispatch_init is not consumed, so the
-     * subsequent fire test can still trigger the warning.
-     */
+    if (ichor_aes_backend_health() != ICHOR_BACKEND_FALLBACK) {
+        /* Fat build: the hardware AES backend is compiled in and active, so
+         * no lean-build notice is expected.  Pass-through. */
+        printf("  (fat build; hardware AES backend active, no notice"
+               " tests to run)\n");
+        printf("\n1/1 tests passed\n");
+        return 0;
+    }
+
+    /* Quiet-suppression first: it must not consume the once-guard, so the
+     * subsequent fire test can still trigger the notice. */
     test_quiet_suppresses();
     test_notice_fires();
     test_notice_once();
 
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
-#endif
 }

@@ -15,10 +15,11 @@
 
 #include <string.h>
 
-static void
+/* Returns the underlying absorb status (0, or VOLEITH_HASH_ERR_FINALIZED). */
+static int
 absorb_u8(voleith_hash_ctx_t *ctx, uint8_t v)
 {
-    voleith_shake128_absorb(ctx, &v, 1);
+    return voleith_shake128_absorb(ctx, &v, 1);
 }
 
 /*
@@ -40,6 +41,7 @@ voleith_gf16_circuit_fingerprint(
     const gf16_wire_entry_t *wires;
     const gf16_constraint_entry_t *constraints;
     size_t n_wires, n_constraints, i;
+    int rc = 0;
     /*
      * Domain tag plus the spec's 0x00 terminator.  sizeof() includes the
      * compiler-appended implicit '\0', so subtract 1 to absorb only the
@@ -58,45 +60,56 @@ voleith_gf16_circuit_fingerprint(
 
     voleith_shake128_init(&ctx);
 
-    voleith_shake128_absorb(&ctx, domain_tag, sizeof(domain_tag) - 1);
+    rc |= voleith_shake128_absorb(&ctx, domain_tag, sizeof(domain_tag) - 1);
 
-    voleith_shake128_absorb_u32_le(&ctx, (uint32_t)n_wires);
-    voleith_shake128_absorb_u32_le(
+    rc |= voleith_shake128_absorb_u32_le(&ctx, (uint32_t)n_wires);
+    rc |= voleith_shake128_absorb_u32_le(
         &ctx, (uint32_t)voleith_gf16_circuit_witness_count(circuit));
-    voleith_shake128_absorb_u32_le(
+    rc |= voleith_shake128_absorb_u32_le(
         &ctx, (uint32_t)voleith_gf16_circuit_instance_count(circuit));
-    voleith_shake128_absorb_u32_le(
+    rc |= voleith_shake128_absorb_u32_le(
         &ctx, (uint32_t)voleith_gf16_circuit_mul_count(circuit));
-    voleith_shake128_absorb_u32_le(&ctx, (uint32_t)n_constraints);
+    rc |= voleith_shake128_absorb_u32_le(&ctx, (uint32_t)n_constraints);
 
     for (i = 0; i < n_wires; i++) {
-        absorb_u8(&ctx, (uint8_t)wires[i].kind);
-        voleith_shake128_absorb_u32_le(&ctx, normalize_operand(wires[i].a));
-        voleith_shake128_absorb_u32_le(&ctx, normalize_operand(wires[i].b));
+        rc |= absorb_u8(&ctx, (uint8_t)wires[i].kind);
+        rc |=
+            voleith_shake128_absorb_u32_le(&ctx, normalize_operand(wires[i].a));
+        rc |=
+            voleith_shake128_absorb_u32_le(&ctx, normalize_operand(wires[i].b));
         /*
          * const_val is meaningful only for CONST and XOR_CONST; the builder
          * leaves it at 0 otherwise, so absorbing it unconditionally is safe
          * and keeps the encoding fixed-width.  Absorbed as u32_le (a uint16
          * value, zero-extended) for an endian-stable encoding.
          */
-        voleith_shake128_absorb_u32_le(&ctx, (uint32_t)wires[i].const_val);
+        rc |=
+            voleith_shake128_absorb_u32_le(&ctx, (uint32_t)wires[i].const_val);
         /*
          * matrix is populated only for LINEAR_MAP; zero-filled otherwise.
          * Each 16-bit row is absorbed little-endian (not as a raw byte
          * block) so the fingerprint is identical across host endianness.
          */
         for (int r = 0; r < 16; r++)
-            voleith_shake128_absorb_u32_le(&ctx, (uint32_t)wires[i].matrix[r]);
+            rc |= voleith_shake128_absorb_u32_le(&ctx,
+                                                 (uint32_t)wires[i].matrix[r]);
     }
 
     for (i = 0; i < n_constraints; i++) {
-        absorb_u8(&ctx, (uint8_t)constraints[i].kind);
-        voleith_shake128_absorb_u32_le(&ctx,
-                                       normalize_operand(constraints[i].a));
-        voleith_shake128_absorb_u32_le(&ctx,
-                                       normalize_operand(constraints[i].b));
-        voleith_shake128_absorb_u32_le(&ctx,
-                                       normalize_operand(constraints[i].c));
+        rc |= absorb_u8(&ctx, (uint8_t)constraints[i].kind);
+        rc |= voleith_shake128_absorb_u32_le(
+            &ctx, normalize_operand(constraints[i].a));
+        rc |= voleith_shake128_absorb_u32_le(
+            &ctx, normalize_operand(constraints[i].b));
+        rc |= voleith_shake128_absorb_u32_le(
+            &ctx, normalize_operand(constraints[i].c));
+    }
+
+    /* nonzero only on absorb-after-squeeze (unreachable here, single squeeze
+     * below); propagated defensively rather than silently dropped. */
+    if (rc != 0) {
+        voleith_hash_ctx_clear(&ctx);
+        return -1;
     }
 
     voleith_shake128_squeeze(&ctx, out, VOLEITH_GF16_CIRCUIT_FINGERPRINT_BYTES);

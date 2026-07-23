@@ -43,11 +43,17 @@ profile_hash(voleith_rs_cr_profile_t cr, const uint8_t *data, size_t len,
 
     if (cr == VOLEITH_RS_CR_128) {
         voleith_shake128_init(&ctx);
-        voleith_shake128_absorb(&ctx, data, len);
+        if (voleith_shake128_absorb(&ctx, data, len) != 0) {
+            voleith_hash_ctx_clear(&ctx);
+            return VOLEITH_EC_ERR_INTERNAL;
+        }
         voleith_shake128_squeeze(&ctx, out, dbytes);
     } else {
         voleith_shake256_init(&ctx);
-        voleith_shake256_absorb(&ctx, data, len);
+        if (voleith_shake256_absorb(&ctx, data, len) != 0) {
+            voleith_hash_ctx_clear(&ctx);
+            return VOLEITH_EC_ERR_INTERNAL;
+        }
         voleith_shake256_squeeze(&ctx, out, dbytes);
     }
     voleith_hash_ctx_clear(&ctx);

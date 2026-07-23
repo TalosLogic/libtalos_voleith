@@ -7,8 +7,8 @@
  * GF(2^8) and GF(2^64) tests run once (single-implementation).
  * GF(2^128/192/256) and ByteCombine tests run against whatever field backend
  * is active.  CTest registers this binary twice -- once with the hardware
- * backend and once with VOLEITH_FORCE_BACKEND=field:scalar -- to cover both
- * paths.
+ * backend and once with ICHOR_FORCE_BACKEND=clmul:scalar (the voleith field
+ * backend rides the CLMUL/PMULL feature bits) -- to cover both paths.
  */
 
 #include "field.h"

@@ -471,7 +471,7 @@ eval_nonmember_gf8(uint8_t target_val, uint8_t low_value_val,
 }
 
 /* ================================================================
- * Tests 1–4: VOLE slot counts (ell = n_witness + n_mul)
+ * Tests 1-4: VOLE slot counts (ell = n_witness + n_mul)
  *
  * DM, target_bytes=1, index_bytes=1, depth=3:
  *   Witnesses: (1+1+1+1) + 3×16 + 1×200 + 3×200 = 852
@@ -509,7 +509,7 @@ test_ell_counts(void)
 }
 
 /* ================================================================
- * Tests 5–6: Correctness (circuit root matches software reference)
+ * Tests 5-6: Correctness (circuit root matches software reference)
  *
  * Tree: 8 sorted leaves; prove target=25 non-membership via leaf[1].
  * Leaf[1]: value=20, next_value=30, next_index=2.  leaf_data = [20,30,2].
@@ -552,7 +552,7 @@ test_correctness(void)
 }
 
 /* ================================================================
- * Tests 7–8: Path direction coverage (DM only)
+ * Tests 7-8: Path direction coverage (DM only)
  *
  * leaf[0]: index 0 = 0b000, path_dirs = {0,0,0}  target=15
  * leaf[5]: index 5 = 0b101, path_dirs = {1,0,1}  target=65
@@ -597,7 +597,7 @@ test_path_directions(void)
 }
 
 /* ================================================================
- * Tests 9–10: Leaf field binding
+ * Tests 9-10: Leaf field binding
  * ================================================================ */
 
 static void
@@ -820,7 +820,7 @@ eval_nonmember_gf8_secret_dir(uint8_t target_val, uint8_t low_value_val,
 }
 
 /* ================================================================
- * Tests 12–13: VOLE slot counts for secret-dir variant
+ * Tests 12-13: VOLE slot counts for secret-dir variant
  *
  * vs. public-dir, each depth=3 case adds +3 witnesses + 48 mul gates = +51
  *   DM:   900 + 51 = 951
@@ -837,7 +837,7 @@ test_ell_counts_secret_dir(void)
 }
 
 /* ================================================================
- * Tests 14–15: Correctness - secret-dir root matches software reference
+ * Tests 14-15: Correctness - secret-dir root matches software reference
  * ================================================================ */
 
 static void

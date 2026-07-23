@@ -16,7 +16,7 @@
  *
  * This is the generic evaluator (W6.2); it is the trusted reference and the
  * always-available path.  It reproduces, byte for byte, the output of the
- * hand-written circuits/*_build_witness helpers for the registry circuits.
+ * hand-written circuits/<...>_build_witness helpers for the registry circuits.
  */
 
 #ifndef VOLEITH_PARSERS_SHIPSHAPE_WITNESS_H

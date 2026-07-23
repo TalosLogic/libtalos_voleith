@@ -6,7 +6,7 @@
  *
  * GF(2^16) is a single-implementation field (CLMUL / PMULL / software
  * selected at compile time), so these tests run once.  CTest registers the
- * binary twice (hardware and VOLEITH_FORCE_BACKEND=field:scalar); the
+ * binary twice (hardware and ICHOR_FORCE_BACKEND=clmul:scalar); the
  * software fold path is exercised on accelerated hosts via the _sw profile
  * if the build compiled without the intrinsic paths.
  *

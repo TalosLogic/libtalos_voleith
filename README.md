@@ -382,7 +382,7 @@ the full security-architecture write-up.
 
 One library binary contains every compiled-in backend; `ctest` runs each test
 twice on every host, once with hardware dispatch (`<NAME>`) and once with the
-software floor forced via `VOLEITH_FORCE_BACKEND` (`<NAME>_sw`). Both paths
+software floor forced via `ICHOR_FORCE_BACKEND` (`<NAME>_sw`). Both paths
 are validated against the same known-answer vectors from multiple independent
 sources:
 
@@ -412,12 +412,18 @@ The full test-vector inventory is in
 ### Build
 
 Requirements: CMake 3.16+, a C17 compiler (GCC or Clang), Linux or macOS
-(x86_64 or aarch64). The default build is a single-binary fat library that
-compiles every available backend (AES-NI, ARMv8 Crypto, CLMUL, PMULL, plus
-portable constant-time fallbacks) and selects among them at runtime based on
-the host CPU. There is no per-host build step.
+(x86_64 or aarch64). No third-party dependencies. The shared layer-0
+symmetric primitives (AES, SHAKE/SHA3, Grøstl) come from **libtalos_ichor**,
+a first-party Talos library bundled as a git submodule under `third_party/`
+and built as part of this project; clone with `--recursive` (or run
+`git submodule update --init`) so it is present. The default build is a
+single-binary fat library that compiles every available backend (AES-NI,
+ARMv8 Crypto, CLMUL, PMULL, plus portable constant-time fallbacks) and
+selects among them at runtime based on the host CPU. There is no per-host
+build step.
 
 ```sh
+git clone --recursive <repo-url>
 cmake -B build
 cmake --build build -j$(nproc)
 ctest --test-dir build/tests --output-on-failure
@@ -441,7 +447,7 @@ floor.
 A lean build deployed to a hardware-capable host emits a one-shot stderr
 notice naming the missing backend and the configure flag that re-enables
 it (suppressible with `VOLEITH_QUIET=1` in the environment). The dispatch
-machinery, lean-build trade-offs, the `VOLEITH_FORCE_BACKEND` testing
+machinery, lean-build trade-offs, the `ICHOR_FORCE_BACKEND` testing
 override, and the constant-time guarantees across every compiled-in
 backend are documented in
 [`docs/DESIGN.md` → Runtime Hardware Dispatch](docs/DESIGN.md#runtime-hardware-dispatch-single-binary-fat-builds).
@@ -468,7 +474,7 @@ Notes:
 - The build aborts on the first UBSan finding (`-fno-sanitize-recover=all`), so
   a violation fails the offending `ctest` case instead of printing a warning the
   run otherwise ignores.
-- Each test is registered twice (hardware dispatch and a `VOLEITH_FORCE_BACKEND`
+- Each test is registered twice (hardware dispatch and an `ICHOR_FORCE_BACKEND`
   software-forced `_sw` variant), so a single `ctest` run sanitizes both the
   hardware AES-NI / CLMUL paths and the portable constant-time floor.
 - LeakSanitizer (bundled with ASan) is on by default. Some test harnesses leak

@@ -11,7 +11,7 @@
  * points at the inline function that emits its canonical body over
  * caller-supplied wires (the gate sequence of the hand-written
  * circuits/ builder; Goal 2(iii) / STDLIB D2 structural identity).
- * The parser lowers a `stdlib/crypto/*` call by handing the call
+ * The parser lowers a `stdlib/crypto/<...>` call by handing the call
  * arguments' wires to voleith_shipshape_registry_inline(); the
  * standalone-body builder (D3) adds the signature's input wires as
  * WITNESS wires in signature order and then emits the same body, so the
@@ -249,7 +249,7 @@ cost_grostl_512(uint32_t param, size_t *blocks, size_t *invs)
  *   16 is exactly one block (subkey K1, no padding) and 17 spills to two
  *   (subkey K2, padded), so {0, 16, 17, 40, 64} hits both subkey paths,
  *   both block boundaries, and every RFC vector.  (NIST CAVS 14.4
- *   lengths return with the kdf/* entries in crypto-v2; SHIPSHAPE §7.5.)
+ *   lengths return with the kdf/<...> entries in crypto-v2; SHIPSHAPE §7.5.)
  *
  *   Grøstl block count is ceil((n + 9) / block_size) for both variants
  *   (8-byte length field; circuits/grostl_gf8_circuit.c n_blocks_for).

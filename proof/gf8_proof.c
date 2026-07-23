@@ -28,6 +28,7 @@
 #include "../vole/voleith.h"
 #include "../vole/convert.h"
 #include "../vole/vc.h"
+#include "../core/backend_notice.h"
 #include "circuit.h" /* VOLEITH_STACK_BUF_MAX */
 
 #include "../core/util.h"
@@ -277,6 +278,9 @@ voleith_gf8_prove_commit(voleith_gf8_prover_commit_t **ctx_out,
     if (!ctx_out || !params || !circuit || !witness || !fs_seed ||
         !commitment_out)
         return -1;
+    /* One-shot lean-build fallback notice for the ichor-owned AES / Grøstl
+     * backends (field notice stays lazy in core/field.c). */
+    voleith_backend_notice();
     /* X-7: full parameter validation at the public API boundary. */
     if (voleith_params_validate(params) != 0)
         return -1;
@@ -699,6 +703,9 @@ voleith_gf8_verify_reconstruct(voleith_gf8_verifier_reconstruct_t **ctx_out,
     if (!ctx_out || !proof || !proof->data || !params || !circuit ||
         !commitment_out)
         return -1;
+
+    /* One-shot lean-build fallback notice (see voleith_gf8_prove_commit). */
+    voleith_backend_notice();
 
     if (voleith_proof_header_parse(&h, proof->data, proof->len) != 0)
         return -1;

@@ -35,6 +35,8 @@
 #define VOLEITH_EC_ERR_NOMEM (-4)      /* Allocation failed. */
 #define VOLEITH_EC_ERR_FIELD (-5)  /* Unknown / unsupported field selector. */
 #define VOLEITH_EC_ERR_VERIFY (-6) /* A binding / verification check failed. */
+#define VOLEITH_EC_ERR_INTERNAL                                                \
+    (-7) /* Internal invariant violated (should be unreachable). */
 
 /* ========================================================================
  * Field selector

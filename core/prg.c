@@ -20,6 +20,7 @@
 
 #include "prg.h"
 #include "util.h"
+#include "ichor_compat.h" /* compile-time guard on the vendored ichor version */
 #include <string.h>
 
 int

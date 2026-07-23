@@ -30,7 +30,7 @@
  * path; no cross-version substitution.  The hash is the single frozen body
  * hash from the registry table.
  *
- * PARAMETRIC entries (cmac/*, grostl/*) dispatch by STRUCTURAL name keying
+ * PARAMETRIC entries (cmac/<...>, grostl/<...>) dispatch by STRUCTURAL name keying
  * (W8.3c): one backend serves every message length, so a per-length body
  * hash cannot pin it.  Authentication is implicit in the binary: the backend
  * table and the frozen registry are compiled together, so a name match
@@ -104,7 +104,7 @@ int voleith_shipshape_witgen_register(
  * Register a Tier 2a witness backend for the PARAMETRIC entry named `fqn`
  * (W8.3c).
  *
- * PARAMETRIC entries (cmac/*, grostl/*) take a variable message length, so
+ * PARAMETRIC entries (cmac/<...>, grostl/<...>) take a variable message length, so
  * each length yields a distinct body hash and no single exact hash can pin
  * the backend.  Dispatch is therefore by name only, authenticated implicitly
  * by the compiled-in frozen registry (the backend and the registry table

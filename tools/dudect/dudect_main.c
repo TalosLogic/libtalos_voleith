@@ -25,18 +25,12 @@
  */
 extern const dudect_target_t target_sentinel_leak;
 extern const dudect_target_t target_sentinel_clean;
-extern const dudect_target_t target_aes_ct64_encrypt_key;
-extern const dudect_target_t target_aes_ct64_encrypt_x4_key;
-extern const dudect_target_t target_aes_ct64_encrypt_pt;
-extern const dudect_target_t target_aes_ct64_encrypt_x4_pt;
 extern const dudect_target_t target_voleith_gf128_mul;
 extern const dudect_target_t target_voleith_gf192_mul;
 extern const dudect_target_t target_voleith_gf256_mul;
 extern const dudect_target_t target_voleith_byte_combine_128;
 extern const dudect_target_t target_voleith_byte_combine_192;
 extern const dudect_target_t target_voleith_byte_combine_256;
-extern const dudect_target_t target_voleith_grostl256_msg;
-extern const dudect_target_t target_voleith_grostl512_msg;
 extern const dudect_target_t target_voleith_grostl256_gf8_build_witness_msg;
 extern const dudect_target_t target_voleith_ec_matrix_invert_ct;
 extern const dudect_target_t target_voleith_confrlnc_permute;
@@ -51,18 +45,12 @@ extern const dudect_target_t target_voleith_rs_epoch_derive_sk;
 static const dudect_target_t *const target_registry[] = {
     &target_sentinel_leak,
     &target_sentinel_clean,
-    &target_aes_ct64_encrypt_key,
-    &target_aes_ct64_encrypt_x4_key,
-    &target_aes_ct64_encrypt_pt,
-    &target_aes_ct64_encrypt_x4_pt,
     &target_voleith_gf128_mul,
     &target_voleith_gf192_mul,
     &target_voleith_gf256_mul,
     &target_voleith_byte_combine_128,
     &target_voleith_byte_combine_192,
     &target_voleith_byte_combine_256,
-    &target_voleith_grostl256_msg,
-    &target_voleith_grostl512_msg,
     &target_voleith_grostl256_gf8_build_witness_msg,
     &target_voleith_ec_matrix_invert_ct,
     &target_voleith_confrlnc_permute,

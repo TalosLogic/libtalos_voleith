@@ -1146,7 +1146,7 @@ eval_full_proof_gf8_secret_dir(const uint8_t *leaf_data, size_t leaf_bytes,
 }
 
 /* ================================================================
- * Tests 22–23: secret-dir witness counts
+ * Tests 22-23: secret-dir witness counts
  *
  * Each depth-1 circuit has one extra witness slot (the dir wire)
  * compared to the public-dir variant.
@@ -1199,7 +1199,7 @@ test_secret_dir_witness_counts(void)
 }
 
 /* ================================================================
- * Tests 24–25: secret-dir depth-3 end-to-end correctness
+ * Tests 24-25: secret-dir depth-3 end-to-end correctness
  * ================================================================ */
 
 static void

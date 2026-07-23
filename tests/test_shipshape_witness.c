@@ -8,7 +8,7 @@
  * For each registry primitive, parse a `.ship` calling it with the same
  * witness / instance split the hand-written builder assumes, run the generic
  * evaluator over the external input, and assert the full witness array equals
- * the corresponding circuits/*_build_witness output byte for byte.  Plus the
+ * the corresponding circuits/<...>_build_witness output byte for byte.  Plus the
  * INV fill directly (a bare INV), a hand-written INV pattern (external, not
  * filled), an INSTANCE + MUL circuit, and the input-validation error paths.
  *

@@ -141,7 +141,7 @@ leaf_hash_dm(voleith_circuit_t *c, const wire_id *leaf_data,
                 padded[b * 8 + bit] =
                     leaf_data[full_blocks * 128 + b * 8 + bit];
 
-        /* 0x80: bit 7 (MSB) = 1, bits 0–6 = 0 of byte last_bytes. */
+        /* 0x80: bit 7 (MSB) = 1, bits 0-6 = 0 of byte last_bytes. */
         padded[last_bytes * 8 + 7] = voleith_circuit_add_const(c, 1);
         for (int bit = 0; bit < 7; bit++)
             padded[last_bytes * 8 + bit] = voleith_circuit_add_const(c, 0);

@@ -50,11 +50,22 @@ Layer 2: vole/ (vector commitment) GGM-tree vector commitment
 Layer 1: core/                     Symmetric-key primitives
   field                                 GF(2^k) arithmetic, k in {8,64,128,192,256}
   prg                                   AES-CTR PRG
-  hash                                  SHAKE-128 / SHAKE-256 / SHA3-256
-  aes                                   AES-128 / AES-256 standard encrypt
-  grostl                                Grøstl-256 / Grøstl-512 (software + HW)
-  util                                  Secure zero, constant-time compare
+  hash                                  SHAKE-128 / SHAKE-256 / SHA3-256  (libtalos_ichor)
+  aes                                   AES-128 / AES-256 standard encrypt  (libtalos_ichor)
+  grostl                                Grøstl-256 / Grøstl-512 (software + HW)  (libtalos_ichor)
+  util                                  Secure zero, constant-time compare  (libtalos_ichor)
 ```
+
+Since 1.10.1 the AES, SHAKE/SHA3, Grøstl, Hirose, CPU-dispatch, and secure-zero
+primitives are supplied by **libtalos_ichor**, a shared layer-0 core extracted
+from this codebase and vendored as a submodule under `third_party/`. ichor is
+first-party Talos code derived from voleith's own forked primitives, not a
+foreign third-party dependency: the two are a straight fork, so the `voleith_*`
+primitive names are thin aliases over the identical `ichor_*` entry points and
+no behavior changed at the swap. The `core/{aes,cpu,hash,hirose,util,grostl}.h`
+headers are alias shims; `field.{c,h}` / `field16.{c,h}` / `prg.{c,h}` stay
+voleith-side (field arithmetic and the AES-CTR PRG are voleith-specific). ichor
+carries its own KAT and dudect timing evidence for the primitives it owns.
 
 ### Why five layers, not one monolithic build
 
@@ -593,9 +604,9 @@ All field-multiplication paths in `core/field.c` are constant-time: the CLMUL (x
 
 The software barrier (`ct_barrier_u64`) is a GCC/Clang inline-asm construct, so the constant-time scalar field path is available only under GCC or Clang: `core/field_scalar.c` raises `#error` on any other compiler (e.g. MSVC) rather than silently emitting a variable-time multiply. The library's constant-time guarantees therefore apply to GCC/Clang targets only; supporting another toolchain requires providing an equivalent optimiser barrier first.
 
-AES follows the same design. A constant-time bitsliced backend (`core/aes_ct64.c`) is always built as the universal fallback; AES-NI (x86_64) and ARMv8 Crypto Extension (aarch64) hardware paths are constant-time by ISA definition. No variable-time table-lookup AES path ships; the previous opt-in `-DVOLEITH_ALLOW_VARIABLE_TIME_AES` gate was removed in 1.2.0.
+AES follows the same design. A constant-time bitsliced backend (ichor's `src/aes_ct64.c`) is always built as the universal fallback; AES-NI (x86_64) and ARMv8 Crypto Extension (aarch64) hardware paths are constant-time by ISA definition. No variable-time table-lookup AES path ships; the previous opt-in `-DVOLEITH_ALLOW_VARIABLE_TIME_AES` gate was removed in 1.2.0.
 
-The constant-time discipline is verified two ways. Structurally, by source review (no secret-dependent branches, no secret-indexed memory access, all conditional XORs routed through bitmask AND with the `ct_barrier_u64` optimiser barrier). Empirically, by a dudect-style timing harness (`tools/dudect/`) that runs Welch's t-test on the bitsliced AES, the software field-multiplication paths, `voleith_byte_combine`, the software Grøstl path, and the GF(2^8) Grøstl witness builder (whose `voleith_gf8_inv` is a fixed Fermat addition chain, hence data-independent; the prior brute-force inverse scan was not) under fix-vs-fix input distributions on real hardware. Release-gate evidence files live under `docs/dudect-runs/`, currently covering x86_64 (Sandy Bridge and Gracemont) and aarch64 (Apple M1).
+The constant-time discipline is verified two ways. Structurally, by source review (no secret-dependent branches, no secret-indexed memory access, all conditional XORs routed through bitmask AND with the `ct_barrier_u64` optimiser barrier). Empirically, by a dudect-style timing harness (`tools/dudect/`) that runs Welch's t-test on the software field-multiplication paths, `voleith_byte_combine`, the GF(2^8) Grøstl witness builder (whose `voleith_gf8_inv` is a fixed Fermat addition chain, hence data-independent; the prior brute-force inverse scan was not), and the erasure / RS secret-input paths, under fix-vs-fix input distributions on real hardware. Since 1.10.1 the primitive AES and Grøstl timing targets moved to libtalos_ichor with the primitives themselves; ichor carries their evidence in its own dudect trail. Release-gate evidence files for the voleith-side targets live under `docs/dudect-runs/`, currently covering x86_64 (Sandy Bridge and Gracemont) and aarch64 (Apple M1).
 
 ### Parameter validation at the API boundary
 
@@ -642,8 +653,8 @@ All contexts holding key material, VOLE correlations, witness data, or transient
 
 | Location | Why |
 |----------|-----|
-| Expanded AES round keys (`core/aes.c`) | Key material is sensitive even after use; cold-boot and DMA attacks can extract it from process memory. |
-| Keccak sponge state (`core/hash.c`) | Sponge state contains absorbed input including possibly secret material. |
+| Expanded AES round keys (ichor's `src/aes.c`) | Key material is sensitive even after use; cold-boot and DMA attacks can extract it from process memory. |
+| Keccak sponge state (ichor's `src/hash.c`) | Sponge state contains absorbed input including possibly secret material. |
 | PRG contexts (`core/prg.c`) | Hold expanded AES keys derived from the FAEST seed. |
 | Fiat-Shamir transcript state (`proof/fiat_shamir.c`) | Contains absorbed witness-derived material. |
 | VOLE commitment buffers (`vole/voleith.c`, `vole/convert.c`) | Hold u, v, V_rows correlations linear in the witness. |
@@ -658,7 +669,7 @@ All secret-dependent equality checks use `voleith_const_memcmp()` (volatile XOR 
 
 The AES S-box circuit uses a purely algebraic tower-field decomposition; no lookup tables are accessed inside the proof circuit. This is required for soundness in the proof model (table lookups are not expressible in the QuickSilver gate language) and for constant-time guarantees outside it.
 
-The standard-eval AES used by the PRG and by test code is either the hardware AES-NI / ARMv8 backend or the constant-time bitsliced backend (`core/aes_ct64.c`). Neither is accessible to the proof circuit's prover or verifier.
+The standard-eval AES used by the PRG and by test code is either the hardware AES-NI / ARMv8 backend or the constant-time bitsliced backend (ichor's `src/aes_ct64.c`). Neither is accessible to the proof circuit's prover or verifier.
 
 ### Soundness-critical paths: implemented exactly per spec
 
@@ -682,6 +693,8 @@ The library's ring-signature capabilities (the RSv1 anonymous-membership baselin
 
 One library binary serves every supported host. At first use, each of three independent dispatch domains (AES, GF(2^k) field multiplication, Grøstl compression) probes the running CPU and routes subsequent calls through a function-pointer table to the highest-priority backend whose required instruction-set features are present. There is no per-host build, no per-CPU library variant, and no caller-visible API change between hardware and software paths.
 
+Since 1.10.1 the AES and Grøstl dispatch domains (and the shared CPU-feature probe) are owned by **libtalos_ichor**; the `voleith_aes_*` / `voleith_grostl*` forwarders below are alias shims over the identical `ichor_*` dispatchers, so the description holds unchanged from the consumer's view. The GF(2^k) **field** dispatch domain stays voleith-side (`core/field.c`, `field_dispatch.h`), since field arithmetic is voleith-specific.
+
 Earlier releases produced separate static libraries per ISA variant (`libvoleith_sw.a`, `libvoleith_aesni.a`, `libvoleith_clmul.a`, `libvoleith_aesni_clmul.a` on x86_64, plus parallel ARMv8 variants); consumers had to match the binary to the deployment target. 1.4.1 collapses that matrix into one `libtalos_voleith.a` / `.so` artefact that compiles every available backend and selects among them at runtime.
 
 ### Three independent dispatch domains
@@ -698,26 +711,25 @@ Each public forwarder is a one-line indirect call: load the atomic ops-table poi
 
 ### CPU feature probe
 
-`core/cpu.h` exposes `voleith_cpu_features()`, which returns a stable `unsigned` bitmask of feature flags (`VOLEITH_CPU_AES_NI`, `VOLEITH_CPU_CLMUL`, `VOLEITH_CPU_SSE41`, `VOLEITH_CPU_SSSE3`, `VOLEITH_CPU_ARMV8_AES`, `VOLEITH_CPU_PMULL`). The probe is implemented per-architecture in `core/cpu_x86.c` (CPUID-based), `core/cpu_aarch64.c` (`getauxval(AT_HWCAP)`-based), or `core/cpu_generic.c` (returns zero on unknown architectures). Exactly one of those translation units is compiled for any given target.
+Since 1.10.1 `core/cpu.h` is an alias shim over `<ichor/cpu.h>`: `voleith_cpu_features()` forwards to `ichor_cpu_features()` and the `VOLEITH_CPU_*` flag macros alias `ICHOR_CPU_*` 1:1. The probe returns a stable `unsigned` bitmask of feature flags (`VOLEITH_CPU_AES_NI`, `VOLEITH_CPU_CLMUL`, `VOLEITH_CPU_SSE41`, `VOLEITH_CPU_SSSE3`, `VOLEITH_CPU_ARMV8_AES`, `VOLEITH_CPU_PMULL`) and is implemented per-architecture in ichor's `src/cpu_x86.c` (CPUID-based), `src/cpu_aarch64.c` (`getauxval(AT_HWCAP)`-based), or `src/cpu_generic.c` (returns zero on unknown architectures). Exactly one of those translation units is compiled for any given target.
 
 The bitmask is computed on the first call via a compare-and-swap guard, cached in an atomic, and returned by all subsequent calls with a single acquire load. Bit assignments are stable across library versions (bits 0-15 for x86_64 features, 16-31 for aarch64 features), so consumers may persist or compare masks across builds.
 
 ### Dispatch tables and atomic init
 
-Each domain follows the same shape (illustrated for AES):
+Each domain follows the same shape. Since 1.10.1 the GF(2^k) field-multiply domain is the one that stays voleith-side, so it illustrates the pattern:
 
 ```
-core/aes.c              Public forwarders + voleith_aes_dispatch_init().
-                        Holds _Atomic(const voleith_aes_ops_t *) voleith_aes_ops.
-core/aes_dispatch.h     Internal ops-table type, extern declarations for each
-                        backend's ops, declaration of voleith_aes_ops.
-core/aes_aesni.c        x86_64 AES-NI backend (compiled iff VOLEITH_HAVE_AES_NI).
-core/aes_armv8.c        ARMv8 Crypto backend (compiled iff VOLEITH_HAVE_ARMV8_AES).
-core/aes_ct64.c         Portable bitsliced ct64 engine (always compiled).
-core/aes_ct64_ops.c     Bitsliced ops-table adapter (always compiled).
+core/field.c            Public forwarders + voleith_field_dispatch_init().
+                        Holds _Atomic(const voleith_field_ops_t *) voleith_field_ops.
+core/field_dispatch.h   Internal ops-table type, extern declarations for each
+                        backend's ops, declaration of voleith_field_ops.
+core/field_clmul.c      x86_64 CLMUL backend (compiled iff VOLEITH_HAVE_CLMUL).
+core/field_pmull.c      aarch64 PMULL backend (compiled iff VOLEITH_HAVE_PMULL).
+core/field_scalar.c     Portable constant-time scalar backend (always compiled).
 ```
 
-`voleith_aes_dispatch_init()` reads the feature bitmask, walks the compiled-in backends in priority order, picks the first one whose feature bits are present, and publishes the chosen ops table with a release store + CAS so concurrent first-callers converge on the same selection. Field-multiply and Grøstl follow the identical pattern (`field_dispatch.h` / `grostl_dispatch.h`).
+`voleith_field_dispatch_init()` reads the feature bitmask, walks the compiled-in backends in priority order, picks the first one whose feature bits are present, and publishes the chosen ops table with a release store + CAS so concurrent first-callers converge on the same selection. The AES and Grøstl domains follow the identical pattern inside libtalos_ichor (`src/aes.c` + `src/aes_dispatch.h` over the `aes_aesni` / `aes_armv8` / `aes_ct64` backends; `src/grostl.c` + `src/grostl_dispatch.h`); voleith's `voleith_aes_*` / `voleith_grostl*` forwarders are alias shims over ichor's dispatchers.
 
 ### Compile-time gating and per-TU instruction flags
 
@@ -725,13 +737,15 @@ Backend translation units that need ISA-specific intrinsics (`-maes -mssse3` for
 
 CMake probes the toolchain for each instruction set at configure time. If a probe succeeds, the corresponding `VOLEITH_HAVE_*` macro is defined as a public compile definition on the library target; the backend TU's contents are then enabled by an `#ifdef` at the file top. If the probe fails (older toolchain, missing intrinsics header), the TU compiles to an empty object and the dispatcher falls through to the next backend in priority order.
 
+Since 1.10.1 this gating is split by owner. The AES-NI / ARMv8 (and Grøstl) backends are gated inside libtalos_ichor by `ICHOR_HAVE_AES_NI` / `ICHOR_HAVE_ARMV8_AES`, which voleith drives by forwarding its `VOLEITH_AES_NI` / `VOLEITH_ARMV8_AES` lean-build options to ichor's sub-build (`ICHOR_AES_NI` / `ICHOR_ARMV8_AES`). The CLMUL / PMULL field backends stay voleith-side under `VOLEITH_HAVE_CLMUL` / `VOLEITH_HAVE_PMULL`. The mechanism is identical on both sides.
+
 ### Lean-build opt-outs
 
 Operators who want to strip the library to the smallest possible footprint, or who target a deployment that will never see hardware acceleration, can disable any backend at configure time:
 
 ```
--DVOLEITH_AES_NI=OFF       # omit core/aes_aesni.c
--DVOLEITH_ARMV8_AES=OFF    # omit core/aes_armv8.c
+-DVOLEITH_AES_NI=OFF       # omit ichor's src/aes_aesni.c (forwarded to ICHOR_AES_NI)
+-DVOLEITH_ARMV8_AES=OFF    # omit ichor's src/aes_armv8.c (forwarded to ICHOR_ARMV8_AES)
 -DVOLEITH_CLMUL=OFF        # omit core/field_clmul.c
 -DVOLEITH_PMULL=OFF        # omit core/field_pmull.c
 ```
@@ -740,31 +754,32 @@ The portable bitsliced AES backend (`aes_ct64`) and the constant-time scalar fie
 
 ### Lean-build mismatch notice
 
-When `voleith_aes_dispatch_init()` selects the bitsliced fallback because a hardware backend was *opted out at compile time* on a CPU that *does* support the corresponding ISA, it emits a one-line notice to stderr the first time it runs:
+When the field dispatch init selects the scalar fallback because a hardware backend was *opted out at compile time* on a CPU that *does* support the corresponding ISA, it emits a one-line notice to stderr the first time it runs:
 
 ```
-voleith: notice: host CPU has AES-NI but the aes-ni backend was not compiled
-in; running on bitsliced fallback (~30-50x slower). Rebuild with
--DVOLEITH_AES_NI=ON. Suppress with VOLEITH_QUIET=1.
+voleith: notice: host CPU has CLMUL but the clmul backend was not compiled
+in; running on scalar fallback. Rebuild with -DVOLEITH_CLMUL=ON.
+Suppress with VOLEITH_QUIET=1.
 ```
 
-Analogous notices exist for ARMv8 AES, CLMUL, and PMULL. The notice is fired through an `atomic_flag_test_and_set` once-guard so it appears at most once per process per domain. It is intended as a misconfiguration backstop: a lean-build artefact accidentally shipped to hardware-capable production should be loud enough about the performance loss that operators notice before users do. Setting `VOLEITH_QUIET=1` in the environment suppresses every variant of the notice (useful in test harnesses that deliberately exercise the fallback).
+An analogous notice exists for PMULL. The notice is fired through a once-guard so it appears at most once per process per domain. It is intended as a misconfiguration backstop: a lean-build artefact accidentally shipped to hardware-capable production should be loud enough about the performance loss that operators notice before users do. Setting `VOLEITH_QUIET=1` in the environment suppresses every variant of the notice (useful in test harnesses that deliberately exercise the fallback).
+
+This lazy field notice (`core/field.c`) covers the one dispatch domain that stays voleith-side. Since 1.10.1 the AES and Grøstl backends moved to libtalos_ichor, which does no I/O and reads no environment variable: it exposes backend health only through its query API (`<ichor/backend.h>`: `ichor_backend_report`, `ichor_aes_backend_health`, `ichor_grostl_backend_health`, returning `ICHOR_BACKEND_FALLBACK` when the host has an accelerated backend that was not compiled in). voleith preserves its pre-1.10.1 operator-facing behavior by turning that verdict back into the same one-shot stderr notice: the internal `voleith_backend_notice()` (`core/backend_notice.c`) queries ichor's AES and Grøstl health once per process and prints the matching notice, choosing the ISA / rebuild-flag wording from the host feature bits (ichor's Grøstl hardware backend rides the same `VOLEITH_AES_NI` / `VOLEITH_ARMV8_AES` build options as AES). It is fired from the public proof entry points (`voleith_{,gf8_}prove_commit` / `voleith_{,gf8_}verify_reconstruct`), honours `VOLEITH_QUIET`, and is not part of the public API. The notice behavior is therefore unchanged for consumers across the migration, keeping 1.10.1 a pure patch; a future release may instead route all three domains through ichor's query API for one report, but that would drop the stderr / `VOLEITH_QUIET` contract and so is a later, minor-versioned change.
 
 A run on a host that genuinely lacks the hardware (e.g., a generic x86_64 VM without AES-NI) produces no notice: the bitsliced backend is the correct, only available choice in that case.
 
 ### Backend override for testing
 
-`VOLEITH_FORCE_BACKEND` is a comma-separated `domain:value` list parsed once during the first call to `voleith_cpu_features()`. Recognised values:
+Since 1.10.1 backend forcing is owned by libtalos_ichor: `ICHOR_FORCE_BACKEND` is a comma-separated `domain:value` list parsed once during the first call to `ichor_cpu_features()`, the same probe that backs `voleith_cpu_features()`. It has two domains, `aes` and `clmul`; the voleith-side field and Grøstl domains have no token of their own and instead follow the masked feature bits. Recognised values:
 
 ```
 aes:aesni      aes:armv8      aes:bitsliced
-field:clmul    field:pmull    field:scalar
-grostl:aesni   grostl:armv8   grostl:soft
+clmul:pclmul   clmul:pmull    clmul:scalar
 ```
 
-The parser strips the corresponding feature bits from the cached bitmask so subsequent dispatch-init calls route to the requested backend. Forcing a backend that the host does not support (e.g., `aes:aesni` on aarch64) prints a diagnostic and `abort()`s; forcing a backend that the build did not compile in falls through to the next-priority backend with no error. Forcing the scalar/bitsliced/software path on a hardware-capable host is the supported A/B-benchmarking mode.
+The parser strips the corresponding feature bits from the cached CPU-feature mask so subsequent dispatch-init calls route to a lower-priority backend. `aes:bitsliced` clears the AES-NI / ARMv8 bits, forcing both the AES cipher and Grøstl (Grøstl rides the AES S-box backend) onto software; `clmul:scalar` clears the CLMUL / PMULL bits, forcing voleith's GF(2^k) field multiply onto its constant-time scalar backend. A malformed pair, an unknown domain/value, or a backend the host lacks is silently ignored (the mask is left as probed for that token); the parser does no I/O and never aborts. Forcing the scalar/bitsliced/software path on a hardware-capable host is the supported A/B-benchmarking mode.
 
-The override is not part of the supported public API; production deployments should not set it. Its sole purpose is the test profile described in the next subsection.
+The parser (and its `getenv`) compiles in only under `ICHOR_ENABLE_FORCE_BACKEND`, which voleith's build enables for test / backend-sweep / dudect builds and leaves off for a release build, so a shipped consumer cannot reach it. The override is not part of the supported public API; production deployments should not set it. Its sole purpose is the test profile described in the next subsection.
 
 ### Constant-time guarantee preserved across backends
 
@@ -780,9 +795,9 @@ The dispatch decision itself is made on the CPU feature bitmask, which is data-i
 
 ### Test methodology: every test runs in both profiles
 
-`ctest` registers every test twice. The default registration (`<NAME>`) runs the binary as the operator would, so the dispatcher selects whichever hardware backend the host actually has. A second registration (`<NAME>_sw`) runs the same binary with `VOLEITH_FORCE_BACKEND=aes:bitsliced,field:scalar,grostl:soft` in the environment, exercising the software floor on the same host. This means every CI run validates both paths on every supported architecture without separate build configurations.
+`ctest` registers every test twice. The default registration (`<NAME>`) runs the binary as the operator would, so the dispatcher selects whichever hardware backend the host actually has. A second registration (`<NAME>_sw`) runs the same binary with `ICHOR_FORCE_BACKEND=aes:bitsliced,clmul:scalar` in the environment, exercising the software floor on the same host. This means every CI run validates both paths on every supported architecture without separate build configurations.
 
-A dedicated test (`tests/test_lean_build_warning.c`) covers the mismatch-notice path: it captures stderr while triggering `voleith_aes_dispatch_init()` on a build that omitted the hardware backend, asserts the expected notice text appears, and confirms that `VOLEITH_QUIET=1` suppresses it. On a fat build the test exits immediately with PASS because the warning code path is not reached.
+A dedicated test (`tests/test_lean_build_warning.c`) covers the mismatch-notice path: it captures stderr while calling `voleith_backend_notice()` on a build that omitted the hardware AES backend, asserts the expected notice text appears, that it fires at most once, and that `VOLEITH_QUIET=1` suppresses it. It detects the active fallback at runtime via `ichor_aes_backend_health()` rather than a compiled-in macro; on a fat build (hardware backend active) the notice path is not reachable and the test exits immediately with PASS.
 
 ### Public introspection
 
@@ -801,7 +816,7 @@ The first call to any of these triggers `voleith_aes_dispatch_init()` (or the co
 
 ## Correctness Testing
 
-The library is tested against known-answer vectors from multiple independent sources. A single library binary contains every available backend; `ctest` runs every test in two profiles (hardware-dispatched and software-forced via `VOLEITH_FORCE_BACKEND`) so both the hardware path and the constant-time software floor are exercised against the same vectors on every run. The dispatch machinery itself is covered above in "Runtime Hardware Dispatch".
+The library is tested against known-answer vectors from multiple independent sources. A single library binary contains every available backend; `ctest` runs every test in two profiles (hardware-dispatched and software-forced via `ICHOR_FORCE_BACKEND`) so both the hardware path and the constant-time software floor are exercised against the same vectors on every run. The dispatch machinery itself is covered above in "Runtime Hardware Dispatch".
 
 ### Primitives (Layer 1)
 

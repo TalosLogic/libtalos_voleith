@@ -40,17 +40,17 @@
  *
  * W3.6: subcircuits, inlining, regions (FORMAT 3.4, 3.6, 7.2 S1-S4, S6-S8,
  * S10; ISA 1.4, 2.8, 5.2 Steps 1 and 7).  `subcircuit user/...` definitions
- * are parsed (top-level only, user/* only) and their bodies captured as byte
+ * are parsed (top-level only, user/<...> only) and their bodies captured as byte
  * ranges; a `path(...)` call inlines the body at the call site over a fresh
  * body scope, binding parameters to the caller's argument wires (`++` and
  * `[i]` arguments flatten to wire lists), then binds the call's outputs in
  * the caller's scope.  MAX_INLINE_DEPTH and the incremental MAX_WIRES budget
  * bound recursion and amplification; one region marker is emitted per
  * inlined call (semantically transparent, ISA 5.2 Step 7).
- * `stdlib/structural/*` and other namespaces are errors (empty v1 set, S4).
+ * `stdlib/structural/<...>` and other namespaces are errors (empty v1 set, S4).
  *
  * W3.7: Tier 2a registry (ISA 1.5 Goal 2, 2.8, 3; STDLIB D1-D4; SPEC 6.3,
- * 7).  A `stdlib/crypto/*` call is looked up by FQN in the frozen crypto-v1
+ * 7).  A `stdlib/crypto/<...>` call is looked up by FQN in the frozen crypto-v1
  * table (parsers/shipshape_registry_table.c); an absent name is
  * VOLEITH_SHIPSHAPE_ERR_REGISTRY (Goal 2 rule ii; rule i, no stdlib
  * definitions, is enforced in parse_subckt_def, and the declared-version
@@ -109,7 +109,7 @@ typedef struct {
 } ss_param_t;
 
 /*
- * One top-level `user/*` subcircuit definition.  The body is captured as a
+ * One top-level `user/<...>` subcircuit definition.  The body is captured as a
  * byte range [body_start, body_end) of the input buffer and re-lexed at each
  * call site for inlining (ISA 5.2 Step 1).  `n_outputs == 0` means the
  * definition omits its `-> ( ... )` clause (assertion-only body).
@@ -1873,7 +1873,7 @@ fail:
  * Parse a `subcircuit user/... (params) [-> (outs)] {` definition line and
  * capture its body range, then store it in ctx->defs.  The `subcircuit`
  * keyword has been consumed.  Definitions are top-level only (S: no nesting),
- * `user/*` only (S4).  Returns 0 or a negative voleith_shipshape_error_t.
+ * `user/<...>` only (S4).  Returns 0 or a negative voleith_shipshape_error_t.
  */
 static int
 parse_subckt_def(ss_parse_ctx_t *ctx, ss_lexer_t *lx)
@@ -1894,7 +1894,7 @@ parse_subckt_def(ss_parse_ctx_t *ctx, ss_lexer_t *lx)
     if (gp_eat(&gp, SS_TOK_PATH, &path) != 0)
         return gp.err;
     if (!starts_with(&path, "user/"))
-        return VOLEITH_SHIPSHAPE_ERR_SUBCIRCUIT; /* defs are user/* (S4) */
+        return VOLEITH_SHIPSHAPE_ERR_SUBCIRCUIT; /* defs are user/<...> (S4) */
     if (find_def(ctx, path.lex, path.len) != NULL)
         return VOLEITH_SHIPSHAPE_ERR_REDEF; /* duplicate definition (S1) */
 
@@ -2133,7 +2133,7 @@ inline_call(ss_parse_ctx_t *ctx, const ss_subckt_t *def, ss_wlist_t *args,
 
     /*
      * Reserve a region marker (patched with the witness span at the end).
-     * user/* regions never dispatch to a Tier 2a backend, so inputs are
+     * user/<...> regions never dispatch to a Tier 2a backend, so inputs are
      * intentionally not recorded (they remain NULL/0 from region_reserve).
      */
     if ((r = region_reserve(ctx, def->name, &region_idx, &first_witness)) != 0)
@@ -2303,7 +2303,7 @@ restore:
  * ================================================================ */
 
 /*
- * Find a `stdlib/crypto/*` name (slice [name, name+len)) in the frozen
+ * Find a `stdlib/crypto/<...>` name (slice [name, name+len)) in the frozen
  * crypto-v1 table.  Returns the entry index, or -1 if the name is not
  * registered (Goal 2 rule ii: no fallback of any kind).
  */
@@ -2320,7 +2320,7 @@ registry_lookup(const char *name, size_t len)
 }
 
 /*
- * Find a `stdlib/crypto/*` name in the frozen crypto-v2 hash-parametric
+ * Find a `stdlib/crypto/<...>` name in the frozen crypto-v2 hash-parametric
  * table.  Returns the entry index, or -1 if the name is not registered.
  */
 static int
@@ -2771,9 +2771,9 @@ done:
 
 /*
  * Parse and inline a subcircuit call `path ( args ) [-> outs]`; `path` (the
- * head PATH token) has been consumed.  Routes by namespace: `user/*` inlines
- * the in-file definition; `stdlib/crypto/*` inlines the frozen-registry
- * entry's canonical body (W3.7); `stdlib/structural/*` and any other
+ * head PATH token) has been consumed.  Routes by namespace: `user/<...>` inlines
+ * the in-file definition; `stdlib/crypto/<...>` inlines the frozen-registry
+ * entry's canonical body (W3.7); `stdlib/structural/<...>` and any other
  * namespace are errors (S4).  Returns 0 or a negative
  * voleith_shipshape_error_t.
  */
@@ -2954,8 +2954,8 @@ done:
 /*
  * Dispatch one body statement whose head token is `head`.  Declarations, the
  * W3.5 gate / assertion opcodes, `subcircuit` definitions (head WORD), and
- * `path(...)` calls (head PATH, both `user/*` and the Tier 2a
- * `stdlib/crypto/*` registry) are parsed.
+ * `path(...)` calls (head PATH, both `user/<...>` and the Tier 2a
+ * `stdlib/crypto/<...>` registry) are parsed.
  *
  * Returns 0 or a negative voleith_shipshape_error_t.
  */

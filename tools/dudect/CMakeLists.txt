@@ -22,6 +22,15 @@ add_library(voleith_core_dudect STATIC ${_DUDECT_CORE_SOURCES})
 target_include_directories(voleith_core_dudect
     PUBLIC ${VOLEITH_CORE_INCLUDES}
 )
+# This dudect copy recompiles the core sources, whose headers are now shims
+# over <ichor/*.h>; link ichor's software-only companion (ichor_soft) PUBLIC so
+# ichor's include directory reaches both this lib's own compile and the dudect
+# harness executable (its targets_*.c include core/*.h too), and so the AES /
+# Grostl / SHAKE primitives measured here are the constant-time software paths
+# regardless of this configure's hardware backend selection.  ichor_soft is
+# built because voleith set ICHOR_BUILD_SOFT_LIB when VOLEITH_BUILD_DUDECT is on.
+# This lib is never installed, so PUBLIC leaks nothing.
+target_link_libraries(voleith_core_dudect PUBLIC ichor_soft)
 unset(_DUDECT_CORE_SOURCES)
 
 # Harness executable.
@@ -31,7 +40,6 @@ set(DUDECT_SOURCES
     dudect_platform.c
     dudect_main.c
     targets_sentinel.c
-    targets_aes.c
     targets_field.c
     targets_byte_combine.c
     targets_grostl.c

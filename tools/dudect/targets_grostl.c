@@ -1,17 +1,9 @@
 /* Copyright (c) 2026 Jason Crawford
  * SPDX-License-Identifier: AGPL-3.0-only
  *
- * Grøstl-256 and Grøstl-512 timing targets.  Two families:
+ * Grøstl witness-builder timing target.
  *
- * 1. Software-hash targets (_msg):
- *    Exercise the software Grøstl path in core/grostl.c, including
- *    its use of the bitsliced AES S-box via
- *    aes_ct64_sbox_inplace_4blocks().  Cover the Grøstl-specific
- *    state-management, GF(2^8) MixBytes arithmetic, padding, and
- *    per-round AddRoundConstant / ShiftBytes operations that the AES
- *    targets do not.
- *
- * 2. Witness-builder target (grostl256_gf8_build_witness_msg):
+ * Witness-builder target (grostl256_gf8_build_witness_msg):
  *    Exercises the witness construction path in
  *    circuits/grostl_gf8_circuit.c, including the constant-time
  *    Fermat-based GF(2^8) inverse (voleith_gf8_inv) used to compute
@@ -20,77 +12,22 @@
  *    is load-bearing because timing leaks would compromise the ZK
  *    secrecy the proof is meant to protect.
  *
- * For each target, classes vary only the message content
- * (all-zero vs all-one); message length and call shape are public
- * across classes.
+ * The primitive Grøstl-256 / Grøstl-512 software-hash timing targets
+ * moved to ichor along with the Grøstl primitive itself; ichor owns
+ * that evidence trail now.  This voleith-side target validates only
+ * the in-circuit witness builder, which stays voleith-side.
+ *
+ * Classes vary only the message content (all-zero vs all-one);
+ * message length and call shape are public across classes.
  */
 #include "dudect_target.h"
 
-#include "grostl.h"
 #include "grostl_gf8_circuit.h"
 
 #include <stdint.h>
 #include <string.h>
 
-/* 128-byte messages: for Grøstl-256 this is 2 message blocks plus a
- * dedicated padding block (3 compressions per hash); for Grøstl-512
- * this is 1 message block plus a dedicated padding block (2
- * compressions per hash).  Both cases exercise multi-block absorb
- * plus the finalize / padding path. */
-#define GROSTL_DUDECT_MSG_BYTES 128
-
-typedef struct {
-    uint8_t msg[GROSTL_DUDECT_MSG_BYTES];
-} grostl_state_t;
-
 static volatile uint8_t grostl_target_sink;
-
-/* ----- shared setup: message bytes vary across classes --------------- */
-
-static void
-grostl_msg_setup(int cls, void *state)
-{
-    grostl_state_t *s = (grostl_state_t *)state;
-    memset(s->msg, cls ? 0xFF : 0x00, sizeof(s->msg));
-}
-
-/* ----- Grøstl-256 ---------------------------------------------------- */
-
-static void
-grostl256_msg_run(const void *state)
-{
-    const grostl_state_t *s = (const grostl_state_t *)state;
-    uint8_t out[32];
-    voleith_grostl256(out, s->msg, sizeof(s->msg));
-    grostl_target_sink ^= out[0] ^ out[31];
-}
-
-const dudect_target_t target_voleith_grostl256_msg = {
-    .name = "voleith_grostl256_msg",
-    .setup_class = grostl_msg_setup,
-    .run = grostl256_msg_run,
-    .state_size = sizeof(grostl_state_t),
-    .reps_per_trial = 50,
-};
-
-/* ----- Grøstl-512 ---------------------------------------------------- */
-
-static void
-grostl512_msg_run(const void *state)
-{
-    const grostl_state_t *s = (const grostl_state_t *)state;
-    uint8_t out[64];
-    voleith_grostl512(out, s->msg, sizeof(s->msg));
-    grostl_target_sink ^= out[0] ^ out[63];
-}
-
-const dudect_target_t target_voleith_grostl512_msg = {
-    .name = "voleith_grostl512_msg",
-    .setup_class = grostl_msg_setup,
-    .run = grostl512_msg_run,
-    .state_size = sizeof(grostl_state_t),
-    .reps_per_trial = 50,
-};
 
 /* ----- Grøstl-256 witness-builder target ------------------------------ */
 

@@ -84,3 +84,18 @@ Phase B status as of 2026-05-26  (Debian 13 / clang on N100)
   All AES and field-multiplication targets are clean (|t| <= 0.08).
   No new structural concerns surfaced relative to the gcc x86_64
   baseline.
+
+
+================================================================
+Migration note -- 2026-07-18 (v1.10.1, libtalos_ichor)
+================================================================
+
+  As of v1.10.1 the AES-CT64 (aes_ct64_*) and primitive Grostl
+  (grostl256_msg / grostl512_msg) timing targets moved to
+  libtalos_ichor together with the primitives themselves; their
+  constant-time evidence now lives in ichor's own dudect trail.  The
+  Run blocks above remain the accurate record of what voleith's
+  harness produced on their stated dates; future voleith runs no
+  longer emit those rows.  The Grostl in-circuit witness-builder
+  target (voleith_grostl256_gf8_build_witness_msg) and all field /
+  erasure / RS targets stay voleith-side and continue here.

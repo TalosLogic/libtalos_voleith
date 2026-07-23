@@ -5,7 +5,7 @@
  * test_shipshape_witgen_aes.c - equivalence tests for the W8.3b native AES
  * witness backends (parsers/shipshape_witgen_aes.c).
  *
- * For each of the seven FIXED aes/* registry entries this generates the full
+ * For each of the seven FIXED aes/<...> registry entries this generates the full
  * witness twice over the same external inputs:
  *
  *   baseline:   no backend registered (generic Tier 1 evaluator).

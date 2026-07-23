@@ -11,7 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-void
+int
 voleith_challenge_from_commitment(const uint8_t iv[16],
                                   const voleith_commitment_t *com,
                                   uint8_t *delta)
@@ -20,14 +20,20 @@ voleith_challenge_from_commitment(const uint8_t iv[16],
     const size_t ellhat_bytes = ((size_t)com->ellhat + 7) / 8;
     const size_t c_len = (size_t)(com->tau - 1) * ellhat_bytes;
 
+    int rc = 0;
     voleith_hash_ctx_t ctx;
     voleith_shake256_init(&ctx);
-    voleith_shake256_absorb(&ctx, iv, 16);
-    voleith_shake256_absorb(&ctx, com->hcom, 2 * lambda_bytes);
-    voleith_shake256_absorb(&ctx, com->u, ellhat_bytes);
-    voleith_shake256_absorb(&ctx, com->c, c_len);
+    rc |= voleith_shake256_absorb(&ctx, iv, 16);
+    rc |= voleith_shake256_absorb(&ctx, com->hcom, 2 * lambda_bytes);
+    rc |= voleith_shake256_absorb(&ctx, com->u, ellhat_bytes);
+    rc |= voleith_shake256_absorb(&ctx, com->c, c_len);
+    if (rc != 0) {
+        voleith_hash_ctx_clear(&ctx);
+        return -1;
+    }
     voleith_shake256_squeeze(&ctx, delta, lambda_bytes);
     voleith_hash_ctx_clear(&ctx);
+    return 0;
 }
 
 void
