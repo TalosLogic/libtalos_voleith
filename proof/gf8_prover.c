@@ -42,6 +42,7 @@
 #include "gf8_prover.h"
 #include "gf8_prover_internal.h"
 #include "gf8_circuit.h"
+#include "qs_degree.h"
 #include "../core/field.h"
 #include "../core/util.h"
 #include "circuit.h" /* for VOLEITH_STACK_BUF_MAX */
@@ -219,23 +220,27 @@ gf8p_apply_linear_map(uint8_t *out_tabs, const uint8_t *in_tabs,
 }
 
 /* =====================================================================
- * zk_hash_3 context (identical to prover.c - three accumulators)
+ * zk_hash context (identical structure to prover.c): d+1 accumulators, one
+ * per opened coefficient of a degree-d constraint (ctx->d; QS_DEGREE_D_DESIGN
+ * section 11).  "_3" is historical (the d=2 case has 3 streams).
  * ===================================================================== */
 
 typedef struct {
-    uint8_t h0[3][32];
-    uint8_t h1[3][32];
+    uint8_t h0[VOLEITH_QS_COEFFS_MAX][32];
+    uint8_t h1[VOLEITH_QS_COEFFS_MAX][32];
     uint8_t s[32];
     uint8_t t[32];
     unsigned int lambda;
+    unsigned int d; /* constraint degree; streams 0..d are live */
 } gf8p_zk_hash_3_ctx;
 
 static void
 gf8p_zk_hash_3_init(gf8p_zk_hash_3_ctx *ctx, const uint8_t *chall_2,
-                    unsigned int lambda)
+                    unsigned int lambda, unsigned int d)
 {
     unsigned int nb = lambda / 8;
     ctx->lambda = lambda;
+    ctx->d = d;
     memset(ctx->h0, 0, sizeof(ctx->h0));
     memset(ctx->h1, 0, sizeof(ctx->h1));
     memcpy(ctx->s, chall_2 + 2 * nb, nb);
@@ -244,40 +249,459 @@ gf8p_zk_hash_3_init(gf8p_zk_hash_3_ctx *ctx, const uint8_t *chall_2,
     memcpy(ctx->t, chall_2 + 3 * nb, t_bytes);
 }
 
+/*
+ * v[i] is the coefficient of delta^i (v[0] = degree-0); streams i in 0..d are
+ * all folded, with v_i = 0 for i >= nv so a lower-degree constraint zero-pads
+ * its high-power coefficients (Horner s/t powers must advance on every stream).
+ */
 static void
-gf8p_zk_hash_3_update(gf8p_zk_hash_3_ctx *ctx, const uint8_t *v0,
-                      const uint8_t *v1, const uint8_t *v2, uint8_t *tmp1,
-                      uint8_t *tmp2)
+gf8p_zk_hash_3_update(gf8p_zk_hash_3_ctx *ctx, const uint8_t *const *v,
+                      unsigned int nv, uint8_t *tmp1, uint8_t *tmp2)
 {
+    static const uint8_t zero[32] = {0};
     unsigned int nb = ctx->lambda / 8;
-    const uint8_t *vs[3] = {v0, v1, v2};
-    for (int i = 0; i < 3; i++) {
+    for (unsigned int i = 0; i <= ctx->d; i++) {
+        const uint8_t *vi = (i < nv) ? v[i] : zero;
         gf8p_gf_mul(tmp1, ctx->h0[i], ctx->s, ctx->lambda);
         for (unsigned int k = 0; k < nb; k++)
-            ctx->h0[i][k] = tmp1[k] ^ vs[i][k];
+            ctx->h0[i][k] = tmp1[k] ^ vi[k];
         gf8p_gf_mul(tmp2, ctx->h1[i], ctx->t, ctx->lambda);
         for (unsigned int k = 0; k < nb; k++)
-            ctx->h1[i][k] = tmp2[k] ^ vs[i][k];
+            ctx->h1[i][k] = tmp2[k] ^ vi[k];
     }
 }
 
 static void
-gf8p_zk_hash_3_finalize(uint8_t *a0_tilde, uint8_t *a1_tilde, uint8_t *a2_tilde,
-                        const gf8p_zk_hash_3_ctx *ctx, const uint8_t *x1_0,
-                        const uint8_t *x1_1, const uint8_t *x1_2,
-                        const uint8_t *chall_2, uint8_t *tmp1, uint8_t *tmp2)
+gf8p_zk_hash_3_finalize(uint8_t *const *a_tilde, const gf8p_zk_hash_3_ctx *ctx,
+                        const uint8_t *const *x1, const uint8_t *chall_2,
+                        uint8_t *tmp1, uint8_t *tmp2)
 {
     unsigned int nb = ctx->lambda / 8;
     const uint8_t *r0 = chall_2;
     const uint8_t *r1 = chall_2 + nb;
-    uint8_t *outputs[3] = {a0_tilde, a1_tilde, a2_tilde};
-    const uint8_t *x1s[3] = {x1_0, x1_1, x1_2};
-    for (int i = 0; i < 3; i++) {
+    for (unsigned int i = 0; i <= ctx->d; i++) {
         gf8p_gf_mul(tmp1, r0, ctx->h0[i], ctx->lambda);
         gf8p_gf_mul(tmp2, r1, ctx->h1[i], ctx->lambda);
         for (unsigned int k = 0; k < nb; k++)
-            outputs[i][k] = tmp1[k] ^ tmp2[k] ^ x1s[i][k];
+            a_tilde[i][k] = tmp1[k] ^ tmp2[k] ^ x1[i][k];
     }
+}
+
+/* =====================================================================
+ * Less-than (NLT) degree-(w+1) constraint coefficient production
+ *
+ * Asserts A < B (A,B MSB-first w-bit indices) by committing that the value of
+ * NLT = [A >= B] is zero.  Each wire is a line L(X) = tag + emb(val)*X; the
+ * public constant 1 is the line [0, one] (one = embed(1), value at top).
+ *
+ *   eq_j     = 1 ^ a_j ^ b_j                (line)
+ *   gt_i     = a_i * (1 ^ b_i)              (product of two lines: degree 2)
+ *   prefix_i = prod_{j<i} eq_j              (degree i)
+ *   NLT      = sum_i gt_i*prefix_i + prod_all eq_j
+ *
+ * Each term is top-aligned to X^(w+1) (FAEST Fig 6.1 Add: multiply by
+ * X^(w+1-deg)) so every term's value coefficient lands at X^(w+1) = NLT value.
+ * rho[0..w] are pushed (nv = w+1); rho[w+1] (the value) is OMITTED, so the a_0
+ * reconstruction forces it to 0 <=> A < B (FAEST Remark 6.2 assert-zero).
+ * ===================================================================== */
+
+/* out(deg da+db) = a(deg da) * b(deg db) over GF(2^lambda); out distinct. */
+static void
+gf8p_poly_mul(uint8_t out[][32], const uint8_t a[][32], unsigned int da,
+              const uint8_t b[][32], unsigned int db, unsigned int lambda,
+              unsigned int nb, uint8_t *tmp)
+{
+    for (unsigned int i = 0; i <= da + db; i++)
+        memset(out[i], 0, nb);
+    for (unsigned int i = 0; i <= da; i++)
+        for (unsigned int j = 0; j <= db; j++) {
+            gf8p_gf_mul(tmp, a[i], b[j], lambda);
+            for (unsigned int k = 0; k < nb; k++)
+                out[i + j][k] ^= tmp[k];
+        }
+}
+
+static int
+gf8p_accumulate_lt(gf8p_zk_hash_3_ctx *hasher, const gf8_lt_entry_t *lt,
+                   const gf8_wire_id *bits, const uint8_t *bit_tags,
+                   const uint8_t *wire_vals, unsigned int lambda,
+                   unsigned int nb, const uint8_t *alpha8, uint8_t *tmp1,
+                   uint8_t *tmp2)
+{
+    unsigned int w = lt->width;
+
+    /* INFO-3 defense in depth: the fixed [VOLEITH_QS_COEFFS_MAX] coefficient
+     * scratch below is indexed by the per-entry width w (up to w+1); bound w
+     * locally so a degree-array overrun is impossible even if the aggregate
+     * qs_degree guard in qs_prove_impl were ever bypassed.  Unreachable on
+     * shipped circuits (w = idx_bits <= 17).  Real check (survives -DNDEBUG),
+     * not an assert. */
+    if (w > VOLEITH_QS_D_MAX - 1u)
+        return -1;
+
+    uint8_t one[32];
+    gf8p_embed(one, 1, lambda); /* GF(2^lambda) one = embed(1) */
+
+    uint8_t rho[VOLEITH_QS_COEFFS_MAX][32];
+    uint8_t prefix[VOLEITH_QS_COEFFS_MAX][32];
+    uint8_t prefix_next[VOLEITH_QS_COEFFS_MAX][32];
+    uint8_t gt[3][32];
+    uint8_t term[VOLEITH_QS_COEFFS_MAX][32];
+    for (unsigned int k = 0; k <= w + 1; k++)
+        memset(rho[k], 0, nb);
+
+    /* prefix_0 = 1 (constant poly, degree 0). */
+    memset(prefix[0], 0, nb);
+    prefix[0][0] = one[0];
+    for (unsigned int k = 1; k < nb; k++)
+        prefix[0][k] = one[k];
+    unsigned int prefix_deg = 0;
+
+    for (unsigned int i = 0; i < w; i++) {
+        const uint8_t *bt_a = bit_tags + (size_t)bits[i] * 8 * nb;
+        const uint8_t *bt_b = bit_tags + (size_t)bits[w + i] * 8 * nb;
+        uint8_t ta[32], ea[32], tb[32], eb[32], nb_c1[32];
+        gf8p_byte_combine(ta, bt_a, nb, lambda, alpha8);
+        gf8p_byte_combine(tb, bt_b, nb, lambda, alpha8);
+        gf8p_embed(ea, wire_vals[bits[i]], lambda);
+        gf8p_embed(eb, wire_vals[bits[w + i]], lambda);
+        /* (1 ^ b_i) line = [tb, one ^ eb] */
+        for (unsigned int k = 0; k < nb; k++)
+            nb_c1[k] = one[k] ^ eb[k];
+
+        /* gt = a_i * (1 ^ b_i) : gt0=ta*tb, gt1=ta*nb_c1+ea*tb, gt2=ea*nb_c1 */
+        gf8p_gf_mul(gt[0], ta, tb, lambda);
+        gf8p_gf_mul(gt[1], ta, nb_c1, lambda);
+        gf8p_gf_mul(tmp1, ea, tb, lambda);
+        for (unsigned int k = 0; k < nb; k++)
+            gt[1][k] ^= tmp1[k];
+        gf8p_gf_mul(gt[2], ea, nb_c1, lambda);
+
+        /* term = gt(deg2) * prefix(deg prefix_deg) -> deg prefix_deg+2 = i+2 */
+        gf8p_poly_mul(term, gt, 2, prefix, prefix_deg, lambda, nb, tmp2);
+        unsigned int tdeg = prefix_deg + 2;  /* = i + 2 */
+        unsigned int shift = (w + 1) - tdeg; /* top-align to X^(w+1) */
+        for (unsigned int k = 0; k <= tdeg; k++)
+            for (unsigned int m = 0; m < nb; m++)
+                rho[shift + k][m] ^= term[k][m];
+
+        /* prefix *= eq_i, eq_i line = [ta^tb, one ^ ea ^ eb] */
+        uint8_t eq[2][32];
+        for (unsigned int k = 0; k < nb; k++) {
+            eq[0][k] = ta[k] ^ tb[k];
+            eq[1][k] = one[k] ^ ea[k] ^ eb[k];
+        }
+        gf8p_poly_mul(prefix_next, prefix, prefix_deg, eq, 1, lambda, nb, tmp1);
+        prefix_deg += 1;
+        for (unsigned int k = 0; k <= prefix_deg; k++)
+            memcpy(prefix[k], prefix_next[k], nb);
+    }
+
+    /* prod_all eq (prefix, degree w) = [A=B]; top-align by X^1. */
+    for (unsigned int k = 0; k <= w; k++)
+        for (unsigned int m = 0; m < nb; m++)
+            rho[1 + k][m] ^= prefix[k][m];
+
+    /* Push rho[0..w] (nv = w+1); rho[w+1] (NLT value) omitted -> asserted 0. */
+    const uint8_t *vv[VOLEITH_QS_COEFFS_MAX];
+    for (unsigned int k = 0; k <= w; k++)
+        vv[k] = rho[k];
+    gf8p_zk_hash_3_update(hasher, vv, w + 1, tmp1, tmp2);
+
+    voleith_secure_zero(rho, sizeof(rho));
+    voleith_secure_zero(prefix, sizeof(prefix));
+    voleith_secure_zero(prefix_next, sizeof(prefix_next));
+    voleith_secure_zero(term, sizeof(term));
+    voleith_secure_zero(gt, sizeof(gt));
+    return 0;
+}
+
+/* =====================================================================
+ * Lever 1 (QS_DEGREE_D_DESIGN section 8): demux-tree sharing.  For a fixed
+ * support element k the n column polys E_i share MSB-first bit-prefix factors,
+ * so a depth-w binary product tree computes all leaves in O(2^w * w) coeff-ops
+ * (a factor w cheaper than the per-column O(n * w^2) recompute).  DFS keeps only
+ * O(w) partial polys live.  facbuf holds the 2 factor lines per bit b as
+ * [b][line][coeff][32]; line 1 = {tag, val} (bit set), line 0 = {tag, comp}
+ * (bit clear).  At each leaf i < n the value R_i folds into G (prover: poly;
+ * value coeff w kept here, omitted at push time).  Same E_i as the reference, so
+ * validated by the retained _ref path, not by byte-equality.
+ * ===================================================================== */
+static void
+gf8p_demux_fold(unsigned int depth, unsigned int w, uint32_t prefix,
+                const uint8_t *facbuf, const uint8_t node[][32],
+                unsigned int nodedeg, const uint8_t *R, uint32_t n,
+                unsigned int lambda, unsigned int nb, uint8_t G[][32],
+                uint8_t *tmp)
+{
+    if (depth == w) {
+        if (prefix < n) {
+            const uint8_t *Ri = R + (size_t)prefix * nb;
+            for (unsigned int c = 0; c <= w; c++) {
+                gf8p_gf_mul(tmp, Ri, node[c], lambda);
+                for (unsigned int m = 0; m < nb; m++)
+                    G[c][m] ^= tmp[m];
+            }
+        }
+        return;
+    }
+    uint8_t child[VOLEITH_QS_COEFFS_MAX][32];
+    for (unsigned int bit = 0; bit < 2; bit++) {
+        const uint8_t(*line)[32] = (const uint8_t(*)[32])(
+            facbuf + ((size_t)(depth * 2u + bit)) * 2u * 32u);
+        gf8p_poly_mul(child, node, nodedeg, line, 1, lambda, nb, tmp);
+        gf8p_demux_fold(depth + 1u, w, (prefix << 1) | bit, facbuf, child,
+                        nodedeg + 1u, R, n, lambda, nb, G, tmp);
+    }
+}
+
+/* =====================================================================
+ * Syndrome constraint: assert s = M * e^T in the global-bit
+ * equality-polynomial form (QS_DEGREE_D_DESIGN sections 8-10), Horner/circulant
+ * COLLAPSED prover (section 8 lever 2).
+ *
+ * The reference form pushed one degree-w (w = idx_bits) constraint per syndrome
+ * bit j, rho_j = sum_{k, i : M[j,i]=1} E_i^{(k)}, and let the zk_hash Horner (key
+ * s = chall_2 h0 key) fold them as sum_j s^j rho_j.  Folding directly collapses
+ * the public matrix into a per-column weight and removes the per-column M-row
+ * scatter and the p-fold constraint count:
+ *
+ *     sum_j s^j rho_j = sum_i R_i * (sum_k E_i^{(k)}),   R_i = sum_{j:M[j,i]=1} s^j.
+ *
+ * For a non-identity block b, column (b,l): R_i = sum_{a:m_b[a]=1} s^{(l+a) mod p}
+ * (a cyclic sum of the power table pow_s[u]=s^u); identity last block: R_i = s^l
+ * (matching the circulant map of voleith_rs_opener_argus_syndrome).  One degree-w
+ * vector G is pushed (nv = w; value coeff w omitted).  Its value = sum_k R_{g_k}
+ * = sum_j s^j (sum_k M[j,g_k]); the public s_j (zero tag) folds into the same
+ * omitted value as sum_j s^j s_j, so the assert-zero is sum_j s^j (synd_j ^ s_j)
+ * = 0, i.e. synd_j = s_j for all j except with probability <= (p-1)/2^lambda
+ * (Schwartz-Zippel over s: the SAME bound the reference zk_hash relies on to
+ * separate those p constraints, so no new assumption).  Columns i in [0, n) only
+ * (out-of-range g_k selects no column; guarded by the range check).  Validated
+ * by round-trip against the clear-domain oracle, not by byte-equality (the
+ * transcript legitimately changes vs the reference).  Returns 0, -1 on OOM.
+ * ===================================================================== */
+static int
+gf8p_accumulate_syndrome(gf8p_zk_hash_3_ctx *hasher,
+                         const gf8_syndrome_entry_t *sy,
+                         const gf8_wire_id *sbits, const uint8_t *bit_tags,
+                         const uint8_t *wire_vals, unsigned int lambda,
+                         unsigned int nb, const uint8_t *alpha8, uint8_t *tmp1,
+                         uint8_t *tmp2)
+{
+    unsigned int w = sy->idx_bits;
+    uint32_t p = sy->p;
+    uint32_t n = sy->n0 * p;
+    size_t block_bytes = ((size_t)p + 7u) / 8u;
+    const gf8_wire_id *idx = sbits + sy->idx_off;
+
+    uint8_t one[32];
+    gf8p_embed(one, 1, lambda);
+
+    /* INFO-3 defense in depth: bound w before it sizes/indexes the fixed
+     * [VOLEITH_QS_COEFFS_MAX] scratch (G, demux node/child).  Unreachable on
+     * shipped circuits (w = idx_bits <= 17); real check, survives -DNDEBUG. */
+    if (w > VOLEITH_QS_D_MAX - 1u)
+        return -1;
+
+    uint8_t *pow_s = calloc((size_t)p, nb); /* pow_s[u] = s^u          */
+    uint8_t *R = calloc((size_t)n, nb);     /* per-column weight R_i    */
+    uint8_t *facbuf = calloc((size_t)w * 2u * 2u, 32); /* [b][line][coeff] */
+    if (!pow_s || !R || !facbuf) {
+        free(pow_s);
+        free(R);
+        free(facbuf);
+        return -1;
+    }
+
+    /* pow_s[0] = 1, pow_s[u] = pow_s[u-1] * s (s = hasher->s, the h0 key). */
+    memcpy(pow_s, one, nb);
+    for (uint32_t u = 1; u < p; u++)
+        gf8p_gf_mul(pow_s + (size_t)u * nb, pow_s + (size_t)(u - 1) * nb,
+                    hasher->s, lambda);
+
+    /* R_i: identity last block R = s^l; non-identity block R = cyclic sum. */
+    {
+        uint8_t *Rid = R + (size_t)(sy->n0 - 1u) * p * nb;
+        for (uint32_t l = 0; l < p; l++)
+            memcpy(Rid + (size_t)l * nb, pow_s + (size_t)l * nb, nb);
+        for (uint32_t b = 0; b + 1u < sy->n0; b++) {
+            const uint8_t *mb = sy->M + (size_t)b * block_bytes;
+            uint8_t *Rb = R + (size_t)b * p * nb;
+            for (uint32_t a = 0; a < p; a++) {
+                if (!((mb[a >> 3] >> (a & 7u)) & 1u))
+                    continue;
+                for (uint32_t l = 0; l < p; l++) {
+                    uint32_t u = (l + a) % p;
+                    uint8_t *rl = Rb + (size_t)l * nb;
+                    const uint8_t *pu = pow_s + (size_t)u * nb;
+                    for (unsigned int m = 0; m < nb; m++)
+                        rl[m] ^= pu[m];
+                }
+            }
+        }
+    }
+
+    /* G = sum_k sum_i R_i * E_i^{(k)} (one degree-w vector), via demux tree. */
+    uint8_t G[VOLEITH_QS_COEFFS_MAX][32];
+    for (unsigned int c = 0; c <= w; c++)
+        memset(G[c], 0, nb);
+
+    uint8_t node0[VOLEITH_QS_COEFFS_MAX][32]; /* constant-1 poly (degree 0) */
+    memcpy(node0[0], one, nb);
+
+    for (uint32_t k = 0; k < sy->t; k++) {
+        /* Build the 2 factor lines per bit b: line 1 = {tag, val}, line 0 =
+         * {tag, one ^ val}.  coeff0 = tag (byte_combine of bit tags), coeff1 =
+         * the value factor (MSB-first bit order preserved by depth == b). */
+        for (unsigned int b = 0; b < w; b++) {
+            gf8_wire_id wid = idx[(size_t)k * w + b];
+            uint8_t tag[32], val[32];
+            gf8p_byte_combine(tag, bit_tags + (size_t)wid * 8 * nb, nb, lambda,
+                              alpha8);
+            gf8p_embed(val, wire_vals[wid], lambda);
+            uint8_t *l1 = facbuf + ((size_t)(b * 2u + 1u)) * 2u * 32u;
+            uint8_t *l0 = facbuf + ((size_t)(b * 2u + 0u)) * 2u * 32u;
+            memcpy(l1, tag, nb);
+            memcpy(l1 + 32, val, nb);
+            memcpy(l0, tag, nb);
+            for (unsigned int m = 0; m < nb; m++)
+                l0[32 + m] = (uint8_t)(one[m] ^ val[m]);
+        }
+        gf8p_demux_fold(0, w, 0, facbuf, node0, 0, R, n, lambda, nb, G, tmp1);
+    }
+
+    /* Push once: coeffs 0..w-1 (nv = w); value coeff w omitted / asserted 0. */
+    const uint8_t *vv[VOLEITH_QS_COEFFS_MAX];
+    for (unsigned int c = 0; c < w; c++)
+        vv[c] = G[c];
+    gf8p_zk_hash_3_update(hasher, vv, w, tmp1, tmp2);
+
+    voleith_secure_zero(G, sizeof(G));
+    voleith_secure_zero(facbuf, (size_t)w * 2u * 2u * 32u);
+    free(pow_s);
+    free(R);
+    free(facbuf);
+    return 0;
+}
+
+/*
+ * Test-only mode flag (declared in gf8_prover_internal.h).  0 = the collapsed
+ * production accumulator above; nonzero = the reference accumulator below.  The
+ * verdict cross-check test (test_syndrome_gf8) runs both and asserts identical
+ * accept/reject on honest + forgery cases.  Never set outside tests.
+ */
+int voleith_gf8_syndrome_ref_mode = 0;
+
+/*
+ * Reference syndrome accumulator (pre-collapse): one degree-w constraint per
+ * syndrome bit j, rho_j = sum_{k, i : M[j,i]=1} E_i^{(k)}, pushed p times.  Kept
+ * as the trusted oracle the collapsed prover is cross-checked against (its own
+ * validity rides the clear-domain check_constraints + round-trip, same as the
+ * collapsed form).  Returns 0, -1 on OOM.
+ */
+static int
+gf8p_accumulate_syndrome_ref(gf8p_zk_hash_3_ctx *hasher,
+                             const gf8_syndrome_entry_t *sy,
+                             const gf8_wire_id *sbits, const uint8_t *bit_tags,
+                             const uint8_t *wire_vals, unsigned int lambda,
+                             unsigned int nb, const uint8_t *alpha8,
+                             uint8_t *tmp1, uint8_t *tmp2)
+{
+    unsigned int w = sy->idx_bits;
+    uint32_t p = sy->p;
+    uint32_t n = sy->n0 * p;
+    size_t block_bytes = ((size_t)p + 7u) / 8u;
+    const gf8_wire_id *idx = sbits + sy->idx_off;
+
+    uint8_t one[32];
+    gf8p_embed(one, 1, lambda);
+
+    /* INFO-3 defense in depth: bound w before it sizes the rho scratch
+     * (p*(w+1)) and indexes the fixed [VOLEITH_QS_COEFFS_MAX] push buffer.
+     * Unreachable on shipped circuits (w = idx_bits <= 17); survives -DNDEBUG. */
+    if (w > VOLEITH_QS_D_MAX - 1u)
+        return -1;
+
+    uint8_t *rho = calloc((size_t)p * (w + 1u), nb);
+    uint8_t *tags = calloc((size_t)w, 32);
+    uint8_t *vals = calloc((size_t)w, 32);
+    if (!rho || !tags || !vals) {
+        free(rho);
+        free(tags);
+        free(vals);
+        return -1;
+    }
+
+    uint8_t Ecur[VOLEITH_QS_COEFFS_MAX][32];
+    uint8_t Enext[VOLEITH_QS_COEFFS_MAX][32];
+    uint8_t fac[2][32];
+
+    for (uint32_t k = 0; k < sy->t; k++) {
+        for (unsigned int b = 0; b < w; b++) {
+            const uint8_t *bt =
+                bit_tags + (size_t)idx[(size_t)k * w + b] * 8 * nb;
+            gf8p_byte_combine(tags + (size_t)b * 32, bt, nb, lambda, alpha8);
+            gf8p_embed(vals + (size_t)b * 32, wire_vals[idx[(size_t)k * w + b]],
+                       lambda);
+        }
+
+        for (uint32_t i = 0; i < n; i++) {
+            unsigned int bit0 = (i >> (w - 1u)) & 1u;
+            memcpy(Ecur[0], tags + 0, nb);
+            for (unsigned int m = 0; m < nb; m++)
+                Ecur[1][m] = bit0 ? vals[m] : (uint8_t)(one[m] ^ vals[m]);
+            unsigned int Edeg = 1;
+            for (unsigned int b = 1; b < w; b++) {
+                unsigned int bitb = (i >> (w - 1u - b)) & 1u;
+                memcpy(fac[0], tags + (size_t)b * 32, nb);
+                const uint8_t *vb = vals + (size_t)b * 32;
+                for (unsigned int m = 0; m < nb; m++)
+                    fac[1][m] = bitb ? vb[m] : (uint8_t)(one[m] ^ vb[m]);
+                gf8p_poly_mul(Enext, Ecur, Edeg, fac, 1, lambda, nb, tmp1);
+                Edeg += 1;
+                for (unsigned int c = 0; c <= Edeg; c++)
+                    memcpy(Ecur[c], Enext[c], nb);
+            }
+            uint32_t b_col = i / p;
+            uint32_t l = i % p;
+            if (b_col == sy->n0 - 1u) {
+                uint8_t *rj = rho + (size_t)l * (w + 1u) * nb;
+                for (unsigned int c = 0; c <= w; c++)
+                    for (unsigned int m = 0; m < nb; m++)
+                        rj[(size_t)c * nb + m] ^= Ecur[c][m];
+            } else {
+                const uint8_t *mb = sy->M + (size_t)b_col * block_bytes;
+                for (uint32_t a = 0; a < p; a++) {
+                    if (!((mb[a >> 3] >> (a & 7u)) & 1u))
+                        continue;
+                    uint32_t j = (l + a) % p;
+                    uint8_t *rj = rho + (size_t)j * (w + 1u) * nb;
+                    for (unsigned int c = 0; c <= w; c++)
+                        for (unsigned int m = 0; m < nb; m++)
+                            rj[(size_t)c * nb + m] ^= Ecur[c][m];
+                }
+            }
+        }
+    }
+
+    const uint8_t *vv[VOLEITH_QS_COEFFS_MAX];
+    for (uint32_t j = 0; j < p; j++) {
+        const uint8_t *rj = rho + (size_t)j * (w + 1u) * nb;
+        for (unsigned int c = 0; c < w; c++)
+            vv[c] = rj + (size_t)c * nb;
+        gf8p_zk_hash_3_update(hasher, vv, w, tmp1, tmp2);
+    }
+
+    voleith_secure_zero(rho, (size_t)p * (w + 1u) * nb);
+    voleith_secure_zero(tags, (size_t)w * 32);
+    voleith_secure_zero(vals, (size_t)w * 32);
+    voleith_secure_zero(Ecur, sizeof(Ecur));
+    voleith_secure_zero(Enext, sizeof(Enext));
+    free(rho);
+    free(tags);
+    free(vals);
+    return 0;
 }
 
 /* =====================================================================
@@ -288,23 +712,32 @@ size_t
 voleith_gf8_qs_ellhat(const voleith_gf8_circuit_t *circuit, unsigned int lambda)
 {
     size_t ell = voleith_gf8_qs_ell(circuit);
-    return ell + (3u * lambda + UNIVERSAL_HASH_B_BITS + 7u) / 8u;
+    unsigned int d = voleith_gf8_circuit_qs_degree(circuit);
+    return ell + ((d + 1u) * lambda + UNIVERSAL_HASH_B_BITS + 7u) / 8u;
 }
 
 static int
 gf8_qs_prove_impl(const voleith_gf8_circuit_t *circuit, const uint8_t *witness,
                   const uint8_t *instance, unsigned int lambda,
                   const uint8_t *u, const uint8_t **V, const uint8_t *chall_2,
-                  uint8_t *d_out, uint8_t *a0_tilde, uint8_t *a1_tilde,
-                  uint8_t *a2_tilde, int reject_invalid)
+                  uint8_t *d_out, uint8_t *const *a_out, int reject_invalid)
 {
-    if (!circuit || !witness || !u || !V || !chall_2 || !d_out || !a0_tilde ||
-        !a1_tilde || !a2_tilde)
+    if (!circuit || !witness || !u || !V || !chall_2 || !d_out || !a_out)
         return -1;
     if (voleith_gf8_circuit_instance_count(circuit) > 0 && !instance)
         return -1;
     if (lambda != 128 && lambda != 192 && lambda != 256)
         return -1;
+
+    /* Opening count d = max constraint degree in force (2 today; the opener
+     * raises it).  a_out[0..d] receive coefficients a_0..a_d.  No allocations
+     * yet, so a bad degree / null buffer returns directly. */
+    unsigned int d = voleith_gf8_circuit_qs_degree(circuit);
+    if (d > VOLEITH_QS_D_MAX)
+        return -1;
+    for (unsigned int i = 0; i <= d; i++)
+        if (!a_out[i])
+            return -1;
 
     unsigned int nb = lambda / 8;
     size_t n_wires = voleith_gf8_circuit_wire_count(circuit);
@@ -323,7 +756,10 @@ gf8_qs_prove_impl(const voleith_gf8_circuit_t *circuit, const uint8_t *witness,
     uint8_t *wire_vals = NULL;
     uint8_t *bit_tags = NULL; /* n_wires * 8 * nb bytes */
     uint8_t *V_T = NULL;
-    size_t n_bit_cols = ell * 8 + 2 * (size_t)lambda;
+    /* Correction region holds d mask blocks of lambda columns each (the x1
+     * staircase reads columns [ell*8, ell*8 + d*lambda)).  Was hardcoded to
+     * 2*lambda (d=2 only); must scale with d for the degree-d opener. */
+    size_t n_bit_cols = ell * 8 + (size_t)d * lambda;
 
     /* wire_vals: one byte per wire */
     wire_vals = calloc(n_wires, 1);
@@ -464,15 +900,16 @@ gf8_qs_prove_impl(const voleith_gf8_circuit_t *circuit, const uint8_t *witness,
      *   v1 = tag_a*embed(val_b) + tag_b*embed(val_a) + embed(val_c)  (degree-1)
      *   v2 = embed(gf8_mul(val_a, val_b))     (degree-2)
      * ------------------------------------------------------------------ */
+    /* d (opening count) was derived from qs_degree at entry; the zk_hash
+     * below is degree-parameterized (QS_DEGREE_D_DESIGN). */
     gf8p_zk_hash_3_ctx hasher;
-    gf8p_zk_hash_3_init(&hasher, chall_2, lambda);
+    gf8p_zk_hash_3_init(&hasher, chall_2, lambda, d);
 
     {
         uint8_t tag_a[32], tag_b[32], tag_c[32];
         uint8_t emb_a[32], emb_b[32], emb_c[32];
         uint8_t v0[32], v1[32], v2[32];
-        uint8_t prod[32], zero[32];
-        memset(zero, 0, nb);
+        uint8_t prod[32];
 
         for (size_t w = 0; w < n_wires; w++) {
             const gf8_wire_entry_t *e = &wires[w];
@@ -507,7 +944,8 @@ gf8_qs_prove_impl(const voleith_gf8_circuit_t *circuit, const uint8_t *witness,
             /* v2 = embed(gf8_mul(val_a, val_b)) */
             gf8p_embed(v2, voleith_gf8_mul(val_a, val_b), lambda);
 
-            gf8p_zk_hash_3_update(&hasher, v0, v1, v2, tmp1, tmp2);
+            const uint8_t *vv[3] = {v0, v1, v2};
+            gf8p_zk_hash_3_update(&hasher, vv, 3, tmp1, tmp2);
         }
 
         /* ------------------------------------------------------------------
@@ -552,13 +990,15 @@ gf8_qs_prove_impl(const voleith_gf8_circuit_t *circuit, const uint8_t *witness,
                  * causing verification to fail (soundness). */
                 gf8p_embed(v2, val_c, lambda);
 
-                gf8p_zk_hash_3_update(&hasher, v0, v1, v2, tmp1, tmp2);
+                const uint8_t *vv[3] = {v0, v1, v2};
+                gf8p_zk_hash_3_update(&hasher, vv, 3, tmp1, tmp2);
                 break;
             }
             case GF8_CONSTRAINT_ZERO: {
                 gf8p_byte_combine(tag_a, bit_tags + c->a * 8 * nb, nb, lambda,
                                   alpha8);
-                gf8p_zk_hash_3_update(&hasher, tag_a, zero, zero, tmp1, tmp2);
+                const uint8_t *vv[1] = {tag_a};
+                gf8p_zk_hash_3_update(&hasher, vv, 1, tmp1, tmp2);
                 break;
             }
             case GF8_CONSTRAINT_EQUAL: {
@@ -568,9 +1008,45 @@ gf8_qs_prove_impl(const voleith_gf8_circuit_t *circuit, const uint8_t *witness,
                                   alpha8);
                 for (unsigned int k = 0; k < nb; k++)
                     tag_a[k] ^= tag_b[k];
-                gf8p_zk_hash_3_update(&hasher, tag_a, zero, zero, tmp1, tmp2);
+                const uint8_t *vv[1] = {tag_a};
+                gf8p_zk_hash_3_update(&hasher, vv, 1, tmp1, tmp2);
                 break;
             }
+            }
+        }
+
+        /* Less-than (NLT) constraints: separate degree-(w+1) family, batched
+         * into the same zk_hash at natural degree (§18.1). */
+        {
+            size_t n_lt = voleith_gf8_circuit_lt_count(circuit);
+            const gf8_lt_entry_t *lts =
+                voleith_gf8_circuit_lt_constraints(circuit);
+            const gf8_wire_id *lt_bits = voleith_gf8_circuit_lt_bits(circuit);
+            for (size_t li = 0; li < n_lt; li++)
+                if (gf8p_accumulate_lt(
+                        &hasher, &lts[li], lt_bits + lts[li].bits_off, bit_tags,
+                        wire_vals, lambda, nb, alpha8, tmp1, tmp2) != 0)
+                    goto err;
+        }
+
+        /* Syndrome constraints (s = M*e^T): degree-idx_bits family, batched
+         * into the same zk_hash at natural degree (sections 8-10). */
+        {
+            size_t n_syn = voleith_gf8_circuit_syndrome_count(circuit);
+            const gf8_syndrome_entry_t *syn =
+                voleith_gf8_circuit_syndrome_constraints(circuit);
+            const gf8_wire_id *syn_bits =
+                voleith_gf8_circuit_syndrome_bits(circuit);
+            for (size_t si = 0; si < n_syn; si++) {
+                int src = voleith_gf8_syndrome_ref_mode
+                              ? gf8p_accumulate_syndrome_ref(
+                                    &hasher, &syn[si], syn_bits, bit_tags,
+                                    wire_vals, lambda, nb, alpha8, tmp1, tmp2)
+                              : gf8p_accumulate_syndrome(
+                                    &hasher, &syn[si], syn_bits, bit_tags,
+                                    wire_vals, lambda, nb, alpha8, tmp1, tmp2);
+                if (src != 0)
+                    goto err;
             }
         }
 
@@ -589,7 +1065,6 @@ gf8_qs_prove_impl(const voleith_gf8_circuit_t *circuit, const uint8_t *witness,
         voleith_secure_zero(v1, sizeof(v1));
         voleith_secure_zero(v2, sizeof(v2));
         voleith_secure_zero(prod, sizeof(prod));
-        voleith_secure_zero(zero, sizeof(zero));
     }
 
     /* ------------------------------------------------------------------
@@ -597,27 +1072,37 @@ gf8_qs_prove_impl(const voleith_gf8_circuit_t *circuit, const uint8_t *witness,
      *
      * Same as bit-level but start_col = ell*8 (not ell).
      *
-     * x1_0 = sum_poly(V cols ell*8 .. ell*8+lambda-1)
-     * x1_1 = sum_poly(V cols ell*8+lambda .. ell*8+2*lambda-1) + u_star_0
-     * x1_2 = u_star_1
+     * Staircase (QS_DEGREE_D_DESIGN section 11): x1_i = v*_i + u*_{i-1} over d
+     * mask blocks starting at corr_start = ell*8; at d=2, x1_0 = v*_0,
+     * x1_1 = u*_0 + v*_1, x1_2 = u*_1 (byte-identical to the prior form).
      * ------------------------------------------------------------------ */
-    uint8_t x1_0[32], x1_1[32], x1_2[32], tmp3[32];
+    uint8_t x1[VOLEITH_QS_COEFFS_MAX][32], tmp3[32];
     {
         size_t corr_start = ell * 8;
-        gf8p_sum_poly_cols(x1_0, tmp1, V_T, lambda, nb, corr_start, lambda);
-        gf8p_sum_poly_bits_at(tmp3, tmp1, u, corr_start, lambda);
-        gf8p_sum_poly_cols(x1_1, tmp1, V_T, lambda, nb, corr_start + lambda,
-                           lambda);
-        for (unsigned int k = 0; k < nb; k++)
-            x1_1[k] ^= tmp3[k];
-        gf8p_sum_poly_bits_at(x1_2, tmp1, u, corr_start + lambda, lambda);
+        for (unsigned int i = 0; i <= d; i++)
+            memset(x1[i], 0, nb);
+        for (unsigned int j = 0; j < d; j++) {
+            size_t off = corr_start + (size_t)j * lambda;
+
+            gf8p_sum_poly_cols(tmp3, tmp1, V_T, lambda, nb, off, lambda);
+            for (unsigned int k = 0; k < nb; k++)
+                x1[j][k] ^= tmp3[k]; /* v*_j -> x1[j] */
+            gf8p_sum_poly_bits_at(tmp3, tmp1, u, off, lambda);
+            for (unsigned int k = 0; k < nb; k++)
+                x1[j + 1][k] ^= tmp3[k]; /* u*_j -> x1[j+1] */
+        }
     }
 
     /* ------------------------------------------------------------------
-     * Step 7: Finalize zk_hash_3 to get a0_tilde, a1_tilde, a2_tilde.
+     * Step 7: Finalize the zk_hash to get a0_tilde..ad_tilde (d+1 outputs).
      * ------------------------------------------------------------------ */
-    gf8p_zk_hash_3_finalize(a0_tilde, a1_tilde, a2_tilde, &hasher, x1_0, x1_1,
-                            x1_2, chall_2, tmp1, tmp2);
+    {
+        const uint8_t *x1p[VOLEITH_QS_COEFFS_MAX];
+
+        for (unsigned int i = 0; i <= d; i++)
+            x1p[i] = x1[i];
+        gf8p_zk_hash_3_finalize(a_out, &hasher, x1p, chall_2, tmp1, tmp2);
+    }
 
     /*
      * G-3 (mirrors P-2 for the GF(2^8) prover): zero every heap
@@ -640,9 +1125,7 @@ gf8_qs_prove_impl(const voleith_gf8_circuit_t *circuit, const uint8_t *witness,
     voleith_secure_zero(tmp1, sizeof(tmp1));
     voleith_secure_zero(tmp2, sizeof(tmp2));
     voleith_secure_zero(tmp3, sizeof(tmp3));
-    voleith_secure_zero(x1_0, sizeof(x1_0));
-    voleith_secure_zero(x1_1, sizeof(x1_1));
-    voleith_secure_zero(x1_2, sizeof(x1_2));
+    voleith_secure_zero(x1, sizeof(x1));
     voleith_secure_zero(alpha8, sizeof(alpha8));
     voleith_secure_zero(&hasher, sizeof(hasher));
     free(wire_vals);
@@ -668,9 +1151,7 @@ err:
     voleith_secure_zero(tmp1, sizeof(tmp1));
     voleith_secure_zero(tmp2, sizeof(tmp2));
     voleith_secure_zero(tmp3, sizeof(tmp3));
-    voleith_secure_zero(x1_0, sizeof(x1_0));
-    voleith_secure_zero(x1_1, sizeof(x1_1));
-    voleith_secure_zero(x1_2, sizeof(x1_2));
+    voleith_secure_zero(x1, sizeof(x1));
     voleith_secure_zero(alpha8, sizeof(alpha8));
     voleith_secure_zero(&hasher, sizeof(hasher));
     free(wire_vals);
@@ -683,11 +1164,11 @@ int
 voleith_gf8_qs_prove(const voleith_gf8_circuit_t *circuit,
                      const uint8_t *witness, const uint8_t *instance,
                      unsigned int lambda, const uint8_t *u, const uint8_t **V,
-                     const uint8_t *chall_2, uint8_t *d_out, uint8_t *a0_tilde,
-                     uint8_t *a1_tilde, uint8_t *a2_tilde)
+                     const uint8_t *chall_2, uint8_t *d_out,
+                     uint8_t *const *a_out)
 {
     return gf8_qs_prove_impl(circuit, witness, instance, lambda, u, V, chall_2,
-                             d_out, a0_tilde, a1_tilde, a2_tilde, 1);
+                             d_out, a_out, 1);
 }
 
 int
@@ -695,11 +1176,10 @@ voleith_gf8_qs_prove_unchecked(const voleith_gf8_circuit_t *circuit,
                                const uint8_t *witness, const uint8_t *instance,
                                unsigned int lambda, const uint8_t *u,
                                const uint8_t **V, const uint8_t *chall_2,
-                               uint8_t *d_out, uint8_t *a0_tilde,
-                               uint8_t *a1_tilde, uint8_t *a2_tilde)
+                               uint8_t *d_out, uint8_t *const *a_out)
 {
     return gf8_qs_prove_impl(circuit, witness, instance, lambda, u, V, chall_2,
-                             d_out, a0_tilde, a1_tilde, a2_tilde, 0);
+                             d_out, a_out, 0);
 }
 
 static int

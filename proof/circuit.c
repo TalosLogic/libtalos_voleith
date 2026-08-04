@@ -260,6 +260,15 @@ voleith_circuit_and_gate_count(const voleith_circuit_t *c)
     return c->n_and;
 }
 
+unsigned int
+voleith_circuit_qs_degree(const voleith_circuit_t *c)
+{
+    (void)c;
+    /* Baseline degree-2 (AND gate / assert).  When higher-degree constraint
+     * sinks are added this derives the max over the constraint table. */
+    return 2u;
+}
+
 size_t
 voleith_circuit_constraint_count(const voleith_circuit_t *c)
 {

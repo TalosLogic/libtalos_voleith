@@ -115,6 +115,43 @@ main(int argc, char **argv)
     if (write_file(path, packed, packed_len) != 0)
         goto out;
 
+    /*
+     * format_version 2 seed: the same proof wrapped in a v2 envelope with a
+     * generic section, so it clears the fingerprint check under the shared
+     * (non-opener) fuzz cfg and steers the fuzzer into the v2 section-parse
+     * loop.  Uses a generic tag (not the opener section, which would need an
+     * opener-enabled cfg the harness does not build).
+     */
+    {
+        static const uint8_t extra[] = {0xDE, 0xAD, 0xBE, 0xEF};
+        voleith_rs_sig_packer_t *b = NULL;
+        uint8_t *v2 = NULL;
+        size_t v2_len;
+        int ok = 0;
+
+        if (voleith_rs_sig_pack_init(&b, &cfg, &params,
+                                     VOLEITH_RS_SIG_FORMAT_V2) == 0 &&
+            voleith_rs_sig_pack_proof(b, &sig) == 0 &&
+            voleith_rs_sig_pack_section(b, 0x10u, extra, sizeof(extra)) == 0) {
+            v2_len = voleith_rs_sig_pack_len(b);
+            v2 = malloc(v2_len != 0 ? v2_len : 1);
+            if (v2 == NULL) {
+                voleith_rs_sig_pack_free(b); /* final not reached */
+            } else if (voleith_rs_sig_pack_final(b, v2, v2_len, NULL) == 0) {
+                /* final consumed b */
+                snprintf(path, sizeof(path), "%s/rs_unpack/valid_seed_v2",
+                         outdir);
+                ok = (write_file(path, v2, v2_len) == 0);
+            }
+            /* else: final consumed b and failed; ok stays 0 */
+        } else {
+            voleith_rs_sig_pack_free(b); /* an add failed; final not reached */
+        }
+        free(v2);
+        if (!ok)
+            goto out;
+    }
+
     rc = 0;
 out:
     free(packed);

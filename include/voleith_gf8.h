@@ -83,8 +83,11 @@
  *   voleith_node_hash_grostl512_t59 - Grøstl-512 truncated 59 (59B, 2²³⁶ CR) [deprecated]
  *   voleith_node_hash_grostl256_fixed - Grøstl-256 fixed-input (32B, 2¹²⁸ CR)
  *   voleith_node_hash_grostl512_fixed - Grøstl-512 fixed-input (64B, 2²⁵⁶ CR)
+ *   voleith_node_hash_grostl256_fixed128 - Grøstl-256 2-block leaf (32B, 128B cap)
+ *   voleith_node_hash_grostl512_fixed256 - Grøstl-512 2-block leaf (64B, 256B cap)
  *   voleith_node_hash_hirose        - Hirose-AES-256 variable (32B, 2¹²⁸ CR)
  *   voleith_node_hash_hirose_fixed32- Hirose-AES-256 fixed-32 (32B, 2¹²⁸ CR)
+ *   voleith_node_hash_hirose_fixed96- Hirose-AES-256 fixed-96 (32B, 2¹²⁸ CR)
  *
  * See circuits/node_hash_vt.h for the vt struct and the rationale per
  * variant.
@@ -166,9 +169,9 @@
 /* Library version */
 #ifndef VOLEITH_VERSION_MAJOR
 #define VOLEITH_VERSION_MAJOR 1
-#define VOLEITH_VERSION_MINOR 10
-#define VOLEITH_VERSION_PATCH 1
-#define VOLEITH_VERSION_STRING "1.10.1"
+#define VOLEITH_VERSION_MINOR 11
+#define VOLEITH_VERSION_PATCH 0
+#define VOLEITH_VERSION_STRING "1.11.0"
 #endif
 
 /* GF(2⁸) proof system: circuit builder and prove/verify API */

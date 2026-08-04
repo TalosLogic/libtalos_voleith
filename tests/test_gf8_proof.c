@@ -18,6 +18,7 @@
 
 #include "gf8_proof.h"
 #include "gf8_circuit.h"
+#include "proof_header.h" /* VOLEITH_PROOF_HEADER_BYTES */
 #include "gf8_circuit_fingerprint.h"
 #include "gf8_prover.h"
 #include "aes_gf8_circuit.h"
@@ -1064,6 +1065,235 @@ test_scale_vs_mul_slot(void)
 }
 
 /* ================================================================
+ * Test: full two-phase proof over a degree-(w+1) less-than circuit.
+ *
+ * This drives the whole public proof pipeline (prove_v2 -> verify_v2:
+ * commit, serialize, transcript, decommit) at opening degree d = w+1 > 2 -
+ * the serialization / sizing / transcript path that the QS-primitive tests
+ * do NOT exercise, and the path that would have caught the n_bit_cols bug on
+ * its own.  Asserts A < B over w witness bit wires (MSB-first).
+ * ================================================================ */
+static voleith_gf8_circuit_t *
+build_lt_proof_circuit(unsigned int w)
+{
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    if (!c)
+        return NULL;
+    gf8_wire_id a_bits[32], b_bits[32];
+    for (unsigned int i = 0; i < w; i++)
+        a_bits[i] = voleith_gf8_add_witness(c);
+    for (unsigned int i = 0; i < w; i++)
+        b_bits[i] = voleith_gf8_add_witness(c);
+    voleith_gf8_assert_lt(c, a_bits, b_bits, w);
+    return c;
+}
+
+static void
+fill_lt_bits(uint8_t *buf, unsigned int w, unsigned int A, unsigned int B)
+{
+    for (unsigned int i = 0; i < w; i++)
+        buf[i] = (uint8_t)((A >> (w - 1 - i)) & 1u);
+    for (unsigned int i = 0; i < w; i++)
+        buf[w + i] = (uint8_t)((B >> (w - 1 - i)) & 1u);
+}
+
+static void
+test_lt_two_phase(const voleith_params_t *params, unsigned int w,
+                  unsigned int A, unsigned int B, const char *label)
+{
+    printf("\n[two-phase LT full proof: %s]\n", label);
+
+    voleith_gf8_circuit_t *c = build_lt_proof_circuit(w);
+    if (!c) {
+        printf("  SKIP: circuit alloc failed\n");
+        return;
+    }
+    size_t nwit = voleith_gf8_circuit_witness_count(c);
+    uint8_t witness[64];
+    fill_lt_bits(witness, w, A, B);
+    uint8_t fs_seed[16];
+    memset(fs_seed, 0x27, sizeof(fs_seed));
+
+    /* Opening degree really is w+1 (> 2). */
+    CHECK(voleith_gf8_circuit_qs_degree(c) == w + 1,
+          "qs_degree == w+1 (>2) on the proof circuit");
+
+    /* Happy path: A < B verifies through the full pipeline. */
+    voleith_proof_t proof;
+    memset(&proof, 0, sizeof(proof));
+    CHECK(voleith_gf8_prove_v2(&proof, params, c, witness, nwit, NULL, 0,
+                               fs_seed, sizeof(fs_seed)) == 0,
+          "prove_v2 succeeds (A<B)");
+    CHECK(voleith_gf8_verify_v2(&proof, params, c, NULL, 0, fs_seed,
+                                sizeof(fs_seed)) == 0,
+          "verify_v2 accepts valid d>2 proof");
+
+    /* Degree-aware size helper matches the actual d>2 proof length. */
+    CHECK(voleith_gf8_proof_byte_size_circuit(params, c) == proof.len,
+          "proof_byte_size_circuit matches d>2 proof len");
+
+    /* Tampered proof body must be rejected. */
+    if (proof.data && proof.len > VOLEITH_PROOF_HEADER_BYTES) {
+        uint8_t saved = proof.data[proof.len - 1];
+        proof.data[proof.len - 1] ^= 0x40u;
+        CHECK(voleith_gf8_verify_v2(&proof, params, c, NULL, 0, fs_seed,
+                                    sizeof(fs_seed)) != 0,
+              "verify_v2 rejects tampered d>2 proof");
+        proof.data[proof.len - 1] = saved;
+    }
+
+    /* Wrong FS seed must be rejected. */
+    uint8_t bad_seed[16];
+    memset(bad_seed, 0x99, sizeof(bad_seed));
+    CHECK(voleith_gf8_verify_v2(&proof, params, c, NULL, 0, bad_seed,
+                                sizeof(bad_seed)) != 0,
+          "verify_v2 rejects wrong FS seed on d>2 proof");
+
+    voleith_proof_free(&proof);
+
+    /* A >= B: the checked prover must refuse (eval rejects the witness). */
+    voleith_gf8_circuit_t *c2 = build_lt_proof_circuit(w);
+    uint8_t bad_wit[64];
+    fill_lt_bits(bad_wit, w, B, A); /* swapped -> A>=B when A<B originally */
+    voleith_proof_t bad_proof;
+    memset(&bad_proof, 0, sizeof(bad_proof));
+    CHECK(voleith_gf8_prove_v2(&bad_proof, params, c2, bad_wit, nwit, NULL, 0,
+                               fs_seed, sizeof(fs_seed)) != 0,
+          "prove_v2 refuses A>=B witness");
+    voleith_proof_free(&bad_proof);
+    voleith_gf8_circuit_free(c2);
+    voleith_gf8_circuit_free(c);
+}
+
+/* ================================================================
+ * Test: full two-phase proof over a degree-idx_bits syndrome circuit
+ * (s = M*e^T).  Exercises the serialization / sizing / transcript path at
+ * opening degree d = idx_bits > 2 through the public pipeline, plus the
+ * instance binding of the public syndrome s.
+ * ================================================================ */
+static void
+syn_oracle(uint8_t *s, uint32_t p, uint32_t n0, uint32_t t,
+           const uint32_t *indices, const uint8_t *M)
+{
+    size_t block_bytes = ((size_t)p + 7u) / 8u;
+    uint8_t *e = calloc((size_t)n0 * p, 1);
+    for (uint32_t k = 0; k < t; k++)
+        e[indices[k]] = 1;
+    for (uint32_t j = 0; j < p; j++)
+        s[j] = e[(size_t)(n0 - 1u) * p + j];
+    for (uint32_t b = 0; b + 1u < n0; b++) {
+        const uint8_t *mb = M + (size_t)b * block_bytes;
+        for (uint32_t a = 0; a < p; a++)
+            if ((mb[a >> 3] >> (a & 7u)) & 1u)
+                for (uint32_t cpos = 0; cpos < p; cpos++)
+                    s[(a + cpos) % p] ^= e[(size_t)b * p + cpos];
+    }
+    free(e);
+}
+
+static voleith_gf8_circuit_t *
+build_syn_proof_circuit(uint32_t p, uint32_t n0, uint32_t t, uint32_t idx_bits,
+                        const uint32_t *indices, const uint8_t *M,
+                        uint8_t *witness, uint8_t *instance, const uint8_t *s)
+{
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    gf8_wire_id *idx_w = malloc((size_t)t * idx_bits * sizeof(gf8_wire_id));
+    gf8_wire_id *s_w = malloc((size_t)p * sizeof(gf8_wire_id));
+    for (uint32_t k = 0; k < t; k++)
+        for (uint32_t b = 0; b < idx_bits; b++) {
+            idx_w[k * idx_bits + b] = voleith_gf8_add_witness(c);
+            witness[k * idx_bits + b] =
+                (uint8_t)((indices[k] >> (idx_bits - 1u - b)) & 1u);
+        }
+    for (uint32_t j = 0; j < p; j++) {
+        s_w[j] = voleith_gf8_add_instance(c);
+        instance[j] = (uint8_t)(s[j] & 1u);
+    }
+    voleith_gf8_assert_syndrome(c, idx_w, s_w, t, idx_bits, p, n0, M);
+    free(idx_w);
+    free(s_w);
+    return c;
+}
+
+static void
+test_syndrome_two_phase(const voleith_params_t *params, uint32_t p, uint32_t n0,
+                        uint32_t t, uint32_t idx_bits, const uint32_t *indices,
+                        const uint8_t *M, const char *label)
+{
+    printf("\n[two-phase syndrome full proof: %s]\n", label);
+
+    uint8_t s[64];
+    syn_oracle(s, p, n0, t, indices, M);
+
+    uint8_t witness[128], instance[64];
+    voleith_gf8_circuit_t *c = build_syn_proof_circuit(
+        p, n0, t, idx_bits, indices, M, witness, instance, s);
+    size_t nwit = voleith_gf8_circuit_witness_count(c);
+    uint8_t fs_seed[16];
+    memset(fs_seed, 0x3b, sizeof(fs_seed));
+
+    CHECK(voleith_gf8_circuit_qs_degree(c) == idx_bits,
+          "qs_degree == idx_bits (>2) on the syndrome proof circuit");
+
+    voleith_proof_t proof;
+    memset(&proof, 0, sizeof(proof));
+    CHECK(voleith_gf8_prove_v2(&proof, params, c, witness, nwit, instance, p,
+                               fs_seed, sizeof(fs_seed)) == 0,
+          "prove_v2 succeeds (honest support + s)");
+    CHECK(voleith_gf8_verify_v2(&proof, params, c, instance, p, fs_seed,
+                                sizeof(fs_seed)) == 0,
+          "verify_v2 accepts valid d>2 syndrome proof");
+    CHECK(voleith_gf8_proof_byte_size_circuit(params, c) == proof.len,
+          "proof_byte_size_circuit matches d>2 syndrome proof len");
+
+    /* Tampered proof body must be rejected. */
+    if (proof.data && proof.len > VOLEITH_PROOF_HEADER_BYTES) {
+        uint8_t saved = proof.data[proof.len - 1];
+        proof.data[proof.len - 1] ^= 0x40u;
+        CHECK(voleith_gf8_verify_v2(&proof, params, c, instance, p, fs_seed,
+                                    sizeof(fs_seed)) != 0,
+              "verify_v2 rejects tampered d>2 syndrome proof");
+        proof.data[proof.len - 1] = saved;
+    }
+
+    /* Wrong FS seed must be rejected. */
+    uint8_t bad_seed[16];
+    memset(bad_seed, 0x99, sizeof(bad_seed));
+    CHECK(voleith_gf8_verify_v2(&proof, params, c, instance, p, bad_seed,
+                                sizeof(bad_seed)) != 0,
+          "verify_v2 rejects wrong FS seed on syndrome proof");
+
+    /* Wrong public s at verify time (flip one bit): the instance is bound. */
+    {
+        uint8_t bad_inst[64];
+        memcpy(bad_inst, instance, p);
+        bad_inst[1] ^= 1u;
+        CHECK(voleith_gf8_verify_v2(&proof, params, c, bad_inst, p, fs_seed,
+                                    sizeof(fs_seed)) != 0,
+              "verify_v2 rejects a tampered public syndrome s");
+    }
+    voleith_proof_free(&proof);
+
+    /* Inconsistent (support, s): the checked prover must refuse (eval fails). */
+    {
+        uint8_t bad_s[64];
+        memcpy(bad_s, s, p);
+        bad_s[2] ^= 1u;
+        uint8_t w2[128], i2[64];
+        voleith_gf8_circuit_t *c2 = build_syn_proof_circuit(
+            p, n0, t, idx_bits, indices, M, w2, i2, bad_s);
+        voleith_proof_t bad_proof;
+        memset(&bad_proof, 0, sizeof(bad_proof));
+        CHECK(voleith_gf8_prove_v2(&bad_proof, params, c2, w2, nwit, i2, p,
+                                   fs_seed, sizeof(fs_seed)) != 0,
+              "prove_v2 refuses support inconsistent with s");
+        voleith_proof_free(&bad_proof);
+        voleith_gf8_circuit_free(c2);
+    }
+    voleith_gf8_circuit_free(c);
+}
+
+/* ================================================================
  * Main
  * ================================================================ */
 
@@ -1088,6 +1318,20 @@ main(void)
     test_scale_gate_roundtrip(&voleith_params_em_128f, "em_128f");
     test_scale_gate_roundtrip(&voleith_params_em_128s, "em_128s");
     test_scale_vs_mul_slot();
+    test_lt_two_phase(&voleith_params_em_128f, 4, 5, 12, "em_128f w=4");
+    test_lt_two_phase(&voleith_params_em_256f, 15, 0x1234, 0x5678,
+                      "em_256f w=15 (d=16)");
+
+    {
+        static const uint8_t M7[1] = {0x5a}; /* p=7 circulant first row */
+        static const uint32_t idx7[2] = {2, 9};
+        test_syndrome_two_phase(&voleith_params_em_128f, 7, 2, 2, 4, idx7, M7,
+                                "em_128f p=7 n0=2 t=2 (d=4)");
+        static const uint8_t M13[2] = {0x2d, 0x0a}; /* p=13 first row */
+        static const uint32_t idx13[3] = {3, 11, 19};
+        test_syndrome_two_phase(&voleith_params_em_256f, 13, 2, 3, 5, idx13,
+                                M13, "em_256f p=13 n0=2 t=3 (d=5)");
+    }
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return (g_fail > 0) ? 1 : 0;

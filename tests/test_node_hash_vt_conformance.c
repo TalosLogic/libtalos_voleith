@@ -5,7 +5,9 @@
  * test_node_hash_vt_conformance.c - Branch D conformance suite.
  *
  * Parameterised suite that runs against EVERY voleith_node_hash_vt
- * uniformly (Hirose ×2, AES ×2, Grøstl ×4 = 8 vts).  Per
+ * uniformly (Hirose ×3, AES ×2, Grøstl ×8 = 13 vts, including the
+ * two-block fixed leaves hirose_fixed96 / grostl256_fixed128 /
+ * grostl512_fixed256).  Per
  * docs/HASH_AGNOSTIC_MERKLE_DESIGN.md §8.1, each vt must pass:
  *
  *   - node_bytes and cr_bits match documented values
@@ -71,7 +73,13 @@
  * MAX_LEAF_TEST_BYTES.  See vt_case_t.leaf_test_bytes.
  */
 #define LEAF_DATA_BYTES 32u
-#define MAX_LEAF_TEST_BYTES 64u
+/*
+ * Widened to 256 for the two-block fixed leaf vts: grostl512_fixed256
+ * has a 256-byte leaf capacity, grostl256_fixed128 a 128-byte one, and
+ * hirose_fixed96 a 96-byte one.  All leaf buffers below are sized at
+ * MAX_LEAF_TEST_BYTES, so it must cover the widest leaf_test_bytes.
+ */
+#define MAX_LEAF_TEST_BYTES 256u
 
 static int total_tests = 0;
 static int total_pass = 0;
@@ -128,12 +136,24 @@ typedef struct {
 static const size_t LEAF_SIZES_VARIABLE[] = {0, 1, 16, 32, 64, 128};
 static const size_t LEAF_SIZES_FIXED32[] = {32};
 static const size_t LEAF_SIZES_FIXED64[] = {64};
+/* Two-block fixed leaves: sweep 0 (all-pad), a mid width, and the full
+ * capacity.  leaf_invin_bytes is capacity-independent (constant block
+ * count), so the sweep mainly exercises the zero-pad circuit path. */
+static const size_t LEAF_SIZES_FIXED96[] = {0, 64, 96};
+static const size_t LEAF_SIZES_FIXED128[] = {0, 64, 128};
+static const size_t LEAF_SIZES_FIXED256[] = {0, 128, 256};
 #define N_LEAF_SIZES_VARIABLE                                                  \
     (sizeof(LEAF_SIZES_VARIABLE) / sizeof(LEAF_SIZES_VARIABLE[0]))
 #define N_LEAF_SIZES_FIXED32                                                   \
     (sizeof(LEAF_SIZES_FIXED32) / sizeof(LEAF_SIZES_FIXED32[0]))
 #define N_LEAF_SIZES_FIXED64                                                   \
     (sizeof(LEAF_SIZES_FIXED64) / sizeof(LEAF_SIZES_FIXED64[0]))
+#define N_LEAF_SIZES_FIXED96                                                   \
+    (sizeof(LEAF_SIZES_FIXED96) / sizeof(LEAF_SIZES_FIXED96[0]))
+#define N_LEAF_SIZES_FIXED128                                                  \
+    (sizeof(LEAF_SIZES_FIXED128) / sizeof(LEAF_SIZES_FIXED128[0]))
+#define N_LEAF_SIZES_FIXED256                                                  \
+    (sizeof(LEAF_SIZES_FIXED256) / sizeof(LEAF_SIZES_FIXED256[0]))
 
 /*
  * Fields: label, vt, exp_node_bytes, exp_cr_bits, valid_leaf_sizes,
@@ -166,6 +186,13 @@ static const vt_case_t CASES[] = {
      LEAF_SIZES_FIXED32, N_LEAF_SIZES_FIXED32, 32u, 0},
     {"grostl512-fixed", &voleith_node_hash_grostl512_fixed, 64, 256,
      LEAF_SIZES_FIXED64, N_LEAF_SIZES_FIXED64, 64u, 0},
+    /* Two-block fixed leaves, swept and leaf-tested at full capacity. */
+    {"hirose-aes-256-fixed96", &voleith_node_hash_hirose_fixed96, 32, 128,
+     LEAF_SIZES_FIXED96, N_LEAF_SIZES_FIXED96, 96u, 0},
+    {"grostl256-fixed128", &voleith_node_hash_grostl256_fixed128, 32, 128,
+     LEAF_SIZES_FIXED128, N_LEAF_SIZES_FIXED128, 128u, 0},
+    {"grostl512-fixed256", &voleith_node_hash_grostl512_fixed256, 64, 256,
+     LEAF_SIZES_FIXED256, N_LEAF_SIZES_FIXED256, 256u, 0},
 };
 #define N_CASES (sizeof(CASES) / sizeof(CASES[0]))
 

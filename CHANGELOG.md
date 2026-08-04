@@ -5,6 +5,61 @@ All notable changes to libtalos_voleith are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] [2026-08-04]
+
+V5 designated-opener signing and degree-d QuickSilver openings.
+
+### Added
+
+- Degree-d QuickSilver openings (GF(2⁸) and GF(2¹⁶)): constraints of degree `d`
+  open coefficients `a_0..a_d`, generalizing the degree-2 AND/product baseline.
+  `d` is derived per circuit (max constraint degree, bounded by
+  `VOLEITH_QS_D_MAX`) and never transmitted; all-degree-2 circuits stay
+  byte-identical.
+- Designated-opener circuit gadgets: `voleith_gf8_assert_syndrome` (proves
+  `s = M·eᵀ` against a committed sparse weight-`t` support via degree-`idx_bits`
+  equality polynomials), a degree-`(width+1)` `voleith_gf8_assert_lt` chain
+  (distinct / ascending / in-range), and the in-circuit Argus KDF (AES-DM /
+  Grøstl-256) and one-time-pad DEM.
+- Argus opener backend (`voleith_rs_opener_argus_*`) and the software opener
+  `voleith_rs_opener_verify`: recover a traced identity from a tag by
+  re-encryption (`M·e'ᵀ == s`, `wt == t`), cross-checked against the companion
+  code-based KEM decap.
+- Multi-block fixed-input Merkle node hashes `grostl256_fixed128`,
+  `grostl512_fixed256`, and `hirose_fixed96`: full-collision-resistance leaf
+  hashes with 128 / 256 / 96-byte preimage capacity (for the opener id in the
+  leaf), block-count domain-separated.
+- `voleith_rs_opener_seal`: derives a fresh per-signature opener error and its
+  public `(support, s, tag_ct)` from caller randomness.
+- Streaming ring builder (`voleith_rs_ring_build_init` / `_member_begin` /
+  `_member_set` / `_member_end` / `_build_final` / `_build_free`): enroll leaf
+  fields (SK/ATTRS/ID) one at a time, putting the opener id in the leaf
+  preimage. One-shot `voleith_rs_ring_build` reimplemented on top,
+  byte-identical for non-opener configs.
+- ichor `<ichor/sample.h>` constant-time fixed-weight sampler (draw order) plus
+  `ichor_sample_sort_ascending`, consumed for the opener support draw; the seal
+  sorts the support ascending so the Argus KDF hashes it byte-identically to
+  syndrome decap (ichor held at 1.1.0).
+- VRSC serialization format_version 2 with tagged length-prefixed sections and a
+  streaming builder/reader (`voleith_rs_sig_pack_init` / `_proof` / `_opener` /
+  `_section` / `_len` / `_final` / `_free` and the `_unpack_*` duals). The opener
+  section is the Argus tag `hash_id || s || tag_ct`, handed verbatim to
+  `syndrome_argus_open`. One-shot `voleith_rs_sig_pack` emits v1 byte-identical
+  to 1.8.0; `voleith_rs_sig_unpack` reads v1 and v2.
+
+### Changed
+
+- `voleith_rs_compute_fs_seed` absorbs an opener section (`s || tag_ct`) under
+  module bit 6; bit-6-off seeds stay byte-identical.
+- `voleith_rs_verify` rejects a non-canonical opener `s` (top pad bits set)
+  before touching the proof.
+- `voleith_rs_opener_argus_syndrome` computes `M*e^T` via the shared
+  `ichor_gf2x_scatter` instead of a private per-block scatter; output
+  byte-identical (blocks are canonicalized on load). Removes the duplicated
+  oblivious scatter, so the opener owns no secret-dependent leaf and needs no
+  voleith dudect target (covered by ichor's `gf2x_scatter`). Requires an ichor
+  carrying `ichor_gf2x_scatter`.
+
 ## [1.10.1] [2026-07-23]
 
 Patch release: no public API change. voleith's layer-0 symmetric primitives
@@ -204,7 +259,8 @@ are independently-enableable modules over the shared membership core. V1
   assert_product forgery test).
 - `test_rs_revoked`: dedicated revocation-branch negative (non-revoked signer
   accepted; tampered revocation root, wrong adjacent record, and a revoked
-  member rejected at lookup), closing the optional gap noted in RSV234_ASSESSMENT.
+  member rejected at lookup), closing a previously-optional revocation-branch
+  coverage gap.
 - `VOLEITH_SANITIZE` CMake option: build the library, tests, and examples with
   AddressSanitizer + UndefinedBehaviorSanitizer (GCC or Clang); see README
   "Sanitizer builds".

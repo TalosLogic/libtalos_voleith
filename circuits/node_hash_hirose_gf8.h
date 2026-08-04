@@ -173,11 +173,17 @@ void hirose_gf8_iteration_build_witness(
 
 /* inv_in byte counts. */
 size_t merkle_hirose_gf8_fixed32_leaf_invin_bytes(size_t leaf_data_bytes);
+size_t merkle_hirose_gf8_fixed96_leaf_invin_bytes(size_t leaf_data_bytes);
 size_t merkle_hirose_gf8_variable_leaf_invin_bytes(size_t leaf_data_bytes);
 size_t merkle_hirose_gf8_inode_invin_bytes(void);
 
 /* In-circuit emission. */
 void merkle_hirose_gf8_fixed32_leaf_circuit(voleith_gf8_circuit_t *c,
+                                            const gf8_wire_id *leaf_data,
+                                            size_t leaf_data_bytes,
+                                            gf8_wire_id *out_node);
+
+void merkle_hirose_gf8_fixed96_leaf_circuit(voleith_gf8_circuit_t *c,
                                             const gf8_wire_id *leaf_data,
                                             size_t leaf_data_bytes,
                                             gf8_wire_id *out_node);
@@ -199,6 +205,10 @@ int merkle_hirose_gf8_fixed32_leaf_build_witness(const uint8_t *leaf_data,
                                                  size_t leaf_data_bytes,
                                                  uint8_t *inv_out);
 
+int merkle_hirose_gf8_fixed96_leaf_build_witness(const uint8_t *leaf_data,
+                                                 size_t leaf_data_bytes,
+                                                 uint8_t *inv_out);
+
 int merkle_hirose_gf8_variable_leaf_build_witness(const uint8_t *leaf_data,
                                                   size_t leaf_data_bytes,
                                                   uint8_t *inv_out);
@@ -211,6 +221,9 @@ int merkle_hirose_gf8_inode_build_witness(const uint8_t *left,
  * on success, -1 on internal allocation failure.  Hirose impls are
  * stack-only and always return 0. */
 int merkle_hirose_fixed32_leaf_hash(const uint8_t *leaf_data,
+                                    size_t leaf_data_bytes, uint8_t *out);
+
+int merkle_hirose_fixed96_leaf_hash(const uint8_t *leaf_data,
                                     size_t leaf_data_bytes, uint8_t *out);
 
 int merkle_hirose_variable_leaf_hash(const uint8_t *leaf_data,

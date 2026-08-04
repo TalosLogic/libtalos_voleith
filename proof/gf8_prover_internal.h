@@ -44,8 +44,15 @@ int voleith_gf8_qs_prove_unchecked(const voleith_gf8_circuit_t *circuit,
                                    const uint8_t *instance, unsigned int lambda,
                                    const uint8_t *u, const uint8_t **V,
                                    const uint8_t *chall_2, uint8_t *d_out,
-                                   uint8_t *a0_tilde, uint8_t *a1_tilde,
-                                   uint8_t *a2_tilde);
+                                   uint8_t *const *a_out);
+
+/*
+ * Test-only syndrome accumulator selector (shared by the gf8 prover and
+ * verifier).  0 = collapsed production accumulator; nonzero = the reference
+ * (pre-collapse) accumulator.  The verdict cross-check runs a full pipeline in
+ * each mode and asserts identical accept/reject.  Never set in production.
+ */
+extern int voleith_gf8_syndrome_ref_mode;
 
 #ifdef __cplusplus
 }

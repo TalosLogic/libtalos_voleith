@@ -46,9 +46,9 @@ size_t voleith_gf16_qs_ellhat(const voleith_gf16_circuit_t *circuit,
  * V:         array of lambda pointers, each ellhat_bytes of a V matrix row
  * chall_2:   ZKHash parameters, 3*lambda/8+8 bytes
  * d_out:     output: VOLE correction, 2*ell bytes (16-bit LE per slot)
- * a0_tilde:  output: degree-0 hash, lambda/8 bytes
- * a1_tilde:  output: degree-1 hash, lambda/8 bytes
- * a2_tilde:  output: degree-2 hash, lambda/8 bytes
+ * a_out:     array of d+1 output buffers; a_out[i] receives coefficient a_i
+ *            (a_out[0] = degree-0 hash), each lambda/8 bytes.  d is the opening
+ *            count for this circuit (voleith_gf16_circuit_qs_degree, 2 today).
  *
  * Returns 0 on success, -1 on allocation failure or invalid parameters.
  */
@@ -57,8 +57,7 @@ int voleith_gf16_qs_prove(const voleith_gf16_circuit_t *circuit,
                           const voleith_gf16_t *instance, unsigned int lambda,
                           const uint8_t *u, const uint8_t **V,
                           const uint8_t *chall_2, uint8_t *d_out,
-                          uint8_t *a0_tilde, uint8_t *a1_tilde,
-                          uint8_t *a2_tilde);
+                          uint8_t *const *a_out);
 
 /*
  * Compute only the VOLE correction d, without the full QuickSilver hash.

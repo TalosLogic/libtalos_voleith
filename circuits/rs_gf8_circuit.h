@@ -156,6 +156,39 @@ typedef struct voleith_rs_layout {
     size_t inst_epoch_dirs_bytes; /* = depth_e */
     size_t depth_e;
 
+    /* ----- V5 designated opener (enable_opener) -------------------- */
+    /* witness: the lambda/8-byte id leaf-preimage handle (Q2).  Q8: this is
+     * the SAME witness as the V4 commitment id when V4 is also on
+     * (opener_id_off == commit_id_off), else a dedicated opener id section.
+     * The id is appended to the OWF leaf preimage (sk-or-epoch_root || attrs
+     * || salt || id), so owf_invin_bytes already reflects the widened preimage.
+     * OP.CIRC.1 lands the id-in-leaf binding; the bit-packed support, s /
+     * tag_ct instance, hash_id, KDF and DEM sections arrive in OP.CIRC.2-4.
+     * All fields are 0 when the opener is off. */
+    size_t opener_id_off;
+    size_t opener_id_bytes; /* = key_bytes = lambda/8 */
+
+    /* OP.CIRC.2: witness = the bit-packed support of e (msg_bytes GF(2^8)
+     * byte wires, LSB-first at idx_bits per index); instance = the p syndrome
+     * bit wires (packer-derived from the packed s bytes).  The syndrome +
+     * well-formedness constraints (rs_opener_gf8_circuit) read these. */
+    size_t opener_support_off;
+    size_t opener_support_bytes; /* = msg_bytes = ceil(t*idx_bits/8) */
+    size_t inst_opener_s_off;
+    size_t inst_opener_s_bytes; /* = p (one instance wire per syndrome bit) */
+
+    /* OP.CIRC.3: instance = tag_ct (key_bytes = lambda/8), the XOR-OTP DEM
+     * ciphertext tag_ct == K XOR id.  hash_id is NOT a circuit wire (it rides
+     * the cfg-fingerprint + serialized tag). */
+    size_t inst_opener_tag_ct_off;
+    size_t inst_opener_tag_ct_bytes; /* = key_bytes = lambda/8 */
+
+    /* OP.CIRC.4: witness = the KDF S-box inv_in (the only witnesses the KDF
+     * gadget adds, contiguous after the support), filled by the packer via
+     * voleith_rs_opener_kdf_{aesdm,grostl256}_build_witness. */
+    size_t opener_kdf_invin_off;
+    size_t opener_kdf_invin_bytes;
+
     /* ----- superset totals ----------------------------------------- */
     size_t witness_bytes;
     size_t instance_bytes;
@@ -203,9 +236,24 @@ typedef struct voleith_rs_layout {
  *     exact 1.8.0 wire/gate stream.
  *   commitment (cfg->enable_commitment): binds a hiding commitment
  *     C = tree_vt->leaf_hash(id || rand) as a public instance, with id
- *     (the leaf-preimage handle shared with the future V5 opener) and
- *     rand (high-entropy blinding) as witnesses.  The gate emits after
- *     the membership root binding and before the nullifier (§1.3 step D).
+ *     (the leaf-preimage handle shared with the V5 opener) and rand
+ *     (high-entropy blinding) as witnesses.  The gate emits after the
+ *     membership root binding and before the nullifier (§1.3 step D).
+ *   opener (cfg->enable_opener, V5 designated opener): OP.CIRC.1 appends
+ *     the lambda/8 id to the OWF leaf preimage (leaf = OWF(sk-or-epoch_root
+ *     || attrs || salt || id), Q2), binding "the id I encrypted" to "the
+ *     leaf I proved" on the same wires.  Q8: the id is the SAME witness as
+ *     the V4 commitment id when V4 is on (opener_id_off == commit_id_off),
+ *     else a dedicated id witness.  It forces an OWF even in the V6-no-V3
+ *     case.  OP.CIRC.2 adds the bit-packed support witness (msg_bytes) and the
+ *     s bit instance, emitting s = M*e^T + UNIFORM weight-t well-formedness via
+ *     rs_opener_syndrome_gf8 (raising the opening degree to idx_bits+1).
+ *     OP.CIRC.3 adds the tag_ct instance and the KDF+DEM clause
+ *     (K = argus_kdf(ds_iv, support); assert tag_ct == K XOR id): AES-DM at
+ *     lambda=128 (rs_opener_dem_aesdm_gf8) and Grostl-256 at lambda=256
+ *     (rs_opener_dem_grostl256_gf8), dispatched on the set's prim_default.
+ *     hash_id is bound by the cfg-fingerprint, not a circuit wire.  Inert when
+ *     enable_opener == 0.
  *
  * cfg is validated via voleith_rs_config_validate.  Returns 0 on
  * success and fills *layout_out; returns -1 on NULL argument, config

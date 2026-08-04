@@ -28,17 +28,22 @@ The Boyar-Peralta (2012) computer-searched S-box reduces AND gate count to 32 pe
 
 3. **Drop-in replacement available if needed.** If proof size in the bit-level variant becomes a concern, replacing `gf8_inv` in `circuits/aes_circuit.c` with the Boyar-Peralta circuit (32 AND gates) is a contained, protocol-neutral change with no API impact.
 
-## FAEST "norm trick" not implemented
+## FAEST "norm trick": applicable, deferred (not inapplicable)
 
-The FAEST v2.0 specification (Section 6) describes an "InvNorm" optimisation for the AES S-box: instead of committing to the full 8-bit inverse witness `x⁻¹`, the prover commits only to a 4-bit element `c = x¹⁷ ∈ GF(2⁴)`. This reduces the raw inversion witness from 1 byte to 0.5 bytes per S-box.
+Vocabulary, used to avoid overloading the word "degree":
 
-The norm trick is part of the FAEST-EM extended witness model and applies only to the **bit-level circuit variant**. In that model the S-box *output* is also separately committed as an additional witness element (1 byte per S-box), because `ZK.SBoxAffine` must verify the affine output transformation using the committed Galois conjugates of `c`. The net cost per S-box is therefore 0.5 + 1 = **1.5 bytes**, compared to this library's current **1 byte** (a single `inv_in` witness).
+- **R = relation degree**: the algebraic degree of the constraint equation.
+- **d = opening count**: the number of coefficients `a₁..a_d` the proof transmits (`a₀` is recomputed by the verifier). This is what sets `ellhat`, the QuickSilver mask region, and the `a_tilde` serialization.
 
-In the GF(2^8) element-level variant, each S-box already costs exactly one `inv_in` witness byte regardless of how the inversion is decomposed internally. The norm trick has no meaning in this model: there is no separate "output wire" to commit to, and `assert_product` checks are free. The GF(2^8) variant is already at the minimum achievable cost of 1 byte per S-box.
+FAEST v2.0 (spec Section 6) uses an "InvNorm" optimisation for the AES S-box, and uses it on the live prove path (verified in `third_party/faest-ref/faest_aes.c.in`: a 4-bit norm nibble is committed per S-box, `... & 0xf`). Instead of the full 8-bit inverse `x⁻¹`, the prover commits the 4-bit subfield norm `c = N_{F2⁸/F2⁴}(x⁻¹) = x⁻¹⁷ ∈ GF(2⁴)`, reconstructs `x⁻¹ = x¹⁶·c` with a free Frobenius, and checks the relation `c·a²·a¹⁶ = a`.
 
-The norm trick therefore does not apply to the general-purpose circuit model used here and would *increase* witness size by 50% in the bit-level variant if naively adopted.
+This is a **GF(2⁸) construction, not a bit-level one**: FAEST carries each byte in GF(2^λ) via `byte_combine` and its 8 Galois conjugates, and the norm is a GF(2⁸)→GF(2⁴) subfield norm of a byte. It **reduces** witness size: FAEST commits the 4-bit norm on even rounds and the full state on odd rounds (the degree reset), averaging about 6 committed bits per S-box versus 8, roughly a 25% saving.
 
-The correct interpretation of FAEST Figure 6.6 `InvNormToConjugates` is that the 0.5-byte norm element `c = x¹⁷` and the 1-byte separately committed S-box output `y` are two parts of the same per-S-box witness package. The FAEST signature scheme can use this split because its S-box is specifically the AES-128 SubBytes and its bit-level circuit is hand-tailored to the FAEST-EM extended witness model. A general-purpose bit-level circuit library that does not pre-commit S-box outputs separately cannot capture the norm-trick saving without re-architecting its entire witness layout, at which point the saving (relative to the GF(2^8) variant's 1 byte per S-box) is negative.
+Its **relation degree is R = 3**, but its **opening count stays d = 2**. FAEST parks the target so the top (Δ³) coefficient becomes the equality residual `c·a²·a¹⁶ − a`, which is zero for an honest prover and is still caught for a cheating one by the Δ-evaluation, so the whole proof still opens only `a₀/a₁/a₂` (verified: faest-ref uses the 3-coefficient `zk_hash_*_3`). So the norm does not raise the opening count and does not add a mask block.
+
+It is **not implemented here because it is not a drop-in**, not because it does not apply. voleith's current gf8 S-box commits the full inverse, which makes the affine a free bit-linear map and produces a normal committed output byte usable by arbitrary downstream gates. The norm form holds `x⁻¹` only as a field element in the conjugate domain, so the affine becomes a conjugate-domain F₂-linear map over the Galois conjugates, and the surrounding AES rounds must stay in that domain (FAEST-EM even/odd SubBytes structure). Adopting it is therefore an AES/Grøstl gadget rewrite into the conjugate domain, the same work the FAEST-EM byte-exact compat mode needs, and is deferred to that milestone.
+
+Correction (2026-07-27): an earlier version of this section claimed the norm applies only to a bit-level variant, has "no meaning" in the GF(2⁸) model, and would increase witness size by 50%. That was wrong on all three points: the norm is a GF(2⁸) subfield construction that FAEST adopts specifically to shrink witness, and it keeps `d = 2`. The only real cost is the conjugate-domain gadget rewrite.
 
 ## AES-CMAC for KDF, not raw AES-CTR or Keccak
 
@@ -288,3 +293,67 @@ The body owns only the path traversal, the direction handling (static swap for p
 **Existing fixed-hash entry points are unchanged.**  `merkle_gf8_path_circuit`, `merkle_grostl_gf8_path_circuit`, and their secret-dir / indexed counterparts stay in place; the vt-driven additions are purely additive.  Collapsing the fixed-hash entries to thin wrappers around the generic body is a future-work item that has no observable effect on the proof system (the gate streams are already identical).
 
 **Shipshape exposure.**  The secret-direction vt-driven path and indexed-non-member circuits are also reachable from `.ship` files through the crypto-v2 Tier 2a registry (see "Hash-parametric crypto extensions (crypto-v2)" in `docs/DESIGN.md`).  The registry inlines these same C vt builders by reference; a `.ship` call and a direct C call produce a byte-identical gate stream.
+
+## Designated-opener gadgets: syndrome relation, less-than chain, KDF/DEM
+
+The designated-opener capability (the V5 ring-signature module; see
+[`docs/RING_SIGNATURES_DESIGN.md`](RING_SIGNATURES_DESIGN.md)) proves in circuit
+that a public tag traces to the signer's identity through a QC-MDPC syndrome.
+It opens QuickSilver constraints above the degree-2 baseline (at `idx_bits + 1`,
+16 to 18 across the shipped sets); the opening-count mechanism itself is in
+[`docs/DESIGN.md`](DESIGN.md) ("Degree-d QuickSilver openings"). The gadgets:
+
+**Syndrome relation (`voleith_gf8_assert_syndrome`).** The signer commits a
+fixed-weight error `e` as its sparse support: `t` indices of `idx_bits` bits
+each (`idx_bits = ceil(log2 n)`, 15 to 17 for the shipped sets), never the dense
+`n`-bit vector. The
+gadget asserts `s = M * e^T` for the public parity block `M` and the public
+syndrome `s` directly against that sparse commitment. The dense bit at position
+`i` is an equality polynomial of the committed index bits, so each syndrome bit
+`j` is `synd_j = sum_{k, i : M[j,i]=1} E_i^(k)`, a degree-`idx_bits` constraint. Rather than push `p` such constraints, the prover
+folds them through the zk_hash Horner key `s` (a Fiat-Shamir challenge):
+`sum_j s^j (synd_j XOR s_j) = 0`, which collapses the public matrix into a
+per-column weight `R_i = sum_{j:M[j,i]=1} s^j` and evaluates all leaves with a
+fixed-schedule product tree (no secret-indexed selection). One degree-`idx_bits`
+vector is pushed; the equality holds for all `j` except with probability
+`<= (p-1)/2^lambda` over the hidden `s` (Schwartz-Zippel, the same bound the
+zk_hash already relies on to separate its batched constraints). The opening
+count is therefore `idx_bits`, not `p`.
+
+**Uniform-weight-`t` well-formedness: the less-than chain
+(`voleith_gf8_assert_lt`).** The syndrome relation is sound only if the committed
+support really is a weight-`t` set of distinct in-range indices. A degree-`(w+1)`
+less-than gadget (the same comparator that backs indexed-Merkle non-membership,
+generalized to open at degree `w+1` for a `w`-bit operand) enforces this with a
+strict-ascending chain: `assert_lt(idx[k], idx[k+1])` for all `t-1` adjacent
+pairs gives distinct + ascending + canonical in one shot, and a single top
+`assert_lt(idx[t-1], n)` forces every index `< n` (all earlier indices are
+smaller by the chain). Both are soundness-critical under uniform weight-`t`: an
+out-of-range index would contribute a phantom zero column and desync the
+committed support from what the opener reconstructs, so the range check is not
+optional. These are zero-slot constraints (no multiply gates, no extra witness),
+batched into the same syndrome zk_hash.
+
+**Opener KDF and DEM.** The tag is `prim_id || s || tag_ct`, where
+`tag_ct = id XOR KDF(support(e))` (the byte recipe is authoritative in the
+companion KEM libtalos_syndrome, its `docs/DESIGN.md` §6). The KDF is a
+fixed-input message-keyed Davies-Meyer over AES (lambda128) or a fixed-input
+Grøstl-256 compression (lambda256), hashing the bit-packed ascending support
+byte-identically to the companion KEM's decap so an off-circuit opener recovers
+the same key. The DEM is
+a one-time pad (`id` is a fixed lambda-bit leaf preimage, so the pad is the KDF
+output truncated, no counter); its integrity is supplied by the enclosing
+VOLEitH proof, not by an AEAD tag. Both gadgets are ordinary free-affine +
+inversion-witness circuits; the KDF adds one S-box block schedule per support
+block, and the whole opener is hash-dominated once the sparse syndrome relation
+removes the dense error.
+
+**Leaf capacity for the opener id.** The opener id lives inside the membership
+leaf preimage (`OWF(sk || attributes || id)`), so the leaf hash must accept a
+preimage wider than one compression block. The multi-block fixed-input node
+hashes cover this: `grostl256_fixed128` (128-byte leaf capacity, 2^128 CR),
+`grostl512_fixed256` (256-byte, 2^256 CR), and the six-block `hirose_fixed96`
+(96-byte, 2^128 CR). Each is a fixed-length MD chain with block-count domain
+separation (a k-block leaf can never collide with a shorter leaf or an inode),
+and the config validator rejects any preimage wider than the vt's advertised
+`leaf_block_bytes` before circuit construction.

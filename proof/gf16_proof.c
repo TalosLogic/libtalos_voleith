@@ -25,6 +25,7 @@
 #include "fiat_shamir.h"
 #include "gf16_circuit_fingerprint.h"
 #include "gf16_prover.h"
+#include "qs_degree.h"
 #include "gf16_verifier.h"
 #include "params_fingerprint.h"
 #include "proof_header.h"
@@ -56,6 +57,7 @@ struct voleith_gf16_prover_commit_t {
     size_t utilde_bytes;
     size_t decom_size;
     size_t proof_size;
+    unsigned int qs_degree; /* QS constraint degree d (d=2 baseline) */
     uint8_t *pbuf;
 };
 
@@ -65,8 +67,7 @@ struct voleith_gf16_verifier_reconstruct_t {
     uint8_t **Q;
     uint8_t *u_tilde_copy;
     uint8_t *d_copy;
-    uint8_t *a1_tilde_copy;
-    uint8_t *a2_tilde_copy;
+    uint8_t *a_tilde_copy[VOLEITH_QS_D_MAX]; /* a_1..a_d, qs_degree live */
     uint8_t chall_3[32];
     uint32_t ctr_val;
     size_t ell;
@@ -74,6 +75,7 @@ struct voleith_gf16_verifier_reconstruct_t {
     size_t ell_bytes;
     size_t n_instance;
     size_t utilde_bytes;
+    unsigned int qs_degree; /* QS constraint degree d (d=2 baseline) */
 };
 
 /* ================================================================
@@ -129,10 +131,10 @@ absorb_instance(voleith_transcript_t *t, const voleith_gf16_t *instance,
  */
 static void
 proof_layout(const uint8_t *base, const voleith_params_t *params,
-             size_t ellhat_bytes, size_t ell_bytes, size_t decom_size,
-             const uint8_t **c_out, const uint8_t **u_tilde_out,
-             const uint8_t **d_out, const uint8_t **a1_tilde_out,
-             const uint8_t **a2_tilde_out, const uint8_t **decom_i_out,
+             unsigned int d, size_t ellhat_bytes, size_t ell_bytes,
+             size_t decom_size, const uint8_t **c_out,
+             const uint8_t **u_tilde_out, const uint8_t **d_out,
+             const uint8_t **a_tilde_out, const uint8_t **decom_i_out,
              const uint8_t **chall_3_out, const uint8_t **iv_out,
              const uint8_t **ctr_out)
 {
@@ -149,12 +151,12 @@ proof_layout(const uint8_t *base, const voleith_params_t *params,
     if (d_out)
         *d_out = p;
     p += ell_bytes;
-    if (a1_tilde_out)
-        *a1_tilde_out = p;
-    p += nb;
-    if (a2_tilde_out)
-        *a2_tilde_out = p;
-    p += nb;
+    /* d opened coefficients a_1..a_d (a_0 recomputed by verifier). */
+    for (unsigned int i = 0; i < d; i++) {
+        if (a_tilde_out)
+            a_tilde_out[i] = p;
+        p += nb;
+    }
     if (decom_i_out)
         *decom_i_out = p;
     p += decom_size;
@@ -169,19 +171,18 @@ proof_layout(const uint8_t *base, const voleith_params_t *params,
 }
 
 static void
-proof_layout_w(uint8_t *base, const voleith_params_t *params,
+proof_layout_w(uint8_t *base, const voleith_params_t *params, unsigned int d,
                size_t ellhat_bytes, size_t ell_bytes, size_t decom_size,
                uint8_t **c_out, uint8_t **u_tilde_out, uint8_t **d_out,
-               uint8_t **a1_tilde_out, uint8_t **a2_tilde_out,
-               uint8_t **decom_i_out, uint8_t **chall_3_out, uint8_t **iv_out,
-               uint8_t **ctr_out)
+               uint8_t **a_tilde_out, uint8_t **decom_i_out,
+               uint8_t **chall_3_out, uint8_t **iv_out, uint8_t **ctr_out)
 {
-    proof_layout((const uint8_t *)base, params, ellhat_bytes, ell_bytes,
+    proof_layout((const uint8_t *)base, params, d, ellhat_bytes, ell_bytes,
                  decom_size, (const uint8_t **)c_out,
                  (const uint8_t **)u_tilde_out, (const uint8_t **)d_out,
-                 (const uint8_t **)a1_tilde_out, (const uint8_t **)a2_tilde_out,
-                 (const uint8_t **)decom_i_out, (const uint8_t **)chall_3_out,
-                 (const uint8_t **)iv_out, (const uint8_t **)ctr_out);
+                 (const uint8_t **)a_tilde_out, (const uint8_t **)decom_i_out,
+                 (const uint8_t **)chall_3_out, (const uint8_t **)iv_out,
+                 (const uint8_t **)ctr_out);
 }
 
 /* ================================================================
@@ -193,18 +194,19 @@ proof_layout_w(uint8_t *base, const voleith_params_t *params,
  * voleith_gf16_proof_byte_size wraps this and adds the v1 metadata header.
  */
 static size_t
-gf16_proof_body_byte_size(const voleith_params_t *params, size_t ell)
+gf16_proof_body_byte_size(const voleith_params_t *params, unsigned int d,
+                          size_t ell)
 {
     unsigned int nb = params->lambda / 8;
-    size_t ellhat_bytes = 2u * ell + (3u * params->lambda + 16u + 7u) / 8u;
+    size_t ellhat_bytes =
+        2u * ell + ((d + 1u) * params->lambda + 16u + 7u) / 8u;
     size_t ell_bytes = 2u * ell; /* d is 2 bytes per element slot */
     size_t utilde_bytes = nb + VOLEITH_VOLE_HASH_B;
     size_t decom_size =
         ((size_t)params->n_leafcom * params->tau + (size_t)params->T_open) * nb;
 
     return (params->tau - 1u) * ellhat_bytes + utilde_bytes + ell_bytes +
-           nb                /* a1_tilde */
-           + nb              /* a2_tilde */
+           (size_t)d * nb    /* a_1..a_d */
            + decom_size + nb /* chall_3 */
            + IV_SIZE + 4u;   /* ctr */
 }
@@ -212,7 +214,23 @@ gf16_proof_body_byte_size(const voleith_params_t *params, size_t ell)
 size_t
 voleith_gf16_proof_byte_size(const voleith_params_t *params, size_t ell)
 {
-    return VOLEITH_PROOF_HEADER_BYTES + gf16_proof_body_byte_size(params, ell);
+    /* Public size helper keyed on (params, ell); no circuit, so it assumes the
+     * degree-2 baseline.  Degree-d circuits must use
+     * voleith_gf16_proof_byte_size_circuit(). */
+    return VOLEITH_PROOF_HEADER_BYTES +
+           gf16_proof_body_byte_size(params, 2u, ell);
+}
+
+size_t
+voleith_gf16_proof_byte_size_circuit(const voleith_params_t *params,
+                                     const voleith_gf16_circuit_t *circuit)
+{
+    if (!params || !circuit)
+        return 0;
+    unsigned int d = voleith_gf16_circuit_qs_degree(circuit);
+    size_t ell = voleith_gf16_qs_ell(circuit);
+    return VOLEITH_PROOF_HEADER_BYTES +
+           gf16_proof_body_byte_size(params, d, ell);
 }
 
 static voleith_param_set_id_t
@@ -311,8 +329,10 @@ voleith_gf16_prove_commit(voleith_gf16_prover_commit_t **ctx_out,
         return -1;
     }
 
+    ctx->qs_degree = voleith_gf16_circuit_qs_degree(circuit);
     ctx->decom_size = voleith_bavc_opening_size(&ctx->vcp);
-    ctx->proof_size = voleith_gf16_proof_byte_size(params, ell);
+    ctx->proof_size = VOLEITH_PROOF_HEADER_BYTES +
+                      gf16_proof_body_byte_size(params, ctx->qs_degree, ell);
 
     ctx->pbuf = calloc(ctx->proof_size, 1);
     if (!ctx->pbuf) {
@@ -328,11 +348,12 @@ voleith_gf16_prove_commit(voleith_gf16_prover_commit_t **ctx_out,
     const uint8_t *header_bytes = ctx->pbuf;
     uint8_t *body_base = ctx->pbuf + VOLEITH_PROOF_HEADER_BYTES;
 
-    uint8_t *c_ptr, *u_tilde_ptr, *d_ptr, *a1_ptr, *a2_ptr;
+    uint8_t *c_ptr, *u_tilde_ptr, *d_ptr;
+    uint8_t *a_ptr[VOLEITH_QS_D_MAX];
     uint8_t *decom_ptr, *chall3_ptr, *iv_ptr, *ctr_ptr;
-    proof_layout_w(body_base, params, ellhat_bytes, ell_bytes, ctx->decom_size,
-                   &c_ptr, &u_tilde_ptr, &d_ptr, &a1_ptr, &a2_ptr, &decom_ptr,
-                   &chall3_ptr, &iv_ptr, &ctr_ptr);
+    proof_layout_w(body_base, params, ctx->qs_degree, ellhat_bytes, ell_bytes,
+                   ctx->decom_size, &c_ptr, &u_tilde_ptr, &d_ptr, a_ptr,
+                   &decom_ptr, &chall3_ptr, &iv_ptr, &ctr_ptr);
 
     /* Step 1: root_seed || iv = H_3(header || fs_seed). */
     uint8_t root_seed[32];
@@ -393,11 +414,11 @@ voleith_gf16_prove_respond(voleith_proof_t *proof_out,
     size_t ellhat_bytes = ctx->ellhat_bytes;
     size_t utilde_bytes = ctx->utilde_bytes;
 
-    uint8_t *c, *u_tilde, *d, *a1_tilde, *a2_tilde, *decom_i, *chall_3, *iv,
-        *ctr;
-    proof_layout_w(ctx->pbuf + VOLEITH_PROOF_HEADER_BYTES, params, ellhat_bytes,
-                   ell_bytes, ctx->decom_size, &c, &u_tilde, &d, &a1_tilde,
-                   &a2_tilde, &decom_i, &chall_3, &iv, &ctr);
+    uint8_t *c, *u_tilde, *d, *decom_i, *chall_3, *iv, *ctr;
+    uint8_t *a_tilde[VOLEITH_QS_D_MAX]; /* a_1..a_d, ctx->qs_degree live */
+    proof_layout_w(ctx->pbuf + VOLEITH_PROOF_HEADER_BYTES, params,
+                   ctx->qs_degree, ellhat_bytes, ell_bytes, ctx->decom_size, &c,
+                   &u_tilde, &d, a_tilde, &decom_i, &chall_3, &iv, &ctr);
 
     /* Step 4: u_tilde = VOLEHash(chall_1, u, ell). */
     voleith_vole_hash(u_tilde, chall_1, ctx->com.u, ell, lambda);
@@ -440,10 +461,14 @@ voleith_gf16_prove_respond(voleith_proof_t *proof_out,
         } else
             d_dyn = d_tmp_stack;
 
-        int ret =
-            voleith_gf16_qs_prove(circuit, witness, instance, lambda,
-                                  ctx->com.u, (const uint8_t **)ctx->state.v,
-                                  chall_2, d_dyn, a0_tilde, a1_tilde, a2_tilde);
+        /* a_out[0] = a_0 (local), a_out[i] = a_i -> serialized a_tilde[i-1]. */
+        uint8_t *a_out[VOLEITH_QS_COEFFS_MAX];
+        a_out[0] = a0_tilde;
+        for (unsigned int i = 1; i <= ctx->qs_degree; i++)
+            a_out[i] = a_tilde[i - 1];
+        int ret = voleith_gf16_qs_prove(
+            circuit, witness, instance, lambda, ctx->com.u,
+            (const uint8_t **)ctx->state.v, chall_2, d_dyn, a_out);
         if (d_tmp_heap) {
             voleith_secure_zero(d_tmp_heap, ell_bytes);
             free(d_tmp_heap);
@@ -461,8 +486,8 @@ voleith_gf16_prove_respond(voleith_proof_t *proof_out,
         voleith_transcript_init(&t, lambda, VOLEITH_FS_H2_3);
         voleith_transcript_absorb(&t, chall_2, 3 * nb + 8);
         voleith_transcript_absorb(&t, a0_tilde, nb);
-        voleith_transcript_absorb(&t, a1_tilde, nb);
-        voleith_transcript_absorb(&t, a2_tilde, nb);
+        for (unsigned int i = 0; i < ctx->qs_degree; i++)
+            voleith_transcript_absorb(&t, a_tilde[i], nb);
         uint8_t ctr_bytes[4];
         memcpy(ctr_bytes, &ctr_val, 4);
         voleith_transcript_absorb(&t, ctr_bytes, 4);
@@ -542,8 +567,10 @@ gf16_verify_reconstruct_body(voleith_gf16_verifier_reconstruct_t **ctx_out,
     if (make_vc_params(&vcp, params) != 0)
         return -1;
 
+    unsigned int qs_degree = voleith_gf16_circuit_qs_degree(circuit);
     size_t decom_size = voleith_bavc_opening_size(&vcp);
-    size_t expected_body_size = gf16_proof_body_byte_size(params, ell);
+    size_t expected_body_size =
+        gf16_proof_body_byte_size(params, qs_degree, ell);
 
     if (body_proof->len != expected_body_size)
         return -1;
@@ -551,11 +578,11 @@ gf16_verify_reconstruct_body(voleith_gf16_verifier_reconstruct_t **ctx_out,
     const voleith_proof_t *proof = body_proof;
     uint8_t *commitment_out = body_blob_out;
 
-    const uint8_t *c, *u_tilde, *d, *a1_tilde, *a2_tilde, *decom_i_ptr,
-        *chall_3_ptr, *iv, *ctr_ptr;
-    proof_layout(proof->data, params, ellhat_bytes, ell_bytes, decom_size, &c,
-                 &u_tilde, &d, &a1_tilde, &a2_tilde, &decom_i_ptr, &chall_3_ptr,
-                 &iv, &ctr_ptr);
+    const uint8_t *c, *u_tilde, *d, *decom_i_ptr, *chall_3_ptr, *iv, *ctr_ptr;
+    const uint8_t *a_tilde[VOLEITH_QS_D_MAX]; /* a_1..a_d, qs_degree live */
+    proof_layout(proof->data, params, qs_degree, ellhat_bytes, ell_bytes,
+                 decom_size, &c, &u_tilde, &d, a_tilde, &decom_i_ptr,
+                 &chall_3_ptr, &iv, &ctr_ptr);
 
     if (!check_grinding(chall_3_ptr, lambda, params->w_grind))
         return -1;
@@ -574,22 +601,27 @@ gf16_verify_reconstruct_body(voleith_gf16_verifier_reconstruct_t **ctx_out,
     ctx->ell_bytes = ell_bytes;
     ctx->n_instance = n_instance;
     ctx->utilde_bytes = utilde_bytes;
+    ctx->qs_degree = qs_degree;
     memcpy(ctx->chall_3, chall_3_ptr, nb);
     memcpy(&ctx->ctr_val, ctr_ptr, 4);
 
     ctx->u_tilde_copy = malloc(utilde_bytes);
     ctx->d_copy = malloc(ell_bytes);
-    ctx->a1_tilde_copy = malloc(nb);
-    ctx->a2_tilde_copy = malloc(nb);
-    if (!ctx->u_tilde_copy || !ctx->d_copy || !ctx->a1_tilde_copy ||
-        !ctx->a2_tilde_copy) {
+    if (!ctx->u_tilde_copy || !ctx->d_copy) {
         voleith_gf16_verifier_reconstruct_free(ctx);
         return -1;
     }
+    for (unsigned int i = 0; i < qs_degree; i++) {
+        ctx->a_tilde_copy[i] = malloc(nb);
+        if (!ctx->a_tilde_copy[i]) {
+            voleith_gf16_verifier_reconstruct_free(ctx);
+            return -1;
+        }
+    }
     memcpy(ctx->u_tilde_copy, u_tilde, utilde_bytes);
     memcpy(ctx->d_copy, d, ell_bytes);
-    memcpy(ctx->a1_tilde_copy, a1_tilde, nb);
-    memcpy(ctx->a2_tilde_copy, a2_tilde, nb);
+    for (unsigned int i = 0; i < qs_degree; i++)
+        memcpy(ctx->a_tilde_copy[i], a_tilde[i], nb);
 
     ctx->Q = calloc(lambda, sizeof(uint8_t *));
     if (!ctx->Q) {
@@ -695,10 +727,13 @@ voleith_gf16_verify_respond(voleith_gf16_verifier_reconstruct_t *ctx,
 
     /* Step 7: QuickSilver verify. */
     uint8_t a0_tilde_out[32];
+    /* a_in[i] = a_i for i = 1..qs_degree <- serialized a_tilde_copy[i-1]. */
+    const uint8_t *a_in[VOLEITH_QS_COEFFS_MAX] = {0};
+    for (unsigned int i = 1; i <= ctx->qs_degree; i++)
+        a_in[i] = ctx->a_tilde_copy[i - 1];
     if (voleith_gf16_qs_verify(circuit, instance, lambda,
                                (const uint8_t **)ctx->Q, ctx->d_copy,
-                               ctx->chall_3, chall_2, ctx->a1_tilde_copy,
-                               ctx->a2_tilde_copy, a0_tilde_out) != 0)
+                               ctx->chall_3, chall_2, a_in, a0_tilde_out) != 0)
         return -1;
 
     /* Step 8: recompute chall_3' and compare. */
@@ -708,8 +743,8 @@ voleith_gf16_verify_respond(voleith_gf16_verifier_reconstruct_t *ctx,
         voleith_transcript_init(&t, lambda, VOLEITH_FS_H2_3);
         voleith_transcript_absorb(&t, chall_2, 3 * nb + 8);
         voleith_transcript_absorb(&t, a0_tilde_out, nb);
-        voleith_transcript_absorb(&t, ctx->a1_tilde_copy, nb);
-        voleith_transcript_absorb(&t, ctx->a2_tilde_copy, nb);
+        for (unsigned int i = 0; i < ctx->qs_degree; i++)
+            voleith_transcript_absorb(&t, ctx->a_tilde_copy[i], nb);
         uint8_t ctr_bytes[4];
         memcpy(ctr_bytes, &ctx->ctr_val, 4);
         voleith_transcript_absorb(&t, ctr_bytes, 4);
@@ -741,13 +776,11 @@ voleith_gf16_verifier_reconstruct_free(voleith_gf16_verifier_reconstruct_t *ctx)
         voleith_secure_zero(ctx->d_copy, ctx->ell_bytes);
         free(ctx->d_copy);
     }
-    if (ctx->a1_tilde_copy) {
-        voleith_secure_zero(ctx->a1_tilde_copy, ctx->params.lambda / 8);
-        free(ctx->a1_tilde_copy);
-    }
-    if (ctx->a2_tilde_copy) {
-        voleith_secure_zero(ctx->a2_tilde_copy, ctx->params.lambda / 8);
-        free(ctx->a2_tilde_copy);
+    for (unsigned int i = 0; i < VOLEITH_QS_D_MAX; i++) {
+        if (ctx->a_tilde_copy[i]) {
+            voleith_secure_zero(ctx->a_tilde_copy[i], ctx->params.lambda / 8);
+            free(ctx->a_tilde_copy[i]);
+        }
     }
     free(ctx);
 }

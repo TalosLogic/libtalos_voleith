@@ -25,6 +25,7 @@
 
 #include "verifier.h"
 #include "circuit.h"
+#include "qs_degree.h"
 #include "../core/field.h"
 #include "../core/util.h"
 
@@ -344,24 +345,31 @@ voleith_qs_verify(const voleith_circuit_t *circuit, const uint8_t *instance,
     }
 
     /* ------------------------------------------------------------------
-     * Step 4: Compute q_star correction from Q bits beyond ell.
-     *
-     * q_star_0 = sum_poly(Q cols ell..ell+lambda-1)
-     * q_star_1 = sum_poly(Q cols ell+lambda..ell+2*lambda-1)
-     * q_star = q_star_0 + delta * q_star_1
+     * Step 4: Compute the q_star correction from Q columns beyond ell over d
+     * mask blocks (QS_DEGREE_D_DESIGN section 11, verifier side):
+     *   q_star = sum_{j=0..d-1} delta^j * q_star_j,  q_star_j = sum_poly(block j)
+     * At d=2: q_star_0 + delta * q_star_1 (byte-identical to the prior form).
      * ------------------------------------------------------------------ */
+    const unsigned int deg =
+        2; /* degree baseline (param `d` is the correction) */
     uint8_t q_star[32];
     {
-        uint8_t q_star_0[32], q_star_1[32], delta_q_star_1[32];
+        uint8_t q_star_j[32], delta_pow[32], term[32];
 
-        sum_poly_cols_v(q_star_0, tmp1, Q_T, lambda, nb, ell, lambda);
-        sum_poly_cols_v(q_star_1, tmp1, Q_T, lambda, nb, ell + lambda, lambda);
-
-        /* delta * q_star_1 */
-        gf_mul_v(delta_q_star_1, delta, q_star_1, lambda);
-
-        for (unsigned int k = 0; k < nb; k++)
-            q_star[k] = q_star_0[k] ^ delta_q_star_1[k];
+        /* j = 0 term (delta^0 = 1, no multiply). */
+        sum_poly_cols_v(q_star, tmp1, Q_T, lambda, nb, ell, lambda);
+        if (deg > 1)
+            memcpy(delta_pow, delta, nb); /* delta^1 */
+        for (unsigned int j = 1; j < deg; j++) {
+            sum_poly_cols_v(q_star_j, tmp1, Q_T, lambda, nb,
+                            ell + (size_t)j * lambda, lambda);
+            gf_mul_v(term, delta_pow, q_star_j,
+                     lambda); /* delta^j * q_star_j */
+            for (unsigned int k = 0; k < nb; k++)
+                q_star[k] ^= term[k];
+            if (j + 1 < deg)
+                gf_mul_v(delta_pow, delta_pow, delta, lambda);
+        }
     }
 
     /* ------------------------------------------------------------------
@@ -372,22 +380,25 @@ voleith_qs_verify(const voleith_circuit_t *circuit, const uint8_t *instance,
     voleith_secure_zero(&bctx, sizeof(bctx));
 
     /* ------------------------------------------------------------------
-     * Step 6: a0_tilde_out = q_tilde + delta*a1_tilde + delta^2*a2_tilde
+     * Step 6: a0_tilde_out = q_tilde + sum_{i=1..d} delta^i * a_i_tilde.
+     * At d=2: q_tilde + delta*a1 + delta^2*a2.  a_i for i > 2 arrive via
+     * serialization (a later ticket); only a1/a2 exist at d=2.
      * ------------------------------------------------------------------ */
     {
-        uint8_t delta_sq[32], term1[32], term2[32];
+        const uint8_t *a_in[VOLEITH_QS_COEFFS_MAX];
+        uint8_t delta_pow[32], term[32];
 
-        /* delta^2 */
-        gf_mul_v(delta_sq, delta, delta, lambda);
-
-        /* delta * a1_tilde */
-        gf_mul_v(term1, delta, a1_tilde, lambda);
-
-        /* delta^2 * a2_tilde */
-        gf_mul_v(term2, delta_sq, a2_tilde, lambda);
-
-        for (unsigned int k = 0; k < nb; k++)
-            a0_tilde_out[k] = q_tilde[k] ^ term1[k] ^ term2[k];
+        a_in[1] = a1_tilde;
+        a_in[2] = a2_tilde;
+        memcpy(a0_tilde_out, q_tilde, nb);
+        memcpy(delta_pow, delta, nb); /* delta^1 */
+        for (unsigned int i = 1; i <= deg; i++) {
+            gf_mul_v(term, delta_pow, a_in[i], lambda); /* delta^i * a_i */
+            for (unsigned int k = 0; k < nb; k++)
+                a0_tilde_out[k] ^= term[k];
+            if (i < deg)
+                gf_mul_v(delta_pow, delta_pow, delta, lambda);
+        }
     }
 
     free(Q_T);

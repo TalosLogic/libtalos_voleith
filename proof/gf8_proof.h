@@ -45,8 +45,24 @@
  * Compute the proof size in bytes for the given params and GF(2⁸) circuit ell.
  *
  * ell = voleith_gf8_qs_ell(circuit)  (count of GF(2⁸) element slots).
+ *
+ * NOTE: this overload has no circuit, so it cannot know the QuickSilver opening
+ * degree and assumes the degree-2 baseline.  It is correct for every circuit
+ * that uses only MUL / assert_product (degree 2).  For a circuit carrying a
+ * higher-degree constraint (e.g. a less-than / opener circuit) the proof is
+ * larger; use voleith_gf8_proof_byte_size_circuit() instead, which derives both
+ * ell and the opening degree from the circuit.
  */
 size_t voleith_gf8_proof_byte_size(const voleith_params_t *params, size_t ell);
+
+/*
+ * Degree-aware proof size: derives both ell and the QuickSilver opening degree
+ * (voleith_gf8_circuit_qs_degree) from the circuit, so it is correct for
+ * degree-d (d > 2) circuits as well.  Returns 0 on NULL input.
+ */
+size_t
+voleith_gf8_proof_byte_size_circuit(const voleith_params_t *params,
+                                    const voleith_gf8_circuit_t *circuit);
 
 /* ================================================================
  * Prove and verify

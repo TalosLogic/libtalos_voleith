@@ -38,6 +38,10 @@
 #include "gf16_prover_internal.h" /* test-only unchecked prove seam */
 #include "gf16_verifier.h"
 #include "gf16_circuit.h"
+#include "qs_degree.h"    /* VOLEITH_QS_COEFFS_MAX */
+#include "gf16_proof.h"   /* two-phase LT full-proof test */
+#include "proof.h"        /* voleith_params_*, voleith_proof_free */
+#include "proof_header.h" /* VOLEITH_PROOF_HEADER_BYTES */
 #include "field16.h"
 
 #include <stdio.h>
@@ -209,9 +213,10 @@ prove_verify(voleith_gf16_circuit_t *c, const voleith_gf16_t *witness,
     }
 
     uint8_t a0[32] = {0}, a1[32] = {0}, a2[32] = {0};
+    uint8_t *a_out[3] = {a0, a1, a2};
     int pr = voleith_gf16_qs_prove(c, witness, instance, lambda, vs.u,
                                    (const uint8_t **)vs.V_rows, vs.chall_2, d,
-                                   a0, a1, a2);
+                                   a_out);
     if (pr != 0) {
         free(d);
         vole_free(&vs);
@@ -219,9 +224,10 @@ prove_verify(voleith_gf16_circuit_t *c, const voleith_gf16_t *witness,
     }
 
     uint8_t a0_v[32] = {0};
+    const uint8_t *a_in[3] = {NULL, a1, a2};
     int vr =
         voleith_gf16_qs_verify(c, instance, lambda, (const uint8_t **)vs.Q_rows,
-                               d, vs.delta, vs.chall_2, a1, a2, a0_v);
+                               d, vs.delta, vs.chall_2, a_in, a0_v);
     if (vr != 0) {
         free(d);
         vole_free(&vs);
@@ -352,13 +358,14 @@ test_tampered_a1(void)
     voleith_gf16_qs_compute_d(c, witness, instance, vs.u, d);
 
     uint8_t a0[32] = {0}, a1[32] = {0}, a2[32] = {0}, a0_v[32] = {0};
+    uint8_t *a_out[3] = {a0, a1, a2};
     voleith_gf16_qs_prove(c, witness, instance, lambda, vs.u,
-                          (const uint8_t **)vs.V_rows, vs.chall_2, d, a0, a1,
-                          a2);
+                          (const uint8_t **)vs.V_rows, vs.chall_2, d, a_out);
 
     a1[0] ^= 0x42u; /* tamper */
+    const uint8_t *a_in[3] = {NULL, a1, a2};
     voleith_gf16_qs_verify(c, instance, lambda, (const uint8_t **)vs.Q_rows, d,
-                           vs.delta, vs.chall_2, a1, a2, a0_v);
+                           vs.delta, vs.chall_2, a_in, a0_v);
 
     check("tampered a1_tilde: mismatch", memcmp(a0, a0_v, nb) != 0);
 
@@ -477,17 +484,19 @@ forge_verify(voleith_gf16_circuit_t *c, const voleith_gf16_t *witness,
     }
 
     uint8_t a0[32] = {0}, a1[32] = {0}, a2[32] = {0};
+    uint8_t *a_out[3] = {a0, a1, a2};
     if (voleith_gf16_qs_prove_unchecked(c, witness, NULL, lambda, vs.u,
                                         (const uint8_t **)vs.V_rows, vs.chall_2,
-                                        d, a0, a1, a2) != 0) {
+                                        d, a_out) != 0) {
         free(d);
         vole_free(&vs);
         return -2;
     }
 
     uint8_t a0_v[32] = {0};
+    const uint8_t *a_in[3] = {NULL, a1, a2};
     if (voleith_gf16_qs_verify(c, NULL, lambda, (const uint8_t **)vs.Q_rows, d,
-                               vs.delta, vs.chall_2, a1, a2, a0_v) != 0) {
+                               vs.delta, vs.chall_2, a_in, a0_v) != 0) {
         free(d);
         vole_free(&vs);
         return -2;
@@ -669,6 +678,258 @@ test_multiple_mul_gates(void)
 }
 
 /* =====================================================================
+ * Less-than (NLT) degree-(w+1) constraint tests (GF(2^16) mirror).
+ * Negatives use the UNCHECKED prover; a sound verifier must reject.
+ * ===================================================================== */
+
+static int
+run_proof(voleith_gf16_circuit_t *c, const voleith_gf16_t *witness,
+          unsigned int lambda, int use_unchecked)
+{
+    size_t ell = voleith_gf16_qs_ell(c);
+    size_t ellhat_bytes = voleith_gf16_qs_ellhat(c, lambda);
+    unsigned int nb = lambda / 8;
+    unsigned int d = voleith_gf16_circuit_qs_degree(c);
+
+    vole_state_t vs;
+    if (vole_alloc(&vs, lambda, ellhat_bytes) < 0)
+        return -2;
+    prng_reset(0x51EED123u);
+    vole_fill(&vs);
+
+    uint8_t *dcorr = calloc(2 * ell + 1, 1);
+    int rc = -2;
+    if (!dcorr)
+        goto done;
+    if (voleith_gf16_qs_compute_d_unchecked(c, witness, NULL, vs.u, dcorr) < 0)
+        goto done;
+
+    uint8_t a_buf[VOLEITH_QS_COEFFS_MAX][32];
+    uint8_t *a_out[VOLEITH_QS_COEFFS_MAX];
+    memset(a_buf, 0, sizeof(a_buf));
+    for (unsigned int i = 0; i <= d; i++)
+        a_out[i] = a_buf[i];
+
+    int pr = use_unchecked
+                 ? voleith_gf16_qs_prove_unchecked(
+                       c, witness, NULL, lambda, vs.u,
+                       (const uint8_t **)vs.V_rows, vs.chall_2, dcorr, a_out)
+                 : voleith_gf16_qs_prove(c, witness, NULL, lambda, vs.u,
+                                         (const uint8_t **)vs.V_rows,
+                                         vs.chall_2, dcorr, a_out);
+    if (pr != 0) {
+        rc = -2;
+        goto done;
+    }
+
+    const uint8_t *a_in[VOLEITH_QS_COEFFS_MAX];
+    for (unsigned int i = 1; i <= d; i++)
+        a_in[i] = a_buf[i];
+    uint8_t a0_v[32] = {0};
+    if (voleith_gf16_qs_verify(c, NULL, lambda, (const uint8_t **)vs.Q_rows,
+                               dcorr, vs.delta, vs.chall_2, a_in, a0_v) != 0) {
+        rc = -2;
+        goto done;
+    }
+    rc = (memcmp(a_buf[0], a0_v, nb) == 0) ? 1 : 0;
+
+done:
+    free(dcorr);
+    vole_free(&vs);
+    return rc;
+}
+
+static voleith_gf16_circuit_t *
+build_lt_circuit(unsigned int w, int with_product)
+{
+    voleith_gf16_circuit_t *c = voleith_gf16_circuit_new();
+    if (!c)
+        return NULL;
+    gf16_wire_id a_bits[32], b_bits[32];
+    for (unsigned int i = 0; i < w; i++)
+        a_bits[i] = voleith_gf16_add_witness(c);
+    for (unsigned int i = 0; i < w; i++)
+        b_bits[i] = voleith_gf16_add_witness(c);
+    voleith_gf16_assert_lt(c, a_bits, b_bits, w);
+    if (with_product) {
+        gf16_wire_id pa = voleith_gf16_add_witness(c);
+        gf16_wire_id pb = voleith_gf16_add_witness(c);
+        gf16_wire_id pc = voleith_gf16_add_witness(c);
+        voleith_gf16_assert_product(c, pa, pb, pc);
+    }
+    return c;
+}
+
+static void
+fill_lt_witness(voleith_gf16_t *buf, unsigned int w, unsigned int A,
+                unsigned int B)
+{
+    for (unsigned int i = 0; i < w; i++)
+        buf[i] = (voleith_gf16_t)((A >> (w - 1 - i)) & 1u);
+    for (unsigned int i = 0; i < w; i++)
+        buf[w + i] = (voleith_gf16_t)((B >> (w - 1 - i)) & 1u);
+}
+
+static void
+test_lt_basic(void)
+{
+    const unsigned int w = 4;
+    unsigned int lambda = 128;
+    struct {
+        unsigned int A, B;
+        int expect;
+    } cases[] = {
+        {3, 5, 1}, {0, 15, 1}, {6, 7, 1},   {5, 3, 0},
+        {7, 7, 0}, {15, 0, 0}, {10, 10, 0}, {8, 9, 1},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        voleith_gf16_circuit_t *c = build_lt_circuit(w, 0);
+        voleith_gf16_t wit[8];
+        fill_lt_witness(wit, w, cases[i].A, cases[i].B);
+        int r = run_proof(c, wit, lambda, 1);
+        char name[64];
+        snprintf(name, sizeof(name), "gf16 LT w=4 A=%u B=%u -> %s", cases[i].A,
+                 cases[i].B, cases[i].expect ? "accept" : "reject");
+        check(name, r == cases[i].expect);
+        voleith_gf16_circuit_free(c);
+    }
+    {
+        voleith_gf16_circuit_t *c = build_lt_circuit(w, 0);
+        voleith_gf16_t wit[8];
+        fill_lt_witness(wit, w, 4, 9);
+        check("gf16 LT checked A<B accepts", run_proof(c, wit, lambda, 0) == 1);
+        voleith_gf16_circuit_free(c);
+    }
+    {
+        voleith_gf16_circuit_t *c = build_lt_circuit(w, 0);
+        voleith_gf16_t wit[8];
+        fill_lt_witness(wit, w, 9, 4);
+        check("gf16 LT checked A>=B refused",
+              run_proof(c, wit, lambda, 0) == -2);
+        voleith_gf16_circuit_free(c);
+    }
+}
+
+static void
+test_lt_mixed_degree(void)
+{
+    const unsigned int w = 4;
+    unsigned int lambda = 192;
+    voleith_gf16_t wit[11];
+
+    voleith_gf16_circuit_t *c = build_lt_circuit(w, 1);
+    fill_lt_witness(wit, w, 5, 12);
+    wit[8] = 2;
+    wit[9] = 3;
+    wit[10] = voleith_gf16_mul(2, 3);
+    check("gf16 mixed both-hold accepts", run_proof(c, wit, lambda, 1) == 1);
+    voleith_gf16_circuit_free(c);
+
+    c = build_lt_circuit(w, 1);
+    fill_lt_witness(wit, w, 5, 12);
+    wit[8] = 2;
+    wit[9] = 3;
+    wit[10] = voleith_gf16_mul(2, 3) ^ 0x0001;
+    check("gf16 mixed violate-product rejects",
+          run_proof(c, wit, lambda, 1) == 0);
+    voleith_gf16_circuit_free(c);
+
+    c = build_lt_circuit(w, 1);
+    fill_lt_witness(wit, w, 12, 5);
+    wit[8] = 2;
+    wit[9] = 3;
+    wit[10] = voleith_gf16_mul(2, 3);
+    check("gf16 mixed violate-LT rejects", run_proof(c, wit, lambda, 1) == 0);
+    voleith_gf16_circuit_free(c);
+}
+
+static void
+test_lt_degree_accessor(void)
+{
+    voleith_gf16_circuit_t *c0 = voleith_gf16_circuit_new();
+    gf16_wire_id a = voleith_gf16_add_witness(c0);
+    gf16_wire_id b = voleith_gf16_add_witness(c0);
+    (void)voleith_gf16_add_mul(c0, a, b);
+    check("gf16 qs_degree=2 for LT-free circuit",
+          voleith_gf16_circuit_qs_degree(c0) == 2);
+    voleith_gf16_circuit_free(c0);
+
+    voleith_gf16_circuit_t *c = build_lt_circuit(15, 0);
+    check("gf16 qs_degree=w+1 (w=15 -> 16)",
+          voleith_gf16_circuit_qs_degree(c) == 16);
+    voleith_gf16_circuit_free(c);
+}
+
+static void
+test_lt_wide(void)
+{
+    const unsigned int w = 15;
+    unsigned int lambda = 256;
+    voleith_gf16_t wit[30];
+
+    voleith_gf16_circuit_t *c = build_lt_circuit(w, 0);
+    fill_lt_witness(wit, w, 0x1234, 0x5678);
+    check("gf16 LT w=15 A<B accepts", run_proof(c, wit, lambda, 1) == 1);
+    voleith_gf16_circuit_free(c);
+
+    c = build_lt_circuit(w, 0);
+    fill_lt_witness(wit, w, 0x5678, 0x1234);
+    check("gf16 LT w=15 A>B rejects", run_proof(c, wit, lambda, 1) == 0);
+    voleith_gf16_circuit_free(c);
+}
+
+/* Full two-phase proof over a degree-(w+1) LT circuit (drives the gf16
+ * serialization/sizing/transcript path at d>2, incl. the n_bit_cols fix). */
+static void
+test_lt_two_phase(const voleith_params_t *params, unsigned int w,
+                  unsigned int A, unsigned int B, const char *label)
+{
+    voleith_gf16_circuit_t *c = build_lt_circuit(w, 0);
+    if (!c)
+        return;
+    voleith_gf16_t wit[64];
+    fill_lt_witness(wit, w, A, B);
+    uint8_t fs_seed[16];
+    memset(fs_seed, 0x27, sizeof(fs_seed));
+
+    char nm[80];
+    snprintf(nm, sizeof(nm), "gf16 two-phase %s: qs_degree==w+1", label);
+    check(nm, voleith_gf16_circuit_qs_degree(c) == w + 1);
+
+    voleith_proof_t proof;
+    memset(&proof, 0, sizeof(proof));
+    int pret = voleith_gf16_prove(&proof, params, c, wit, NULL, fs_seed,
+                                  sizeof(fs_seed));
+    snprintf(nm, sizeof(nm), "gf16 two-phase %s: prove A<B", label);
+    check(nm, pret == 0);
+    if (pret == 0) {
+        snprintf(nm, sizeof(nm), "gf16 two-phase %s: verify accepts", label);
+        check(nm, voleith_gf16_verify(&proof, params, c, NULL, fs_seed,
+                                      sizeof(fs_seed)) == 0);
+        snprintf(nm, sizeof(nm), "gf16 two-phase %s: size_circuit matches",
+                 label);
+        check(nm, voleith_gf16_proof_byte_size_circuit(params, c) == proof.len);
+        if (proof.data && proof.len > VOLEITH_PROOF_HEADER_BYTES) {
+            uint8_t saved = proof.data[proof.len - 1];
+            proof.data[proof.len - 1] ^= 0x40u;
+            snprintf(nm, sizeof(nm), "gf16 two-phase %s: tamper rejects",
+                     label);
+            check(nm, voleith_gf16_verify(&proof, params, c, NULL, fs_seed,
+                                          sizeof(fs_seed)) != 0);
+            proof.data[proof.len - 1] = saved;
+        }
+        uint8_t bad_seed[16];
+        memset(bad_seed, 0x99, sizeof(bad_seed));
+        snprintf(nm, sizeof(nm), "gf16 two-phase %s: wrong seed rejects",
+                 label);
+        check(nm, voleith_gf16_verify(&proof, params, c, NULL, bad_seed,
+                                      sizeof(bad_seed)) != 0);
+        voleith_proof_free(&proof);
+    }
+    voleith_gf16_circuit_free(c);
+}
+
+/* =====================================================================
  * main
  * ===================================================================== */
 
@@ -689,6 +950,13 @@ main(void)
     test_xor_const_linear_map();
     test_square_gate();
     test_multiple_mul_gates();
+    test_lt_basic();
+    test_lt_mixed_degree();
+    test_lt_degree_accessor();
+    test_lt_wide();
+    test_lt_two_phase(&voleith_params_em_128f, 4, 5, 12, "em_128f w=4");
+    test_lt_two_phase(&voleith_params_em_256f, 15, 0x1234, 0x5678,
+                      "em_256f w=15");
 
     printf("%d/%d tests passed\n", pass_count, test_count);
     return (pass_count == test_count) ? 0 : 1;

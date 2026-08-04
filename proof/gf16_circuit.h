@@ -94,6 +94,46 @@ typedef struct {
     gf16_wire_id c;
 } gf16_constraint_entry_t;
 
+/*
+ * Less-than constraint (degree-(width+1) QuickSilver, zero VOLE slots).
+ * Asserts value(A) < value(B), A and B unsigned width-bit integers given as
+ * MSB-first arrays of bit wires (each 0x0000 or 0x0001).  Bits live in the
+ * circuit's shared LT pool: A = pool[bits_off .. +width-1], B = the next
+ * width.  Separate table so the fixed-degree path stays byte-identical; any
+ * LT constraint raises the QS opening degree to width+1.
+ */
+typedef struct {
+    size_t bits_off;
+    unsigned int width;
+} gf16_lt_entry_t;
+
+/*
+ * Syndrome constraint (degree-idx_bits QuickSilver, zero VOLE slots).  GF(2^16)
+ * twin of gf8_syndrome_entry_t: asserts s = M*e^T against a committed weight-t
+ * support in the global-bit equality-polynomial form,
+ *
+ *     s_j = XOR_{k=0..t-1} M[j, g_k]   for j = 0 .. p-1,
+ *
+ * g_k committed as idx_bits MSB-first bit wires; M[j,g_k] a degree-idx_bits
+ * multilinear.  One zero-slot degree-idx_bits assert-zero constraint per
+ * syndrome bit, batched into the same zk_hash.  Pool layout for this entry:
+ *   pool[idx_off + k*idx_bits + b]   MSB-first bit b of index g_k
+ *   pool[s_off + j]                  syndrome bit s_j (public / instance)
+ * M is a private owned copy: (n0-1) circulant first-row blocks, block_bytes
+ * each (the buffer voleith_rs_opener_argus_syndrome() consumes).  Any syndrome
+ * constraint raises the QS opening degree to idx_bits.
+ */
+typedef struct {
+    size_t idx_off;
+    size_t s_off;
+    uint32_t t;
+    uint32_t idx_bits;
+    uint32_t p;
+    uint32_t n0;
+    const uint8_t *M;
+    size_t m_bytes;
+} gf16_syndrome_entry_t;
+
 /* The GF(2^16) circuit - opaque type, built via the API below. */
 typedef struct voleith_gf16_circuit voleith_gf16_circuit_t;
 
@@ -187,6 +227,9 @@ size_t voleith_gf16_circuit_witness_count(const voleith_gf16_circuit_t *c);
 size_t voleith_gf16_circuit_instance_count(const voleith_gf16_circuit_t *c);
 size_t voleith_gf16_circuit_gate_count(const voleith_gf16_circuit_t *c);
 size_t voleith_gf16_circuit_mul_count(const voleith_gf16_circuit_t *c);
+/* Max QuickSilver constraint degree d (opens a_0..a_d; mask region d*lambda
+ * bits).  Degree-2 today; derived per-circuit, not transmitted. */
+unsigned int voleith_gf16_circuit_qs_degree(const voleith_gf16_circuit_t *c);
 size_t
 voleith_gf16_circuit_assert_product_count(const voleith_gf16_circuit_t *c);
 size_t voleith_gf16_circuit_constraint_count(const voleith_gf16_circuit_t *c);
@@ -208,6 +251,43 @@ const gf16_wire_entry_t *
 voleith_gf16_circuit_wires(const voleith_gf16_circuit_t *c);
 const gf16_constraint_entry_t *
 voleith_gf16_circuit_constraints(const voleith_gf16_circuit_t *c);
+
+/*
+ * Assert value(A) < value(B) as unsigned width-bit integers.  a_bits/b_bits
+ * are MSB-first arrays of `width` bit wires each (0x0000/0x0001; extract via a
+ * free linear map so they are auto-boolean).  Zero VOLE slots; raises the QS
+ * opening degree to width+1.
+ */
+void voleith_gf16_assert_lt(voleith_gf16_circuit_t *c,
+                            const gf16_wire_id *a_bits,
+                            const gf16_wire_id *b_bits, unsigned int width);
+
+size_t voleith_gf16_circuit_lt_count(const voleith_gf16_circuit_t *c);
+const gf16_lt_entry_t *
+voleith_gf16_circuit_lt_constraints(const voleith_gf16_circuit_t *c);
+const gf16_wire_id *
+voleith_gf16_circuit_lt_bits(const voleith_gf16_circuit_t *c);
+
+/*
+ * Assert the QC-MDPC syndrome relation s = M*e^T (global-bit form; see
+ * gf16_syndrome_entry_t).  GF(2^16) twin of voleith_gf8_assert_syndrome.
+ *   idx_bit_wires  t*idx_bits MSB-first index bit wires (0x0000/0x0001).
+ *   s_bit_wires    p syndrome bit wires (public / instance).
+ *   M              (n0-1) circulant first-row blocks of block_bytes each
+ *                  (block_bytes = ceil(p/8)); copied in.  NULL only if n0 == 1.
+ * Zero VOLE slots; raises the QS opening degree to idx_bits.
+ */
+void voleith_gf16_assert_syndrome(voleith_gf16_circuit_t *c,
+                                  const gf16_wire_id *idx_bit_wires,
+                                  const gf16_wire_id *s_bit_wires, uint32_t t,
+                                  uint32_t idx_bits, uint32_t p, uint32_t n0,
+                                  const uint8_t *M);
+
+size_t voleith_gf16_circuit_syndrome_count(const voleith_gf16_circuit_t *c);
+const gf16_syndrome_entry_t *
+voleith_gf16_circuit_syndrome_constraints(const voleith_gf16_circuit_t *c);
+const gf16_wire_id *
+voleith_gf16_circuit_syndrome_bits(const voleith_gf16_circuit_t *c);
 
 /*
  * Fill M with the 16x16 GF(2) Frobenius squaring matrix for GF(2^16) under

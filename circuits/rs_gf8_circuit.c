@@ -21,6 +21,7 @@
 #include "merkle_vt_gf8_circuit.h"
 #include "range_gf8_circuit.h"
 #include "rs_leaf_gf8_circuit.h"
+#include "rs_opener_gf8_circuit.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -113,6 +114,20 @@ voleith_rs_build_circuit(voleith_gf8_circuit_t *c,
     int owf_used;
     size_t owf_preimage;
 
+    /* ---- V5 opener locals ------------------------------------------ */
+    int opener_enabled;
+    const voleith_rs_opener_argus_params_t *op_params = NULL;
+    size_t id_bytes = 0;        /* = key_bytes = lambda/8 (0 when off) */
+    size_t opener_id_first = 0; /* witness index of the dedicated id */
+    const gf8_wire_id *id_wires = NULL; /* the id leaf-preimage handle */
+    gf8_wire_id *opener_id_wires = NULL;
+    gf8_wire_id *opener_support_wires = NULL; /* msg_bytes packed support */
+    gf8_wire_id *opener_s_wires = NULL;       /* p syndrome bit instance */
+    gf8_wire_id *opener_tag_ct_wires = NULL;  /* key_bytes tag_ct instance */
+    size_t opener_support_first = 0;
+    size_t opener_s_inst_first = 0;
+    size_t opener_tag_ct_first = 0;
+
     if (c == NULL || cfg == NULL || layout_out == NULL)
         return -1;
     if (voleith_rs_config_validate(cfg) != 0)
@@ -124,6 +139,17 @@ voleith_rs_build_circuit(voleith_gf8_circuit_t *c,
     commit_enabled = cfg->enable_commitment != 0;
     commit_total =
         commit_enabled ? cfg->commit_id_bytes + cfg->commit_rand_bytes : 0;
+
+    /* V5 opener: the id (= key_bytes = lambda/8) joins the leaf preimage (Q2)
+     * and, when V4 is also on, is the same witness as the commitment id (Q8,
+     * enforced by config_validate: commit_id_bytes == key_bytes). */
+    opener_enabled = cfg->enable_opener != 0;
+    if (opener_enabled) {
+        op_params = voleith_rs_opener_argus_params(cfg->opener_set);
+        if (op_params == NULL) /* validate already rejects this; guard anyway */
+            return -1;
+        id_bytes = op_params->key_bytes;
+    }
 
     /* V6: the leaf secret is sk_t via the epoch subtree; membership.sk_bytes
      * is 0 (EP.CFG), so the nullifier PRF keys off sk_t (Q5). */
@@ -170,19 +196,21 @@ voleith_rs_build_circuit(voleith_gf8_circuit_t *c,
     /*
      * OWF leaf preimage.  Non-V6: sk || attrs.  V6 + V3: epoch_root ||
      * attrs || salt (the epoch root heads the preimage in sk's slot).  V6
-     * without V3: the leaf IS epoch_root and no OWF runs, so no OWF inv_in.
+     * without V3: the leaf IS epoch_root and no OWF runs.  The V5 opener
+     * appends the lambda/8 id (Q2), which forces an OWF even in the
+     * V6-no-V3 case.
      */
     if (epoch_enabled) {
-        if (schema != NULL) {
+        if (schema != NULL || opener_enabled) {
             owf_used = 1;
-            owf_preimage = W + attr_total + salt_bytes;
+            owf_preimage = W + attr_total + salt_bytes + id_bytes;
         } else {
             owf_used = 0;
             owf_preimage = 0;
         }
     } else {
         owf_used = 1;
-        owf_preimage = mcfg->sk_bytes + attr_total;
+        owf_preimage = mcfg->sk_bytes + attr_total + id_bytes;
     }
     leaf_invin_bytes = owf_used ? owf_vt->leaf_invin_bytes(owf_preimage) : 0;
     inode_invin_bytes = tree_vt->inode_invin_bytes();
@@ -292,6 +320,25 @@ voleith_rs_build_circuit(voleith_gf8_circuit_t *c,
             c_inst_wires[i] = voleith_gf8_add_instance(c);
     }
 
+    /* ---- [V5] id leaf-preimage handle (Q2/Q8) ---------------------- *
+     * When V4 is on, the id IS the first id_bytes of the commitment id/rand
+     * witness (one shared witness, never re-witnessed).  When V4 is off, a
+     * dedicated id witness is declared here, in the commitment id's slot. */
+    if (opener_enabled) {
+        if (commit_enabled) {
+            opener_id_first = commit_id_first;
+            id_wires = idrand_wires; /* first id_bytes = the id */
+        } else {
+            opener_id_first = voleith_gf8_circuit_witness_count(c);
+            opener_id_wires = calloc(id_bytes, sizeof(*opener_id_wires));
+            if (opener_id_wires == NULL)
+                goto out;
+            for (i = 0; i < id_bytes; i++)
+                opener_id_wires[i] = voleith_gf8_add_witness(c);
+            id_wires = opener_id_wires;
+        }
+    }
+
     /* ---- [V2] scope + T instance wires (declared before revocation) - */
     if (nullifier_enabled) {
         scope_inst_first = voleith_gf8_circuit_instance_count(c);
@@ -332,30 +379,31 @@ voleith_rs_build_circuit(voleith_gf8_circuit_t *c,
     }
 
     /* ---- A. leaf circuit --------------------------------------------
-     * Non-V6: leaf_node = OWF(sk || attributes).
-     * V6 + V3: leaf_node = OWF(epoch_root || attributes || salt).
-     * V6 without V3: leaf_node := epoch_root (no OWF).
+     * leaf_node = OWF(head || attributes || [salt] || [id]), with head = sk
+     * (non-V6) or epoch_root (V6).  salt is V6-only; id is opener-only (Q2).
+     * The one no-OWF case is V6 without V3 and without the opener: the leaf
+     * IS epoch_root.
      */
     leaf_invin_first_wit = voleith_gf8_circuit_witness_count(c);
-    if (epoch_enabled && schema == NULL) {
+    if (epoch_enabled && schema == NULL && !opener_enabled) {
         for (i = 0; i < W; i++)
             leaf_node_wires[i] = epoch_root_wires[i];
-    } else if (epoch_enabled) {
-        size_t tail = attr_total + salt_bytes;
+    } else {
+        const gf8_wire_id *head = epoch_enabled ? epoch_root_wires : sk_wires;
+        size_t head_bytes = epoch_enabled ? W : mcfg->sk_bytes;
+        size_t tail = attr_total + salt_bytes + id_bytes;
+        size_t off = 0;
         owf_tail_wires = calloc(tail > 0 ? tail : 1, sizeof(*owf_tail_wires));
         if (owf_tail_wires == NULL)
             goto out;
         for (i = 0; i < attr_total; i++)
-            owf_tail_wires[i] = attr_wires[i];
-        for (i = 0; i < salt_bytes; i++)
-            owf_tail_wires[attr_total + i] = salt_wires[i];
-        if (rs_leaf_gf8_build_circuit(c, owf_vt, epoch_root_wires, W,
+            owf_tail_wires[off++] = attr_wires[i];
+        for (i = 0; i < salt_bytes; i++) /* salt_bytes == 0 unless V6+V3 */
+            owf_tail_wires[off++] = salt_wires[i];
+        for (i = 0; i < id_bytes; i++) /* id_bytes == 0 unless opener on */
+            owf_tail_wires[off++] = id_wires[i];
+        if (rs_leaf_gf8_build_circuit(c, owf_vt, head, head_bytes,
                                       owf_tail_wires, tail,
-                                      leaf_node_wires) != 0)
-            goto out;
-    } else {
-        if (rs_leaf_gf8_build_circuit(c, owf_vt, sk_wires, mcfg->sk_bytes,
-                                      attr_wires, attr_total,
                                       leaf_node_wires) != 0)
             goto out;
     }
@@ -734,6 +782,91 @@ voleith_rs_build_circuit(voleith_gf8_circuit_t *c,
         layout.depth_s = cfg->depth_s;
     }
 
+    /* ---- [V5] opener id layout ------------------------------------- */
+    if (opener_enabled) {
+        layout.opener_id_off = opener_id_first - base_wit;
+        layout.opener_id_bytes = id_bytes;
+    }
+
+    /* ---- [V5] opener support witness + s instance + syndrome (OP.CIRC.2) *
+     * The support of e is committed bit-packed (msg_bytes witness bytes, the
+     * same bytes the KDF gadget consumes in OP.CIRC.3); s is p public bit
+     * wires.  rs_opener_syndrome_gf8 extracts the index bits and emits the
+     * s = M*e^T + well-formedness constraints. */
+    if (opener_enabled) {
+        uint32_t t = op_params->t;
+        uint32_t idx_bits = op_params->idx_bits;
+        uint32_t p = op_params->p;
+        uint32_t on0 = op_params->n0;
+        size_t msg_bytes = op_params->msg_bytes;
+
+        opener_support_first = voleith_gf8_circuit_witness_count(c);
+        opener_support_wires = calloc(msg_bytes, sizeof(*opener_support_wires));
+        if (opener_support_wires == NULL)
+            goto out;
+        for (i = 0; i < msg_bytes; i++)
+            opener_support_wires[i] = voleith_gf8_add_witness(c);
+
+        opener_s_inst_first = voleith_gf8_circuit_instance_count(c);
+        opener_s_wires = calloc(p, sizeof(*opener_s_wires));
+        if (opener_s_wires == NULL)
+            goto out;
+        for (i = 0; i < p; i++)
+            opener_s_wires[i] = voleith_gf8_add_instance(c);
+
+        if (voleith_rs_opener_syndrome_gf8(c, opener_support_wires,
+                                           opener_s_wires, t, idx_bits, p, on0,
+                                           cfg->opener_pk) != 0)
+            goto out;
+
+        layout.opener_support_off = opener_support_first - base_wit;
+        layout.opener_support_bytes = msg_bytes;
+        layout.inst_opener_s_off = opener_s_inst_first - base_inst;
+        layout.inst_opener_s_bytes = p;
+    }
+
+    /* ---- [V5] opener KDF + DEM (OP.CIRC.3) -------------------------- *
+     * tag_ct is a public key_bytes instance; the DEM asserts tag_ct == K XOR id
+     * with K = argus_kdf(support) emitted as the one cfg-selected hash gadget.
+     * lambda=128 (AES-DM / prim_default 0x01) lands in 3a; Grostl-256 (0x02) in
+     * 3b.  hash_id is not an in-circuit wire: it rides the cfg-fingerprint
+     * (OP.CFG) and the serialized tag (OP.SER), not the relation. */
+    if (opener_enabled) {
+        size_t key_bytes = op_params->key_bytes;
+        size_t kdf_invin_first;
+
+        opener_tag_ct_first = voleith_gf8_circuit_instance_count(c);
+        opener_tag_ct_wires = calloc(key_bytes, sizeof(*opener_tag_ct_wires));
+        if (opener_tag_ct_wires == NULL)
+            goto out;
+        for (i = 0; i < key_bytes; i++)
+            opener_tag_ct_wires[i] = voleith_gf8_add_instance(c);
+
+        /* The KDF gadget adds the only witnesses of this section (the S-box
+         * inv_in); capture the range so the packer can fill it. */
+        kdf_invin_first = voleith_gf8_circuit_witness_count(c);
+        if (op_params->prim_default == VOLEITH_RS_OPENER_ARGUS_PRIM_AESDM) {
+            if (voleith_rs_opener_dem_aesdm_gf8(
+                    c, opener_support_wires, op_params->msg_bytes,
+                    op_params->ds_iv, id_wires, opener_tag_ct_wires,
+                    key_bytes) != 0)
+                goto out;
+        } else if (op_params->prim_default ==
+                   VOLEITH_RS_OPENER_ARGUS_PRIM_GROSTL256) {
+            if (voleith_rs_opener_dem_grostl256_gf8(
+                    c, opener_support_wires, op_params->msg_bytes,
+                    op_params->ds_iv, id_wires, opener_tag_ct_wires,
+                    key_bytes) != 0)
+                goto out;
+        }
+
+        layout.inst_opener_tag_ct_off = opener_tag_ct_first - base_inst;
+        layout.inst_opener_tag_ct_bytes = key_bytes;
+        layout.opener_kdf_invin_off = kdf_invin_first - base_wit;
+        layout.opener_kdf_invin_bytes =
+            voleith_gf8_circuit_witness_count(c) - kdf_invin_first;
+    }
+
     /* ---- finalize totals ------------------------------------------- */
     layout.witness_bytes = voleith_gf8_circuit_witness_count(c) - base_wit;
     layout.instance_bytes = voleith_gf8_circuit_instance_count(c) - base_inst;
@@ -753,6 +886,10 @@ out:
     free(attr_wires);
     free(bounds_wires);
     free(idrand_wires);
+    free(opener_id_wires);
+    free(opener_support_wires);
+    free(opener_s_wires);
+    free(opener_tag_ct_wires);
     free(c_inst_wires);
     free(dir_wires);
     free(sibling_wires);

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 cmake_minimum_required(VERSION 3.16)
-project(libvoleith VERSION 1.10.1 LANGUAGES C)
+project(libvoleith VERSION 1.11.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -335,6 +335,8 @@ set(VOLEITH_CORE_SOURCES
     proof/rs_epoch_gf8.c
     proof/ring_sig_v1_gf8.c
     proof/rs_chunk_cert_proof.c
+    proof/rs_opener_gf8.c
+    proof/rs_opener_argus_gf8.c
     circuits/aes_circuit.c
     circuits/aes_gf8_circuit.c
     circuits/grostl_gf8_circuit.c
@@ -359,6 +361,7 @@ set(VOLEITH_CORE_SOURCES
     circuits/rs_membership_gf8_circuit.c
     circuits/rs_leaf_gf8_circuit.c
     circuits/rs_gf8_circuit.c
+    circuits/rs_opener_gf8_circuit.c
     circuits/rlnc_gf16_circuit.c
     circuits/rlnc_gf16_cert_circuit.c
     circuits/permutation_gf16_circuit.c

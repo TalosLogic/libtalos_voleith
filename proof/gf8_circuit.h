@@ -128,6 +128,65 @@ typedef struct {
 } gf8_constraint_entry_t;
 
 /*
+ * Less-than constraint (degree-(width+1) QuickSilver, zero VOLE slots).
+ *
+ * Asserts value(A) < value(B), where A and B are unsigned `width`-bit integers
+ * given as MSB-first arrays of bit wires (each wire holds 0x00 or 0x01).  The
+ * bit wires live in the circuit's shared LT bit pool: for this entry, the A
+ * bits are pool[bits_off .. bits_off+width-1] and the B bits are
+ * pool[bits_off+width .. bits_off+2*width-1].
+ *
+ * Kept in a table separate from gf8_constraint_entry_t so the fixed-degree
+ * ZERO/EQUAL/PRODUCT accumulation path is unchanged (d=2 stays byte-identical).
+ * A circuit with any LT constraint raises its QS opening degree to width+1
+ * (voleith_gf8_circuit_qs_degree).
+ */
+typedef struct {
+    size_t bits_off;
+    unsigned int width;
+} gf8_lt_entry_t;
+
+/*
+ * Syndrome constraint (degree-b QuickSilver, zero VOLE slots).
+ *
+ * Asserts the QC-MDPC syndrome relation s = M * e^T against a committed
+ * weight-t support, in the global-bit equality-polynomial form (no dense e):
+ *
+ *     s_j  =  XOR_{k=0..t-1}  M[j, g_k]      for j = 0 .. p-1,
+ *
+ * where g_k is the k-th support index, committed as `idx_bits` MSB-first bit
+ * wires, and M[j, g_k] as a function of g_k's bits is a degree-`idx_bits`
+ * multilinear polynomial (the equality-polynomial demux, evaluated on the
+ * Delta-polynomials, never materialized as a dense error vector).  This is a
+ * zero-slot degree-`idx_bits` assert-zero constraint family (one per syndrome
+ * bit j), batched into the same zk_hash accumulator as the gate constraints.
+ *
+ * Wire layout in the shared syndrome bit pool for this entry:
+ *   pool[idx_off + k*idx_bits + b]      MSB-first bit b of support index g_k
+ *   pool[s_off + j]                     syndrome bit s_j (public / instance)
+ *
+ * M is a private owned copy of the public circulant matrix: (n0-1) blocks of
+ * block_bytes each (the first row of each circulant block), exactly the buffer
+ * voleith_rs_opener_argus_syndrome() consumes.  The implicit-identity last
+ * block (systematic form) is not stored.
+ *
+ * Kept in a table separate from gf8_constraint_entry_t and gf8_lt_entry_t so
+ * the fixed-degree constraint path stays byte-identical (d=2 unchanged).  A
+ * circuit with any syndrome constraint raises its QS opening degree to
+ * idx_bits.
+ */
+typedef struct {
+    size_t idx_off;    /* pool offset of the t*idx_bits support bit wires */
+    size_t s_off;      /* pool offset of the p syndrome bit wires         */
+    uint32_t t;        /* support weight                                  */
+    uint32_t idx_bits; /* bits per global index = ceil(log2 n)            */
+    uint32_t p;        /* circulant block length (syndrome bit count)     */
+    uint32_t n0;       /* number of circulant blocks; n = n0 * p          */
+    const uint8_t *M;  /* owned copy: (n0-1) * block_bytes                 */
+    size_t m_bytes;    /* length of the M copy                            */
+} gf8_syndrome_entry_t;
+
+/*
  * The GF(2⁸) circuit - opaque type, constructed via the builder API below.
  */
 typedef struct voleith_gf8_circuit voleith_gf8_circuit_t;
@@ -318,6 +377,14 @@ size_t voleith_gf8_circuit_gate_count(const voleith_gf8_circuit_t *c);
 /* Number of MUL gates (add_mul calls; determines VOLE slot count) */
 size_t voleith_gf8_circuit_mul_count(const voleith_gf8_circuit_t *c);
 
+/*
+ * Maximum QuickSilver constraint degree d in force for this circuit.  The
+ * proof opens d+1 coefficients (a_0..a_d) and the QS mask region is d*lambda
+ * bits.  All circuits built today are degree-2; d is derived per-circuit and
+ * is NOT transmitted on the wire.
+ */
+unsigned int voleith_gf8_circuit_qs_degree(const voleith_gf8_circuit_t *c);
+
 /* Number of assert_product constraints */
 size_t voleith_gf8_circuit_assert_product_count(const voleith_gf8_circuit_t *c);
 
@@ -368,6 +435,55 @@ voleith_gf8_circuit_wires(const voleith_gf8_circuit_t *c);
  */
 const gf8_constraint_entry_t *
 voleith_gf8_circuit_constraints(const voleith_gf8_circuit_t *c);
+
+/*
+ * Assert value(A) < value(B) as unsigned width-bit integers.  a_bits and
+ * b_bits are MSB-first arrays of `width` bit wires each, every wire holding
+ * 0x00 or 0x01 (the builder does not enforce boolean-ness; extract bits via a
+ * free linear map so they are auto-boolean).  Zero VOLE slots.  Raises the
+ * circuit's QS opening degree to width+1.
+ */
+void voleith_gf8_assert_lt(voleith_gf8_circuit_t *c, const gf8_wire_id *a_bits,
+                           const gf8_wire_id *b_bits, unsigned int width);
+
+/*
+ * Read-only access to the less-than constraint table and its shared bit pool
+ * (for QuickSilver prove/verify and evaluation).
+ */
+size_t voleith_gf8_circuit_lt_count(const voleith_gf8_circuit_t *c);
+const gf8_lt_entry_t *
+voleith_gf8_circuit_lt_constraints(const voleith_gf8_circuit_t *c);
+const gf8_wire_id *voleith_gf8_circuit_lt_bits(const voleith_gf8_circuit_t *c);
+
+/*
+ * Assert the QC-MDPC syndrome relation s = M * e^T (global-bit
+ * equality-polynomial form; see gf8_syndrome_entry_t).
+ *
+ *   idx_bit_wires  t*idx_bits MSB-first index bit wires (index k, bit b at
+ *                  idx_bit_wires[k*idx_bits + b]); each wire holds 0x00/0x01
+ *                  (extract via a free linear map so they are auto-boolean).
+ *   s_bit_wires    p syndrome bit wires (public / instance), s_j at [j].
+ *   M              (n0-1) circulant first-row blocks of block_bytes each,
+ *                  the buffer voleith_rs_opener_argus_syndrome() consumes;
+ *                  copied into the circuit.  NULL only if n0 == 1.
+ *
+ * block_bytes is derived as ceil(p/8).  Zero VOLE slots.  Raises the circuit's
+ * QS opening degree to idx_bits.
+ */
+void voleith_gf8_assert_syndrome(voleith_gf8_circuit_t *c,
+                                 const gf8_wire_id *idx_bit_wires,
+                                 const gf8_wire_id *s_bit_wires, uint32_t t,
+                                 uint32_t idx_bits, uint32_t p, uint32_t n0,
+                                 const uint8_t *M);
+
+/*
+ * Read-only access to the syndrome constraint table and its shared bit pool.
+ */
+size_t voleith_gf8_circuit_syndrome_count(const voleith_gf8_circuit_t *c);
+const gf8_syndrome_entry_t *
+voleith_gf8_circuit_syndrome_constraints(const voleith_gf8_circuit_t *c);
+const gf8_wire_id *
+voleith_gf8_circuit_syndrome_bits(const voleith_gf8_circuit_t *c);
 
 /* ================================================================
  * Circuit evaluation (for testing and witness checking)

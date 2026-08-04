@@ -24,6 +24,7 @@
 #include "gf8_prover_internal.h" /* test-only unchecked prove seam (S-6) */
 #include "gf8_verifier.h"
 #include "gf8_circuit.h"
+#include "qs_degree.h" /* VOLEITH_QS_COEFFS_MAX */
 #include "aes_gf8_circuit.h"
 #include "field.h"
 
@@ -200,9 +201,10 @@ prove_verify(voleith_gf8_circuit_t *c, const uint8_t *witness, size_t n_witness,
 
     /* Prover: prove */
     uint8_t a0[32] = {0}, a1[32] = {0}, a2[32] = {0};
-    int pr = voleith_gf8_qs_prove(c, witness, instance, lambda, vs.u,
-                                  (const uint8_t **)vs.V_rows, vs.chall_2, d,
-                                  a0, a1, a2);
+    uint8_t *a_out[3] = {a0, a1, a2};
+    int pr =
+        voleith_gf8_qs_prove(c, witness, instance, lambda, vs.u,
+                             (const uint8_t **)vs.V_rows, vs.chall_2, d, a_out);
     if (pr != 0) {
         free(d);
         vole_free(&vs);
@@ -211,9 +213,10 @@ prove_verify(voleith_gf8_circuit_t *c, const uint8_t *witness, size_t n_witness,
 
     /* Verifier: verify */
     uint8_t a0_v[32] = {0};
+    const uint8_t *a_in[3] = {NULL, a1, a2};
     int vr =
         voleith_gf8_qs_verify(c, instance, lambda, (const uint8_t **)vs.Q_rows,
-                              d, vs.delta, vs.chall_2, a1, a2, a0_v);
+                              d, vs.delta, vs.chall_2, a_in, a0_v);
     if (vr != 0) {
         free(d);
         vole_free(&vs);
@@ -351,14 +354,15 @@ test_tampered_a1(void)
     voleith_gf8_qs_compute_d(c, witness, instance, vs.u, d);
 
     uint8_t a0[32] = {0}, a1[32] = {0}, a2[32] = {0}, a0_v[32] = {0};
+    uint8_t *a_out[3] = {a0, a1, a2};
     voleith_gf8_qs_prove(c, witness, instance, lambda, vs.u,
-                         (const uint8_t **)vs.V_rows, vs.chall_2, d, a0, a1,
-                         a2);
+                         (const uint8_t **)vs.V_rows, vs.chall_2, d, a_out);
 
     /* Tamper a1_tilde */
     a1[0] ^= 0x42u;
+    const uint8_t *a_in[3] = {NULL, a1, a2};
     voleith_gf8_qs_verify(c, instance, lambda, (const uint8_t **)vs.Q_rows, d,
-                          vs.delta, vs.chall_2, a1, a2, a0_v);
+                          vs.delta, vs.chall_2, a_in, a0_v);
 
     check("tampered a1_tilde: mismatch", memcmp(a0, a0_v, nb) != 0);
 
@@ -518,17 +522,19 @@ forge_verify(voleith_gf8_circuit_t *c, const uint8_t *witness,
     }
 
     uint8_t a0[32] = {0}, a1[32] = {0}, a2[32] = {0};
+    uint8_t *a_out[3] = {a0, a1, a2};
     if (voleith_gf8_qs_prove_unchecked(c, witness, NULL, lambda, vs.u,
                                        (const uint8_t **)vs.V_rows, vs.chall_2,
-                                       d, a0, a1, a2) != 0) {
+                                       d, a_out) != 0) {
         free(d);
         vole_free(&vs);
         return -2;
     }
 
     uint8_t a0_v[32] = {0};
+    const uint8_t *a_in[3] = {NULL, a1, a2};
     if (voleith_gf8_qs_verify(c, NULL, lambda, (const uint8_t **)vs.Q_rows, d,
-                              vs.delta, vs.chall_2, a1, a2, a0_v) != 0) {
+                              vs.delta, vs.chall_2, a_in, a0_v) != 0) {
         free(d);
         vole_free(&vs);
         return -2;
@@ -752,6 +758,235 @@ test_aes128_integration(void)
 }
 
 /* =====================================================================
+ * Less-than (NLT) degree-(w+1) constraint tests
+ *
+ * These are the first d>2 QuickSilver consumer.  The negative cases use the
+ * UNCHECKED prover so it commits a witness violating the constraint; a sound
+ * verifier must then reject (a0 mismatch).  This is what proves the degree-d
+ * path binds, which the d=2 suite cannot exercise.
+ * ===================================================================== */
+
+/*
+ * Run one prove+verify over an arbitrary circuit with witness `witness`.
+ * use_unchecked=1 uses the unchecked prover (commits invalid witnesses).
+ * Returns 1 if a0 matches (verify accepts), 0 if mismatch (reject), -2 error.
+ */
+static int
+run_proof(voleith_gf8_circuit_t *c, const uint8_t *witness, unsigned int lambda,
+          int use_unchecked)
+{
+    size_t ell = voleith_gf8_qs_ell(c);
+    size_t ellhat_bytes = voleith_gf8_qs_ellhat(c, lambda);
+    unsigned int nb = lambda / 8;
+    unsigned int d = voleith_gf8_circuit_qs_degree(c);
+
+    vole_state_t vs;
+    if (vole_alloc(&vs, lambda, ellhat_bytes) < 0)
+        return -2;
+    prng_reset(0x51EED123u);
+    vole_fill(&vs);
+
+    uint8_t *dcorr = calloc(ell ? ell : 1, 1);
+    int rc = -2;
+    if (!dcorr)
+        goto done;
+    if (voleith_gf8_qs_compute_d_unchecked(c, witness, NULL, vs.u, dcorr) < 0)
+        goto done;
+
+    uint8_t a_buf[VOLEITH_QS_COEFFS_MAX][32];
+    uint8_t *a_out[VOLEITH_QS_COEFFS_MAX];
+    memset(a_buf, 0, sizeof(a_buf));
+    for (unsigned int i = 0; i <= d; i++)
+        a_out[i] = a_buf[i];
+
+    int pr = use_unchecked
+                 ? voleith_gf8_qs_prove_unchecked(
+                       c, witness, NULL, lambda, vs.u,
+                       (const uint8_t **)vs.V_rows, vs.chall_2, dcorr, a_out)
+                 : voleith_gf8_qs_prove(c, witness, NULL, lambda, vs.u,
+                                        (const uint8_t **)vs.V_rows, vs.chall_2,
+                                        dcorr, a_out);
+    if (pr != 0) {
+        rc = -2;
+        goto done;
+    }
+
+    const uint8_t *a_in[VOLEITH_QS_COEFFS_MAX];
+    for (unsigned int i = 1; i <= d; i++)
+        a_in[i] = a_buf[i];
+    uint8_t a0_v[32] = {0};
+    if (voleith_gf8_qs_verify(c, NULL, lambda, (const uint8_t **)vs.Q_rows,
+                              dcorr, vs.delta, vs.chall_2, a_in, a0_v) != 0) {
+        rc = -2;
+        goto done;
+    }
+    rc = (memcmp(a_buf[0], a0_v, nb) == 0) ? 1 : 0;
+
+done:
+    free(dcorr);
+    vole_free(&vs);
+    return rc;
+}
+
+/* Build a circuit asserting A < B over `w` witness bit wires each (MSB-first),
+ * plus optionally one PRODUCT gate (p_a*p_b == p_c) to test mixed degree.
+ * Witness layout: [A bits (w)] [B bits (w)] [p_a p_b p_c if with_product]. */
+static voleith_gf8_circuit_t *
+build_lt_circuit(unsigned int w, int with_product)
+{
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    if (!c)
+        return NULL;
+    gf8_wire_id a_bits[32], b_bits[32];
+    for (unsigned int i = 0; i < w; i++)
+        a_bits[i] = voleith_gf8_add_witness(c);
+    for (unsigned int i = 0; i < w; i++)
+        b_bits[i] = voleith_gf8_add_witness(c);
+    voleith_gf8_assert_lt(c, a_bits, b_bits, w);
+    if (with_product) {
+        gf8_wire_id pa = voleith_gf8_add_witness(c);
+        gf8_wire_id pb = voleith_gf8_add_witness(c);
+        gf8_wire_id pc = voleith_gf8_add_witness(c);
+        voleith_gf8_assert_product(c, pa, pb, pc);
+    }
+    return c;
+}
+
+/* Fill witness bits (MSB-first) for w-bit values A,B into buf[0..2w-1]. */
+static void
+fill_lt_witness(uint8_t *buf, unsigned int w, unsigned int A, unsigned int B)
+{
+    for (unsigned int i = 0; i < w; i++)
+        buf[i] = (uint8_t)((A >> (w - 1 - i)) & 1u);
+    for (unsigned int i = 0; i < w; i++)
+        buf[w + i] = (uint8_t)((B >> (w - 1 - i)) & 1u);
+}
+
+static void
+test_lt_basic(void)
+{
+    const unsigned int w = 4;
+    unsigned int lambda = 128;
+    /* Accept: A < B (checked prover ok). */
+    struct {
+        unsigned int A, B;
+        int expect; /* 1 accept, 0 reject */
+    } cases[] = {
+        {3, 5, 1}, {0, 15, 1}, {6, 7, 1},   {5, 3, 0},
+        {7, 7, 0}, {15, 0, 0}, {10, 10, 0}, {8, 9, 1},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        voleith_gf8_circuit_t *c = build_lt_circuit(w, 0);
+        uint8_t wit[8];
+        fill_lt_witness(wit, w, cases[i].A, cases[i].B);
+        int r =
+            run_proof(c, wit, lambda, 1 /* unchecked: exercise soundness */);
+        char name[64];
+        snprintf(name, sizeof(name), "LT w=4 A=%u B=%u -> %s", cases[i].A,
+                 cases[i].B, cases[i].expect ? "accept" : "reject");
+        check(name, r == cases[i].expect);
+        voleith_gf8_circuit_free(c);
+    }
+    /* A<B via the CHECKED prover must also produce an accepting proof. */
+    {
+        voleith_gf8_circuit_t *c = build_lt_circuit(w, 0);
+        uint8_t wit[8];
+        fill_lt_witness(wit, w, 4, 9);
+        check("LT checked prover A<B accepts",
+              run_proof(c, wit, lambda, 0) == 1);
+        voleith_gf8_circuit_free(c);
+    }
+    /* A>=B via the CHECKED prover must be refused at eval (returns error). */
+    {
+        voleith_gf8_circuit_t *c = build_lt_circuit(w, 0);
+        uint8_t wit[8];
+        fill_lt_witness(wit, w, 9, 4);
+        check("LT checked prover A>=B refused",
+              run_proof(c, wit, lambda, 0) == -2);
+        voleith_gf8_circuit_free(c);
+    }
+}
+
+static void
+test_lt_mixed_degree(void)
+{
+    /* Circuit mixes a degree-2 PRODUCT and a degree-(w+1) LT.  Violating
+     * EITHER must reject: this proves the natural-position batching binds both
+     * degrees (the discriminator for zero-pad vs top-align soundness). */
+    const unsigned int w = 4;
+    unsigned int lambda = 192;
+    uint8_t wit[11];
+
+    /* both hold: A<B and pa*pb==pc (2*3=6). */
+    voleith_gf8_circuit_t *c = build_lt_circuit(w, 1);
+    fill_lt_witness(wit, w, 5, 12);
+    wit[8] = 2;
+    wit[9] = 3;
+    wit[10] = voleith_gf8_mul(2, 3);
+    check("mixed both-hold accepts", run_proof(c, wit, lambda, 1) == 1);
+    voleith_gf8_circuit_free(c);
+
+    /* violate PRODUCT only (LT still holds). */
+    c = build_lt_circuit(w, 1);
+    fill_lt_witness(wit, w, 5, 12);
+    wit[8] = 2;
+    wit[9] = 3;
+    wit[10] = voleith_gf8_mul(2, 3) ^ 0x01; /* wrong product */
+    check("mixed violate-product rejects", run_proof(c, wit, lambda, 1) == 0);
+    voleith_gf8_circuit_free(c);
+
+    /* violate LT only (product still holds). */
+    c = build_lt_circuit(w, 1);
+    fill_lt_witness(wit, w, 12, 5); /* A>=B */
+    wit[8] = 2;
+    wit[9] = 3;
+    wit[10] = voleith_gf8_mul(2, 3);
+    check("mixed violate-LT rejects", run_proof(c, wit, lambda, 1) == 0);
+    voleith_gf8_circuit_free(c);
+}
+
+static void
+test_lt_degree_accessor(void)
+{
+    voleith_gf8_circuit_t *c0 = voleith_gf8_circuit_new();
+    gf8_wire_id a = voleith_gf8_add_witness(c0);
+    gf8_wire_id b = voleith_gf8_add_witness(c0);
+    (void)voleith_gf8_add_mul(c0, a, b);
+    check("qs_degree=2 for LT-free circuit",
+          voleith_gf8_circuit_qs_degree(c0) == 2);
+    voleith_gf8_circuit_free(c0);
+
+    voleith_gf8_circuit_t *c = build_lt_circuit(15, 0);
+    check("qs_degree=w+1 for LT circuit (w=15 -> 16)",
+          voleith_gf8_circuit_qs_degree(c) == 16);
+    voleith_gf8_circuit_free(c);
+}
+
+static void
+test_lt_wide(void)
+{
+    /* Opener-scale width (w=15 -> d=16) at lambda 256, accept + reject. */
+    const unsigned int w = 15;
+    unsigned int lambda = 256;
+    uint8_t wit[30];
+
+    voleith_gf8_circuit_t *c = build_lt_circuit(w, 0);
+    fill_lt_witness(wit, w, 0x1234, 0x5678);
+    check("LT w=15 A<B accepts", run_proof(c, wit, lambda, 1) == 1);
+    voleith_gf8_circuit_free(c);
+
+    c = build_lt_circuit(w, 0);
+    fill_lt_witness(wit, w, 0x5678, 0x1234);
+    check("LT w=15 A>B rejects", run_proof(c, wit, lambda, 1) == 0);
+    voleith_gf8_circuit_free(c);
+
+    c = build_lt_circuit(w, 0);
+    fill_lt_witness(wit, w, 0x2AAA, 0x2AAA);
+    check("LT w=15 A==B rejects", run_proof(c, wit, lambda, 1) == 0);
+    voleith_gf8_circuit_free(c);
+}
+
+/* =====================================================================
  * main
  * ===================================================================== */
 
@@ -772,6 +1007,10 @@ main(void)
     test_xor_const_linear_map();
     test_multiple_mul_gates();
     test_aes128_integration();
+    test_lt_basic();
+    test_lt_mixed_degree();
+    test_lt_degree_accessor();
+    test_lt_wide();
 
     printf("%d/%d tests passed\n", pass_count, test_count);
     return (pass_count == test_count) ? 0 : 1;

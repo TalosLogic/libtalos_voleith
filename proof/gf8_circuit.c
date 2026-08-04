@@ -23,6 +23,28 @@ struct voleith_gf8_circuit {
     size_t n_constraints;
     size_t cap_constraints;
 
+    /* Less-than constraints (Option 3: separate table, so the fixed-degree
+     * constraint path above stays byte-identical). lt_bits is the shared pool
+     * of bit-wire ids each lt_entry indexes into (2*width ids per entry). */
+    gf8_lt_entry_t *lt_constraints;
+    size_t n_lt;
+    size_t cap_lt;
+    gf8_wire_id *lt_bits;
+    size_t n_lt_bits;
+    size_t cap_lt_bits;
+    unsigned int max_lt_degree; /* max (width+1) over LT entries; 0 if none */
+
+    /* Syndrome constraints (Option 3: separate table, fixed-degree path stays
+     * byte-identical).  syndrome_bits is the shared pool of bit-wire ids each
+     * entry indexes into (t*idx_bits index bits then p s bits per entry). */
+    gf8_syndrome_entry_t *syndrome_constraints;
+    size_t n_syndrome;
+    size_t cap_syndrome;
+    gf8_wire_id *syndrome_bits;
+    size_t n_syndrome_bits;
+    size_t cap_syndrome_bits;
+    unsigned int max_syndrome_degree; /* max idx_bits over entries; 0 if none */
+
     size_t n_witness;
     size_t n_instance;
     size_t n_const;          /* CONST input-wire count */
@@ -354,6 +376,12 @@ voleith_gf8_circuit_free(voleith_gf8_circuit_t *c)
         return;
     free(c->wires);
     free(c->constraints);
+    free(c->lt_constraints);
+    free(c->lt_bits);
+    for (size_t i = 0; i < c->n_syndrome; i++)
+        free((void *)c->syndrome_constraints[i].M);
+    free(c->syndrome_constraints);
+    free(c->syndrome_bits);
     free(c);
 }
 
@@ -616,6 +644,176 @@ voleith_gf8_assert_product(voleith_gf8_circuit_t *c, gf8_wire_id a,
         c->n_assert_product++;
 }
 
+void
+voleith_gf8_assert_lt(voleith_gf8_circuit_t *c, const gf8_wire_id *a_bits,
+                      const gf8_wire_id *b_bits, unsigned int width)
+{
+    if (!c || !a_bits || !b_bits || width == 0) {
+        if (c)
+            c->alloc_ok = 0;
+        return;
+    }
+
+    /* Grow the bit pool by 2*width ids. */
+    size_t need = c->n_lt_bits + (size_t)2 * width;
+    if (need > c->cap_lt_bits) {
+        size_t new_cap = c->cap_lt_bits ? c->cap_lt_bits : 32;
+        while (new_cap < need)
+            new_cap *= 2;
+        gf8_wire_id *p = realloc(c->lt_bits, new_cap * sizeof(gf8_wire_id));
+        if (!p) {
+            c->alloc_ok = 0;
+            return;
+        }
+        c->lt_bits = p;
+        c->cap_lt_bits = new_cap;
+    }
+
+    /* Grow the LT entry table. */
+    if (c->n_lt == c->cap_lt) {
+        size_t new_cap = c->cap_lt ? c->cap_lt * 2 : 8;
+        gf8_lt_entry_t *p =
+            realloc(c->lt_constraints, new_cap * sizeof(gf8_lt_entry_t));
+        if (!p) {
+            c->alloc_ok = 0;
+            return;
+        }
+        c->lt_constraints = p;
+        c->cap_lt = new_cap;
+    }
+
+    size_t off = c->n_lt_bits;
+    for (unsigned int i = 0; i < width; i++)
+        c->lt_bits[off + i] = a_bits[i];
+    for (unsigned int i = 0; i < width; i++)
+        c->lt_bits[off + width + i] = b_bits[i];
+    c->n_lt_bits += (size_t)2 * width;
+
+    c->lt_constraints[c->n_lt].bits_off = off;
+    c->lt_constraints[c->n_lt].width = width;
+    c->n_lt++;
+
+    if (width + 1u > c->max_lt_degree)
+        c->max_lt_degree = width + 1u;
+}
+
+size_t
+voleith_gf8_circuit_lt_count(const voleith_gf8_circuit_t *c)
+{
+    return c->n_lt;
+}
+
+const gf8_lt_entry_t *
+voleith_gf8_circuit_lt_constraints(const voleith_gf8_circuit_t *c)
+{
+    return c->lt_constraints;
+}
+
+const gf8_wire_id *
+voleith_gf8_circuit_lt_bits(const voleith_gf8_circuit_t *c)
+{
+    return c->lt_bits;
+}
+
+void
+voleith_gf8_assert_syndrome(voleith_gf8_circuit_t *c,
+                            const gf8_wire_id *idx_bit_wires,
+                            const gf8_wire_id *s_bit_wires, uint32_t t,
+                            uint32_t idx_bits, uint32_t p, uint32_t n0,
+                            const uint8_t *M)
+{
+    if (!c || !idx_bit_wires || !s_bit_wires || t == 0 || idx_bits == 0 ||
+        p == 0 || n0 == 0 || (n0 > 1u && !M)) {
+        if (c)
+            c->alloc_ok = 0;
+        return;
+    }
+
+    size_t block_bytes = ((size_t)p + 7u) / 8u;
+    size_t m_bytes = (size_t)(n0 - 1u) * block_bytes;
+    size_t n_index_bits = (size_t)t * idx_bits;
+    size_t need = c->n_syndrome_bits + n_index_bits + (size_t)p;
+
+    /* Grow the shared syndrome bit pool. */
+    if (need > c->cap_syndrome_bits) {
+        size_t new_cap = c->cap_syndrome_bits ? c->cap_syndrome_bits : 64;
+        while (new_cap < need)
+            new_cap *= 2;
+        gf8_wire_id *np =
+            realloc(c->syndrome_bits, new_cap * sizeof(gf8_wire_id));
+        if (!np) {
+            c->alloc_ok = 0;
+            return;
+        }
+        c->syndrome_bits = np;
+        c->cap_syndrome_bits = new_cap;
+    }
+
+    /* Grow the syndrome entry table. */
+    if (c->n_syndrome == c->cap_syndrome) {
+        size_t new_cap = c->cap_syndrome ? c->cap_syndrome * 2 : 4;
+        gf8_syndrome_entry_t *np = realloc(
+            c->syndrome_constraints, new_cap * sizeof(gf8_syndrome_entry_t));
+        if (!np) {
+            c->alloc_ok = 0;
+            return;
+        }
+        c->syndrome_constraints = np;
+        c->cap_syndrome = new_cap;
+    }
+
+    /* Own a copy of the public matrix (bound later by the cfg-fingerprint). */
+    uint8_t *m_copy = NULL;
+    if (m_bytes > 0) {
+        m_copy = calloc(m_bytes, 1);
+        if (!m_copy) {
+            c->alloc_ok = 0;
+            return;
+        }
+        memcpy(m_copy, M, m_bytes);
+    }
+
+    size_t idx_off = c->n_syndrome_bits;
+    for (size_t i = 0; i < n_index_bits; i++)
+        c->syndrome_bits[idx_off + i] = idx_bit_wires[i];
+    size_t s_off = idx_off + n_index_bits;
+    for (uint32_t j = 0; j < p; j++)
+        c->syndrome_bits[s_off + j] = s_bit_wires[j];
+    c->n_syndrome_bits = need;
+
+    gf8_syndrome_entry_t *e = &c->syndrome_constraints[c->n_syndrome];
+    e->idx_off = idx_off;
+    e->s_off = s_off;
+    e->t = t;
+    e->idx_bits = idx_bits;
+    e->p = p;
+    e->n0 = n0;
+    e->M = m_copy;
+    e->m_bytes = m_bytes;
+    c->n_syndrome++;
+
+    if (idx_bits > c->max_syndrome_degree)
+        c->max_syndrome_degree = idx_bits;
+}
+
+size_t
+voleith_gf8_circuit_syndrome_count(const voleith_gf8_circuit_t *c)
+{
+    return c->n_syndrome;
+}
+
+const gf8_syndrome_entry_t *
+voleith_gf8_circuit_syndrome_constraints(const voleith_gf8_circuit_t *c)
+{
+    return c->syndrome_constraints;
+}
+
+const gf8_wire_id *
+voleith_gf8_circuit_syndrome_bits(const voleith_gf8_circuit_t *c)
+{
+    return c->syndrome_bits;
+}
+
 /* ================================================================
  * Introspection
  * ================================================================ */
@@ -651,6 +849,22 @@ size_t
 voleith_gf8_circuit_mul_count(const voleith_gf8_circuit_t *c)
 {
     return c->n_mul;
+}
+
+unsigned int
+voleith_gf8_circuit_qs_degree(const voleith_gf8_circuit_t *c)
+{
+    /* Baseline degree-2 (MUL gate / assert_product).  A less-than constraint
+     * of width w raises the opening degree to w+1 (tracked as max_lt_degree); a
+     * syndrome constraint raises it to idx_bits (tracked as max_syndrome_degree).
+     * d is derived, not transmitted; degree-2-only circuits stay at 2
+     * (byte-identical). */
+    unsigned int d = 2u;
+    if (c->max_lt_degree > d)
+        d = c->max_lt_degree;
+    if (c->max_syndrome_degree > d)
+        d = c->max_syndrome_degree;
+    return d;
 }
 
 size_t
@@ -726,6 +940,30 @@ voleith_gf8_circuit_validate(const voleith_gf8_circuit_t *c)
                 return -1;
             break;
         }
+    }
+    for (size_t i = 0; i < c->n_lt; i++) {
+        const gf8_lt_entry_t *lt = &c->lt_constraints[i];
+        size_t cnt = (size_t)2 * lt->width;
+        if (lt->width == 0 || lt->bits_off + cnt > c->n_lt_bits)
+            return -1;
+        for (size_t j = 0; j < cnt; j++)
+            if (c->lt_bits[lt->bits_off + j] >= n)
+                return -1;
+    }
+    for (size_t i = 0; i < c->n_syndrome; i++) {
+        const gf8_syndrome_entry_t *sy = &c->syndrome_constraints[i];
+        size_t block_bytes = ((size_t)sy->p + 7u) / 8u;
+        size_t cnt = (size_t)sy->t * sy->idx_bits + (size_t)sy->p;
+        if (sy->t == 0 || sy->idx_bits == 0 || sy->p == 0 || sy->n0 == 0)
+            return -1;
+        if (sy->m_bytes != (size_t)(sy->n0 - 1u) * block_bytes)
+            return -1;
+        if (sy->idx_off + cnt > c->n_syndrome_bits ||
+            sy->s_off != sy->idx_off + (size_t)sy->t * sy->idx_bits)
+            return -1;
+        for (size_t j = 0; j < cnt; j++)
+            if (c->syndrome_bits[sy->idx_off + j] >= n)
+                return -1;
     }
     return 0;
 }
@@ -822,6 +1060,59 @@ voleith_gf8_circuit_check_constraints(const voleith_gf8_circuit_t *c,
                 return 0;
             break;
         }
+        }
+    }
+    /* Less-than: value(A) < value(B), MSB-first bit wires (each 0x00/0x01). */
+    for (size_t i = 0; i < c->n_lt; i++) {
+        const gf8_lt_entry_t *lt = &c->lt_constraints[i];
+        const gf8_wire_id *bits = c->lt_bits + lt->bits_off;
+        int lt_holds = 0; /* A < B ? */
+        for (unsigned int j = 0; j < lt->width; j++) {
+            uint8_t aj = wire_vals[bits[j]] & 1u;
+            uint8_t bj = wire_vals[bits[lt->width + j]] & 1u;
+            if (aj != bj) {
+                lt_holds = (aj == 0); /* first differing bit: A<B iff a=0,b=1 */
+                break;
+            }
+        }
+        if (!lt_holds)
+            return 0;
+    }
+    /*
+     * Syndrome: s_j = XOR_k M[j, g_k], global-bit form (clear-domain oracle;
+     * the degree-d prover/verifier accumulators are validated against this).
+     * g_k is reconstructed from its MSB-first index bits; block b_k = g_k / p,
+     * local_k = g_k mod p.  A non-identity block b contributes the circulant
+     * coefficient m_b[(j - local_k) mod p] to s_j (matching ichor_gf2x_mul in
+     * voleith_rs_opener_argus_syndrome); the identity last block contributes
+     * [local_k == j].
+     */
+    for (size_t i = 0; i < c->n_syndrome; i++) {
+        const gf8_syndrome_entry_t *sy = &c->syndrome_constraints[i];
+        const gf8_wire_id *idx = c->syndrome_bits + sy->idx_off;
+        const gf8_wire_id *s_wires = c->syndrome_bits + sy->s_off;
+        size_t block_bytes = ((size_t)sy->p + 7u) / 8u;
+        uint32_t p = sy->p;
+
+        for (uint32_t j = 0; j < p; j++) {
+            uint8_t acc = 0;
+            for (uint32_t k = 0; k < sy->t; k++) {
+                const gf8_wire_id *kb = idx + (size_t)k * sy->idx_bits;
+                uint32_t g = 0;
+                for (uint32_t b = 0; b < sy->idx_bits; b++)
+                    g = (g << 1) | (wire_vals[kb[b]] & 1u); /* MSB-first */
+                uint32_t blk = g / p;
+                uint32_t local = g % p;
+                if (blk == sy->n0 - 1u) {
+                    acc ^= (uint8_t)(local == j);
+                } else {
+                    uint32_t a = (j + p - local) % p; /* (j - local) mod p */
+                    const uint8_t *mb = sy->M + (size_t)blk * block_bytes;
+                    acc ^= (uint8_t)((mb[a >> 3] >> (a & 7u)) & 1u);
+                }
+            }
+            if ((wire_vals[s_wires[j]] & 1u) != acc)
+                return 0;
         }
     }
     return 1;

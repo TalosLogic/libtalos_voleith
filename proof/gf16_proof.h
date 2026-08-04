@@ -45,8 +45,20 @@
 /*
  * Proof size in bytes for the given params and GF(2^16) circuit ell.
  * ell = voleith_gf16_qs_ell(circuit) (count of GF(2^16) element slots).
+ *
+ * NOTE: no circuit, so it assumes the degree-2 baseline (correct for MUL /
+ * assert_product circuits).  For a higher-degree constraint (less-than /
+ * opener) circuit use voleith_gf16_proof_byte_size_circuit().
  */
 size_t voleith_gf16_proof_byte_size(const voleith_params_t *params, size_t ell);
+
+/*
+ * Degree-aware proof size: derives ell and the QuickSilver opening degree from
+ * the circuit, correct for degree-d (d > 2) circuits.  Returns 0 on NULL input.
+ */
+size_t
+voleith_gf16_proof_byte_size_circuit(const voleith_params_t *params,
+                                     const voleith_gf16_circuit_t *circuit);
 
 /* ================================================================
  * Prove and verify

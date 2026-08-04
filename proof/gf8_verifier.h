@@ -31,8 +31,10 @@
  * Element-level QuickSilver verifier.
  *
  * Reconstructs a0_tilde from the circuit, the verifier's VOLE Q matrix,
- * the correction d, the VOLE challenge delta, and the prover's a1_tilde,
- * a2_tilde. The caller compares a0_tilde_out against the prover's a0_tilde.
+ * the correction d, the VOLE challenge delta, and the prover's transmitted
+ * coefficients a_1..a_d.  The caller compares a0_tilde_out against the
+ * prover's a_0.  d is the opening count for this circuit
+ * (voleith_gf8_circuit_qs_degree, 2 today).
  *
  * circuit:      the GF(2⁸) circuit being verified
  * instance:     instance bytes (instance_count bytes)
@@ -41,8 +43,8 @@
  * d:            VOLE correction bytes from prover, ell bytes
  * delta:        VOLE challenge, lambda/8 bytes
  * chall_2:      ZKHash parameters, 3*lambda/8+8 bytes
- * a1_tilde:     prover's degree-1 hash, lambda/8 bytes
- * a2_tilde:     prover's degree-2 hash, lambda/8 bytes
+ * a_in:         prover's transmitted coefficients; a_in[i] = a_i for i = 1..d
+ *               (a_in[0] is unused), each lambda/8 bytes
  * a0_tilde_out: output: reconstructed degree-0 hash, lambda/8 bytes
  *
  * Returns 0 on success, -1 on allocation failure or invalid parameters.
@@ -51,7 +53,6 @@ int voleith_gf8_qs_verify(const voleith_gf8_circuit_t *circuit,
                           const uint8_t *instance, unsigned int lambda,
                           const uint8_t **Q, const uint8_t *d,
                           const uint8_t *delta, const uint8_t *chall_2,
-                          const uint8_t *a1_tilde, const uint8_t *a2_tilde,
-                          uint8_t *a0_tilde_out);
+                          const uint8_t *const *a_in, uint8_t *a0_tilde_out);
 
 #endif /* VOLEITH_GF8_VERIFIER_H */

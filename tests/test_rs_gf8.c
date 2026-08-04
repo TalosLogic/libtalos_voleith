@@ -47,6 +47,12 @@
 #include "rs_gf8_circuit.h"
 #include "rs_leaf_gf8_circuit.h"
 #include "rs_membership_gf8_circuit.h"
+#include "rs_opener_gf8_circuit.h"
+
+#include <ichor/util.h>   /* ichor_bitpack_le32 (support packing) */
+#include <ichor/aesdm.h>  /* AES-DM KDF oracle (OP.CIRC.3a) */
+#include <ichor/grostl.h> /* Grostl-256 KDF oracle (OP.CIRC.3b) */
+#include <ichor/hash.h>   /* ichor_sha3_256 (variable-length KAT digests) */
 
 #include <stdlib.h>
 
@@ -854,6 +860,228 @@ test_epoch_fingerprint(void)
 }
 
 /* ================================================================
+ * OP.CFG: V5 designated-opener module (bitmap bit 6, validate,
+ * fingerprint).  The opener carries the Argus public matrix M and a
+ * parameter-set selector; a lambda/8 id joins the leaf preimage (Q2) and
+ * is shared with the V4 commitment id (Q8).
+ * ================================================================ */
+
+/* Deterministic M (the (n0-1) circulant blocks) for a shipped set.  Content
+ * is arbitrary for validate (only length matters) and fixed for the
+ * fingerprint KAT.  Returns NULL length via *out_len == 0 for a reserved set. */
+static uint8_t *
+opener_M_alloc(voleith_rs_opener_argus_set_t set, size_t *out_len)
+{
+    const voleith_rs_opener_argus_params_t *op =
+        voleith_rs_opener_argus_params(set);
+    size_t len = op ? (size_t)(op->n0 - 1u) * op->block_bytes : 0;
+    uint8_t *M = malloc(len ? len : 1);
+    for (size_t i = 0; i < len; i++)
+        M[i] = (uint8_t)(0x9eu * (unsigned)i + 0x37u);
+    *out_len = len;
+    return M;
+}
+
+/*
+ * Valid opener base: grostl-256-fixed tree (node32, leaf cap 64) so the
+ * sk(16) + id(16) preimage fits.  opener_set 128_2 => id = key_bytes = 16.
+ * The membership lambda and the opener lambda are independent in the config
+ * surface (the opener params are set-derived), so the tree choice here is
+ * only about leaf capacity.
+ */
+static voleith_rs_config_t
+opener_cfg(const uint8_t *M, size_t Mlen)
+{
+    voleith_rs_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.membership.tree_hash = &voleith_node_hash_grostl256_fixed;
+    cfg.membership.owf_hash = NULL;
+    cfg.membership.sk_bytes = 16;
+    cfg.membership.depth_m = 3;
+    cfg.enable_opener = 1;
+    cfg.opener_set = VOLEITH_RS_OPENER_ARGUS_SET_128_2;
+    cfg.opener_pk = M;
+    cfg.opener_pk_bytes = Mlen;
+    return cfg;
+}
+
+static void
+test_opener_bitmap(void)
+{
+    size_t Mlen;
+    uint8_t *M = opener_M_alloc(VOLEITH_RS_OPENER_ARGUS_SET_128_2, &Mlen);
+    voleith_rs_config_t cfg = opener_cfg(M, Mlen);
+
+    check("bitmap: opener bit (enable_opener)",
+          voleith_rs_module_bitmap(&cfg) == VOLEITH_RS_MODULE_OPENER);
+
+    cfg.scope_bytes = 12; /* V2 nullifier alongside the opener */
+    check("bitmap: opener + nullifier",
+          voleith_rs_module_bitmap(&cfg) ==
+              (VOLEITH_RS_MODULE_OPENER | VOLEITH_RS_MODULE_NULLIFIER));
+
+    cfg = opener_cfg(M, Mlen);
+    cfg.enable_opener = 0;
+    cfg.opener_pk = NULL;
+    cfg.opener_pk_bytes = 0;
+    check("bitmap: enable_opener==0 clears opener bit",
+          (voleith_rs_module_bitmap(&cfg) & VOLEITH_RS_MODULE_OPENER) == 0);
+
+    free(M);
+}
+
+static void
+test_opener_validate(void)
+{
+    size_t Mlen;
+    uint8_t *M = opener_M_alloc(VOLEITH_RS_OPENER_ARGUS_SET_128_2, &Mlen);
+    voleith_rs_config_t cfg;
+
+    /* --- accepts --- */
+    cfg = opener_cfg(M, Mlen);
+    check("opener validate: opener-only accepted",
+          voleith_rs_config_validate(&cfg) == 0);
+
+    cfg = opener_cfg(M, Mlen);
+    cfg.enable_commitment = 1; /* V4 + V5 share the id: commit_id_bytes==16 */
+    cfg.commit_id_bytes = 16;
+    cfg.commit_rand_bytes = 16;
+    check("opener validate: V4+V5 with commit_id_bytes==lambda/8 accepted",
+          voleith_rs_config_validate(&cfg) == 0);
+
+    /* --- rejects --- */
+    cfg = opener_cfg(M, Mlen);
+    cfg.opener_set =
+        VOLEITH_RS_OPENER_ARGUS_SET_128_3; /* reserved: params NULL */
+    check("opener validate: reserved/unshipped set rejected",
+          voleith_rs_config_validate(&cfg) == -1);
+
+    cfg = opener_cfg(M, Mlen);
+    cfg.opener_pk = NULL;
+    check("opener validate: NULL opener_pk rejected",
+          voleith_rs_config_validate(&cfg) == -1);
+
+    cfg = opener_cfg(M, Mlen);
+    cfg.opener_pk_bytes = Mlen + 1; /* wrong M length for the set */
+    check("opener validate: wrong opener_pk_bytes rejected",
+          voleith_rs_config_validate(&cfg) == -1);
+
+    cfg = opener_cfg(M, Mlen);
+    cfg.enable_commitment = 1;
+    cfg.commit_id_bytes = 8; /* != lambda/8; Q8 id-sharing violated */
+    cfg.commit_rand_bytes = 16;
+    check("opener validate: V4 commit_id_bytes != lambda/8 rejected",
+          voleith_rs_config_validate(&cfg) == -1);
+
+    /* enable_opener off but opener_pk left set: silently-dropped-field guard. */
+    cfg = opener_cfg(M, Mlen);
+    cfg.enable_opener = 0; /* opener_pk still non-NULL */
+    check("opener validate: opener_pk set with enable_opener==0 rejected",
+          voleith_rs_config_validate(&cfg) == -1);
+
+    /* Leaf capacity includes the id: sk(56) + id(16) = 72 > 64 rejects with
+     * the opener on, but sk(56) alone (opener off) fits, isolating the id. */
+    cfg = opener_cfg(M, Mlen);
+    cfg.membership.sk_bytes = 56;
+    check("opener validate: id pushes leaf preimage over capacity rejected",
+          voleith_rs_config_validate(&cfg) == -1);
+    cfg.enable_opener = 0;
+    cfg.opener_pk = NULL;
+    cfg.opener_pk_bytes = 0;
+    check("opener validate: same sk without opener (no id) accepted",
+          voleith_rs_config_validate(&cfg) == 0);
+
+    free(M);
+}
+
+/*
+ * Opener fingerprint: determinism, per-field binding (set, M digest, and the
+ * hash_id via the per-lambda prim_default), a bit-6-off regression check, and
+ * a KAT pin.
+ *
+ * BOOTSTRAP: RS_CFG_OPENER_KAT_PINNED starts at 0 so the first build prints
+ * the computed fingerprint without hard-failing; copy the printed bytes into
+ * opener_kat and flip the flag to 1 to arm the regression check.  Same pattern
+ * as test_epoch_fingerprint.
+ */
+#define RS_CFG_OPENER_KAT_PINNED 1
+static void
+test_opener_fingerprint(void)
+{
+    size_t Mlen, Mlen256;
+    uint8_t *M = opener_M_alloc(VOLEITH_RS_OPENER_ARGUS_SET_128_2, &Mlen);
+    uint8_t *M256 = opener_M_alloc(VOLEITH_RS_OPENER_ARGUS_SET_256_2, &Mlen256);
+    voleith_rs_config_t ref = opener_cfg(M, Mlen);
+    voleith_rs_config_t cfg;
+    uint8_t fp_ref[VOLEITH_RS_CONFIG_FINGERPRINT_BYTES];
+    uint8_t fp[VOLEITH_RS_CONFIG_FINGERPRINT_BYTES];
+
+    MUST_OK_FP(voleith_rs_config_fingerprint(&ref, fp_ref));
+    check("opener fingerprint: deterministic",
+          voleith_rs_config_fingerprint(&ref, fp) == 0 &&
+              memcmp(fp, fp_ref, sizeof(fp)) == 0);
+
+    /* opener_set (and its prim_default hash_id) bound: a different shipped set
+     * at a different lambda changes the absorbed set id and hash_id. */
+    cfg = opener_cfg(M256, Mlen256);
+    cfg.opener_set = VOLEITH_RS_OPENER_ARGUS_SET_256_2;
+    check("opener fingerprint: opener_set + hash_id bound",
+          voleith_rs_config_fingerprint(&cfg, fp) == 0 &&
+              memcmp(fp, fp_ref, sizeof(fp)) != 0);
+
+    /* M digest bound: flip one byte of M. */
+    {
+        uint8_t *Mbad = malloc(Mlen ? Mlen : 1);
+        memcpy(Mbad, M, Mlen);
+        Mbad[0] ^= 0x01u;
+        cfg = opener_cfg(Mbad, Mlen);
+        check("opener fingerprint: M digest bound",
+              voleith_rs_config_fingerprint(&cfg, fp) == 0 &&
+                  memcmp(fp, fp_ref, sizeof(fp)) != 0);
+        free(Mbad);
+    }
+
+    /* Bit-6-off regression: the opener section is absorbed only when bit 6 is
+     * set, so an opener-off config equals its own opener-fields-zeroed twin.
+     * (The pre-opener combined/epoch KATs staying green is the compat guard.) */
+    {
+        voleith_rs_config_t a = canonical_cfg();
+        voleith_rs_config_t b = canonical_cfg();
+        uint8_t fpa[VOLEITH_RS_CONFIG_FINGERPRINT_BYTES];
+        uint8_t fpb[VOLEITH_RS_CONFIG_FINGERPRINT_BYTES];
+        b.opener_set =
+            VOLEITH_RS_OPENER_ARGUS_SET_256_2; /* ignored: bit 6 off */
+        MUST_OK_FP(voleith_rs_config_fingerprint(&a, fpa));
+        check("opener fingerprint: opener_set ignored when bit 6 off",
+              voleith_rs_config_fingerprint(&b, fpb) == 0 &&
+                  memcmp(fpa, fpb, sizeof(fpa)) == 0);
+    }
+
+    /* KAT pin (bootstrap). */
+    {
+        static const uint8_t opener_kat[VOLEITH_RS_CONFIG_FINGERPRINT_BYTES] = {
+            0xe8, 0xb2, 0xef, 0xfa, 0x30, 0x1e, 0xa3, 0xba,
+            0xa6, 0x34, 0xb3, 0xbd, 0x66, 0xfb, 0x03, 0x96};
+        MUST_OK_FP(voleith_rs_config_fingerprint(&ref, fp));
+        printf("  RS.CFG opener-config fingerprint:");
+        for (size_t i = 0; i < sizeof(fp); i++)
+            printf(" %02x", fp[i]);
+        printf("\n");
+        if (RS_CFG_OPENER_KAT_PINNED) {
+            check("opener kat: matches pinned constant",
+                  memcmp(fp, opener_kat, sizeof(fp)) == 0);
+        } else {
+            printf("  (opener KAT not yet pinned: copy the bytes above into "
+                   "opener_kat and set RS_CFG_OPENER_KAT_PINNED to 1)\n");
+            (void)opener_kat;
+        }
+    }
+
+    free(M);
+    free(M256);
+}
+
+/* ================================================================
  * RS.LEAF: leaf over sk || attributes.
  * ================================================================ */
 
@@ -964,6 +1192,459 @@ test_rs_leaf(void)
                      32);
     rs_leaf_check_vt("grostl512-fixed", &voleith_node_hash_grostl512_fixed, 32,
                      32);
+}
+
+/* ================================================================
+ * OP.CIRC.1: V5 opener id in the leaf preimage.
+ *
+ * The full consistent-tuple eval (support / s / tag_ct) lands with the
+ * packer in OP.CIRC.4; here we validate the layout wiring (dedicated vs
+ * V4-shared id per Q8), that the id widens the OWF leaf preimage, and that
+ * appending an id changes the leaf node (the binding mechanism), plus the
+ * opener-off no-op.
+ * ================================================================ */
+/* Independent schoolbook circulant syndrome (out-of-range index = no column),
+ * matching the in-circuit per-support-element XOR semantics. */
+static void
+opener_synd_oracle(uint8_t *s, uint32_t p, uint32_t n0, uint32_t t,
+                   const uint32_t *idx, const uint8_t *M)
+{
+    size_t block_bytes = ((size_t)p + 7u) / 8u;
+    uint8_t *e = calloc((size_t)n0 * p, 1);
+    uint32_t k, j, b, a, cpos;
+    for (k = 0; k < t; k++)
+        if (idx[k] < (uint32_t)n0 * p)
+            e[idx[k]] = 1;
+    for (j = 0; j < p; j++)
+        s[j] = e[(size_t)(n0 - 1u) * p + j];
+    for (b = 0; b + 1u < n0; b++) {
+        const uint8_t *mb = M + (size_t)b * block_bytes;
+        for (a = 0; a < p; a++)
+            if ((mb[a >> 3] >> (a & 7u)) & 1u)
+                for (cpos = 0; cpos < p; cpos++)
+                    s[(a + cpos) % p] ^= e[(size_t)b * p + cpos];
+    }
+    free(e);
+}
+
+/* Build a standalone opener-syndrome circuit at reduced params: commit the
+ * bit-packed support (LSB-first at idx_bits, via ichor_bitpack_le32), declare p
+ * syndrome bit instance wires, emit the helper, and eval.  Returns 1 if all
+ * constraints pass, 0 if any fails, -1 on error.  This exercises the MSB-first
+ * extraction + syndrome + LT well-formedness without the (opener-unaware) full
+ * packer. */
+static int
+opener_synd_eval(uint32_t p, uint32_t n0, uint32_t t, uint32_t idx_bits,
+                 const uint32_t *idx, const uint8_t *M, const uint8_t *s)
+{
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    size_t msg_bytes = ((size_t)t * idx_bits + 7u) / 8u;
+    gf8_wire_id *sup_w = malloc(msg_bytes * sizeof(gf8_wire_id));
+    gf8_wire_id *s_w = malloc((size_t)p * sizeof(gf8_wire_id));
+    uint8_t *witness = calloc(msg_bytes ? msg_bytes : 1, 1);
+    uint8_t *instance = malloc(p);
+    uint8_t *wire_vals;
+    size_t i;
+    int res;
+
+    ichor_bitpack_le32(witness, msg_bytes, idx, t, idx_bits);
+    for (i = 0; i < msg_bytes; i++)
+        sup_w[i] = voleith_gf8_add_witness(c);
+    for (i = 0; i < p; i++) {
+        s_w[i] = voleith_gf8_add_instance(c);
+        instance[i] = (uint8_t)(s[i] & 1u);
+    }
+    res = voleith_rs_opener_syndrome_gf8(c, sup_w, s_w, t, idx_bits, p, n0, M);
+    if (res != 0) {
+        res = -1;
+        goto done;
+    }
+    wire_vals = malloc(voleith_gf8_circuit_wire_count(c));
+    res = voleith_gf8_circuit_eval(c, witness, instance, wire_vals);
+    if (res != 1 && res != 0)
+        res = -1;
+    free(wire_vals);
+done:
+    free(sup_w);
+    free(s_w);
+    free(witness);
+    free(instance);
+    voleith_gf8_circuit_free(c);
+    return res;
+}
+
+static void
+test_opener_syndrome_reduced(void)
+{
+    /* Tiny synthetic set (same shape as test_syndrome_gf8): p=7, n0=2 (n=14),
+     * t=2, idx_bits=4, one circulant block M = 0x5a. */
+    const uint32_t p = 7, n0 = 2, t = 2, idx_bits = 4;
+    const uint8_t M[1] = {0x5a};
+    uint32_t idx[2] = {2, 9};
+    uint8_t s[7];
+
+    opener_synd_oracle(s, p, n0, t, idx, M);
+    check("opener syndrome: honest support + s accepts (packed->extract)",
+          opener_synd_eval(p, n0, t, idx_bits, idx, M, s) == 1);
+
+    /* Wrong s bit rejects. */
+    {
+        uint8_t sbad[7];
+        memcpy(sbad, s, 7);
+        sbad[3] ^= 1u;
+        check("opener syndrome: wrong s bit rejects",
+              opener_synd_eval(p, n0, t, idx_bits, idx, M, sbad) == 0);
+    }
+    /* Duplicate index (weight < t): XOR cancels, commit s = 0; ascending LT
+     * rejects. */
+    {
+        uint32_t dup[2] = {5, 5};
+        uint8_t s0[7] = {0};
+        check("opener syndrome: duplicate support rejects (LT)",
+              opener_synd_eval(p, n0, t, idx_bits, dup, M, s0) == 0);
+    }
+    /* Descending order: commutative XOR keeps honest s; ascending LT rejects. */
+    {
+        uint32_t desc[2] = {9, 2};
+        check("opener syndrome: descending support rejects (LT)",
+              opener_synd_eval(p, n0, t, idx_bits, desc, M, s) == 0);
+    }
+    /* Out-of-range index (== n): no column, s matches remainder; range LT
+     * rejects. */
+    {
+        uint32_t oor[2] = {2, 14};
+        uint8_t soor[7];
+        opener_synd_oracle(soor, p, n0, t, oor, M);
+        check("opener syndrome: out-of-range support rejects (range)",
+              opener_synd_eval(p, n0, t, idx_bits, oor, M, soor) == 0);
+    }
+}
+
+/* Build a standalone lambda=128 KDF+DEM circuit at reduced size and eval it.
+ * K = AES-DM(ds_iv, msg) is computed by ichor_aesdm_* (the SAME primitive the
+ * argus KDF calls), so a passing eval proves the in-circuit chain is byte-exact.
+ * tamper: 0 = honest, 1 = flip tag_ct, 2 = flip committed id.  Witness layout =
+ * support(msg_bytes) || id(16) || kdf_invin; instance = tag_ct(16). */
+static int
+opener_dem_aesdm_eval(const uint8_t ds_iv[16], const uint8_t *msg,
+                      size_t msg_bytes, const uint8_t id[16], int tamper)
+{
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    size_t invin = voleith_rs_opener_kdf_aesdm_invin_bytes(msg_bytes);
+    gf8_wire_id *sup_w = malloc(msg_bytes * sizeof(gf8_wire_id));
+    gf8_wire_id id_w[16], tag_w[16];
+    uint8_t K[16], tag_ct[16];
+    uint8_t *witness = malloc(msg_bytes + 16 + invin);
+    uint8_t instance[16];
+    uint8_t *wire_vals;
+    ichor_aesdm_ctx_t kc;
+    size_t i;
+    int res;
+
+    ichor_aesdm_init_iv(&kc, ds_iv);
+    ichor_aesdm_absorb(&kc, msg, msg_bytes);
+    ichor_aesdm_finalize_fixed(&kc, K);
+    ichor_aesdm_clear(&kc);
+    for (i = 0; i < 16; i++)
+        tag_ct[i] = (uint8_t)(K[i] ^ id[i]);
+
+    for (i = 0; i < msg_bytes; i++)
+        sup_w[i] = voleith_gf8_add_witness(c);
+    for (i = 0; i < 16; i++)
+        id_w[i] = voleith_gf8_add_witness(c);
+    for (i = 0; i < 16; i++)
+        tag_w[i] = voleith_gf8_add_instance(c);
+    res = voleith_rs_opener_dem_aesdm_gf8(c, sup_w, msg_bytes, ds_iv, id_w,
+                                          tag_w, 16);
+    if (res != 0) {
+        res = -1;
+        goto done;
+    }
+
+    memcpy(witness, msg, msg_bytes);
+    memcpy(witness + msg_bytes, id, 16);
+    voleith_rs_opener_kdf_aesdm_build_witness(ds_iv, msg, msg_bytes,
+                                              witness + msg_bytes + 16);
+    memcpy(instance, tag_ct, 16);
+    if (tamper == 1)
+        instance[0] ^= 1u; /* wrong tag_ct */
+    if (tamper == 2)
+        witness[msg_bytes] ^= 1u; /* wrong committed id (K unchanged) */
+
+    wire_vals = malloc(voleith_gf8_circuit_wire_count(c));
+    res = voleith_gf8_circuit_eval(c, witness, instance, wire_vals);
+    if (res != 1 && res != 0)
+        res = -1;
+    free(wire_vals);
+done:
+    free(sup_w);
+    free(witness);
+    voleith_gf8_circuit_free(c);
+    return res;
+}
+
+static void
+test_opener_dem_aesdm_reduced(void)
+{
+    uint8_t ds_iv[16], msg[20], id[16];
+    size_t i;
+    for (i = 0; i < 16; i++)
+        ds_iv[i] = (uint8_t)(0x10 + i);
+    for (i = 0; i < 20; i++)
+        msg[i] = (uint8_t)(0x40 + i);
+    for (i = 0; i < 16; i++)
+        id[i] = (uint8_t)(0xA0 + i);
+
+    /* 20 bytes = 1 full block + 4-byte partial (finalize zero-pads + 1 iter). */
+    check("opener DEM aesdm: honest tag_ct==K^id accepts (byte-exact ichor)",
+          opener_dem_aesdm_eval(ds_iv, msg, 20, id, 0) == 1);
+    check("opener DEM aesdm: wrong tag_ct rejects",
+          opener_dem_aesdm_eval(ds_iv, msg, 20, id, 1) == 0);
+    check("opener DEM aesdm: wrong committed id rejects",
+          opener_dem_aesdm_eval(ds_iv, msg, 20, id, 2) == 0);
+    /* Exact block multiple: finalize adds no extra block. */
+    check("opener DEM aesdm: exact-block-multiple accepts",
+          opener_dem_aesdm_eval(ds_iv, msg, 16, id, 0) == 1);
+    /* Empty message: K = ds_iv (finalize adds nothing). */
+    check("opener DEM aesdm: empty support (K == ds_iv) accepts",
+          opener_dem_aesdm_eval(ds_iv, msg, 0, id, 0) == 1);
+}
+
+/* lambda=256 twin of opener_dem_aesdm_eval: K = Grostl-256(ds_iv-padded, msg)
+ * via ichor_grostl256_init_iv/absorb/finalize_fixed (the same primitive the
+ * argus KDF calls).  key_bytes = 32. */
+static int
+opener_dem_grostl_eval(const uint8_t ds_iv[16], const uint8_t *msg,
+                       size_t msg_bytes, const uint8_t id[32], int tamper)
+{
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    size_t invin = voleith_rs_opener_kdf_grostl256_invin_bytes(msg_bytes);
+    gf8_wire_id *sup_w =
+        malloc((msg_bytes ? msg_bytes : 1) * sizeof(gf8_wire_id));
+    gf8_wire_id id_w[32], tag_w[32];
+    uint8_t iv64[64], K[32], tag_ct[32];
+    uint8_t *witness = malloc(msg_bytes + 32 + invin);
+    uint8_t instance[32];
+    uint8_t *wire_vals;
+    ichor_grostl_ctx_t gc;
+    size_t i;
+    int res;
+
+    memset(iv64, 0, 64);
+    memcpy(iv64, ds_iv, 16);
+    ichor_grostl256_init_iv(&gc, iv64);
+    ichor_grostl_absorb(&gc, msg, msg_bytes);
+    ichor_grostl_finalize_fixed(&gc, K);
+    ichor_grostl_clear(&gc);
+    for (i = 0; i < 32; i++)
+        tag_ct[i] = (uint8_t)(K[i] ^ id[i]);
+
+    for (i = 0; i < msg_bytes; i++)
+        sup_w[i] = voleith_gf8_add_witness(c);
+    for (i = 0; i < 32; i++)
+        id_w[i] = voleith_gf8_add_witness(c);
+    for (i = 0; i < 32; i++)
+        tag_w[i] = voleith_gf8_add_instance(c);
+    res = voleith_rs_opener_dem_grostl256_gf8(c, sup_w, msg_bytes, ds_iv, id_w,
+                                              tag_w, 32);
+    if (res != 0) {
+        res = -1;
+        goto done;
+    }
+
+    memcpy(witness, msg, msg_bytes);
+    memcpy(witness + msg_bytes, id, 32);
+    voleith_rs_opener_kdf_grostl256_build_witness(ds_iv, msg, msg_bytes,
+                                                  witness + msg_bytes + 32);
+    memcpy(instance, tag_ct, 32);
+    if (tamper == 1)
+        instance[0] ^= 1u;
+    if (tamper == 2)
+        witness[msg_bytes] ^= 1u;
+
+    wire_vals = malloc(voleith_gf8_circuit_wire_count(c));
+    res = voleith_gf8_circuit_eval(c, witness, instance, wire_vals);
+    if (res != 1 && res != 0)
+        res = -1;
+    free(wire_vals);
+done:
+    free(sup_w);
+    free(witness);
+    voleith_gf8_circuit_free(c);
+    return res;
+}
+
+static void
+test_opener_dem_grostl_reduced(void)
+{
+    uint8_t ds_iv[16], msg[70], id[32];
+    size_t i;
+    for (i = 0; i < 16; i++)
+        ds_iv[i] = (uint8_t)(0x21 + i);
+    for (i = 0; i < 70; i++)
+        msg[i] = (uint8_t)(0x30 + i);
+    for (i = 0; i < 32; i++)
+        id[i] = (uint8_t)(0xC0 + i);
+
+    /* 70 bytes = 1 full 64-byte block + 6-byte partial (finalize zero-pads). */
+    check("opener DEM grostl: honest tag_ct==K^id accepts (byte-exact ichor)",
+          opener_dem_grostl_eval(ds_iv, msg, 70, id, 0) == 1);
+    check("opener DEM grostl: wrong tag_ct rejects",
+          opener_dem_grostl_eval(ds_iv, msg, 70, id, 1) == 0);
+    check("opener DEM grostl: wrong committed id rejects",
+          opener_dem_grostl_eval(ds_iv, msg, 70, id, 2) == 0);
+    /* Exact block multiple (64): finalize adds no extra block. */
+    check("opener DEM grostl: exact-block-multiple accepts",
+          opener_dem_grostl_eval(ds_iv, msg, 64, id, 0) == 1);
+    /* Empty message: a single zero block is compressed. */
+    check("opener DEM grostl: empty support accepts",
+          opener_dem_grostl_eval(ds_iv, msg, 0, id, 0) == 1);
+}
+
+/* aes-dm (variable-input) opener base so owf_invin scales with the preimage
+ * length; opener_cfg() uses the fixed-input grostl256 whose invin is constant. */
+static voleith_rs_config_t
+opener_circuit_cfg(const uint8_t *M, size_t Mlen)
+{
+    voleith_rs_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.membership.tree_hash = &voleith_node_hash_aes_dm;
+    cfg.membership.sk_bytes = 16;
+    cfg.membership.depth_m = 3;
+    cfg.enable_opener = 1;
+    cfg.opener_set = VOLEITH_RS_OPENER_ARGUS_SET_128_2;
+    cfg.opener_pk = M;
+    cfg.opener_pk_bytes = Mlen;
+    return cfg;
+}
+
+static void
+test_opener_circuit(void)
+{
+    size_t Mlen;
+    uint8_t *M = opener_M_alloc(VOLEITH_RS_OPENER_ARGUS_SET_128_2, &Mlen);
+    voleith_gf8_circuit_t *c;
+
+    /* opener off: no id section, build unaffected. */
+    {
+        voleith_rs_config_t cfg = canonical_cfg();
+        voleith_rs_layout_t L;
+        c = voleith_gf8_circuit_new();
+        MUST_OK_FP(voleith_rs_build_circuit(c, &cfg, &L));
+        check("opener circuit: off => no id section",
+              L.opener_id_off == 0 && L.opener_id_bytes == 0);
+        voleith_gf8_circuit_free(c);
+    }
+
+    /* opener on, V4 off: dedicated id witness of key_bytes; the id widens the
+     * OWF leaf preimage (owf_invin grows vs the same config with the opener
+     * off) and the witness grows by at least id_bytes. */
+    {
+        voleith_rs_config_t on = opener_circuit_cfg(M, Mlen); /* aes-dm, sk16 */
+        voleith_rs_config_t off = on;
+        voleith_rs_layout_t Lon, Loff;
+        off.enable_opener = 0;
+        off.opener_pk = NULL;
+        off.opener_pk_bytes = 0;
+
+        c = voleith_gf8_circuit_new();
+        MUST_OK_FP(voleith_rs_build_circuit(c, &on, &Lon));
+        voleith_gf8_circuit_free(c);
+        c = voleith_gf8_circuit_new();
+        MUST_OK_FP(voleith_rs_build_circuit(c, &off, &Loff));
+        voleith_gf8_circuit_free(c);
+
+        check("opener circuit: id_bytes == lambda/8 (128)",
+              Lon.opener_id_bytes == 16);
+        check("opener circuit: dedicated id witness when V4 off",
+              Lon.opener_id_off != 0);
+        check("opener circuit: id widens OWF leaf preimage",
+              Lon.membership.owf_invin_bytes > Loff.membership.owf_invin_bytes);
+        check("opener circuit: witness grows by >= id_bytes",
+              Lon.witness_bytes >= Loff.witness_bytes + 16);
+
+        /* OP.CIRC.2: support witness (msg_bytes) + s bit instance (p). */
+        {
+            const voleith_rs_opener_argus_params_t *op =
+                voleith_rs_opener_argus_params(
+                    VOLEITH_RS_OPENER_ARGUS_SET_128_2);
+            check("opener circuit: support section == msg_bytes",
+                  Lon.opener_support_bytes == op->msg_bytes &&
+                      Lon.opener_support_off != 0);
+            check("opener circuit: s instance section == p",
+                  Lon.inst_opener_s_bytes == op->p);
+            check("opener circuit: off => no support/s sections",
+                  Loff.opener_support_bytes == 0 &&
+                      Loff.inst_opener_s_bytes == 0);
+            /* OP.CIRC.3: tag_ct instance == key_bytes (DEM ciphertext). */
+            check("opener circuit: tag_ct instance == key_bytes",
+                  Lon.inst_opener_tag_ct_bytes == op->key_bytes);
+            check("opener circuit: off => no tag_ct section",
+                  Loff.inst_opener_tag_ct_bytes == 0);
+            /* OP.CIRC.4: KDF inv_in section == aesdm(msg_bytes) at lambda128. */
+            check("opener circuit: kdf invin == aesdm(msg_bytes)",
+                  Lon.opener_kdf_invin_bytes ==
+                      voleith_rs_opener_kdf_aesdm_invin_bytes(op->msg_bytes));
+        }
+    }
+
+    /* opener on + V4 on: Q8 shared id witness (opener_id_off==commit_id_off). */
+    {
+        voleith_rs_config_t cfg = opener_circuit_cfg(M, Mlen);
+        voleith_rs_layout_t L;
+        cfg.enable_commitment = 1;
+        cfg.commit_id_bytes = 16;
+        cfg.commit_rand_bytes = 16;
+        c = voleith_gf8_circuit_new();
+        MUST_OK_FP(voleith_rs_build_circuit(c, &cfg, &L));
+        check("opener circuit: Q8 id shared with V4 commit id",
+              L.opener_id_bytes == 16 && L.opener_id_off == L.commit_id_off);
+        voleith_gf8_circuit_free(c);
+    }
+
+    /* id changes the leaf: OWF(sk) != OWF(sk || id).  The id joins the OWF
+     * preimage as tail bytes exactly as build_circuit appends it. */
+    {
+        const voleith_node_hash_vt *vt = &voleith_node_hash_grostl256_fixed;
+        uint8_t sk[16], id[16];
+        uint8_t n_noid[RS_LEAF_MAX_NODE], n_id[RS_LEAF_MAX_NODE];
+        for (int k = 0; k < 16; k++) {
+            sk[k] = (uint8_t)k;
+            id[k] = (uint8_t)(0xA0 + k);
+        }
+        rs_leaf_incircuit(vt, sk, 16, NULL, 0, n_noid);
+        rs_leaf_incircuit(vt, sk, 16, id, 16, n_id);
+        check("opener circuit: id changes the leaf node",
+              memcmp(n_noid, n_id, vt->node_bytes) != 0);
+    }
+
+    /* lambda=256 opener (Grostl-256 KDF path): build succeeds and the id +
+     * tag_ct sections are 32 bytes.  Uses 256_5 (smallest 256 set). */
+    {
+        size_t Mlen5;
+        uint8_t *M5 = opener_M_alloc(VOLEITH_RS_OPENER_ARGUS_SET_256_5, &Mlen5);
+        const voleith_rs_opener_argus_params_t *op5 =
+            voleith_rs_opener_argus_params(VOLEITH_RS_OPENER_ARGUS_SET_256_5);
+        voleith_rs_config_t cfg;
+        voleith_rs_layout_t L;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.membership.tree_hash = &voleith_node_hash_aes_dm;
+        cfg.membership.sk_bytes = 16;
+        cfg.membership.depth_m = 3;
+        cfg.enable_opener = 1;
+        cfg.opener_set = VOLEITH_RS_OPENER_ARGUS_SET_256_5;
+        cfg.opener_pk = M5;
+        cfg.opener_pk_bytes = Mlen5;
+        c = voleith_gf8_circuit_new();
+        MUST_OK_FP(voleith_rs_build_circuit(c, &cfg, &L));
+        check("opener circuit: lambda256 grostl id + tag_ct == 32",
+              op5->key_bytes == 32 && L.opener_id_bytes == 32 &&
+                  L.inst_opener_tag_ct_bytes == 32);
+        voleith_gf8_circuit_free(c);
+        free(M5);
+    }
+
+    free(M);
 }
 
 /* ================================================================
@@ -3817,6 +4498,603 @@ test_rs_v6_anonymity(void)
     voleith_rs_epoch_state_clear(&stB);
 }
 
+/* Build a minimal opener cfg over the aes-dm vt at the smallest set (128_5).
+ * Caller owns *M_out (Mlen bytes), filled with a fixed pseudo-pattern. */
+static const voleith_rs_opener_argus_params_t *
+opener_seal_cfg(voleith_rs_config_t *cfg, uint8_t **M_out, size_t *Mlen_out)
+{
+    const voleith_rs_opener_argus_set_t set = VOLEITH_RS_OPENER_ARGUS_SET_128_5;
+    const voleith_rs_opener_argus_params_t *op =
+        voleith_rs_opener_argus_params(set);
+    size_t Mlen, i;
+    uint8_t *M;
+
+    if (op == NULL)
+        return NULL;
+    Mlen = (size_t)(op->n0 - 1u) * op->block_bytes;
+    M = malloc(Mlen);
+    if (M == NULL)
+        return NULL;
+    for (i = 0; i < Mlen; i++)
+        M[i] = (uint8_t)(0x9eu * (unsigned)i + 0x37u);
+
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->membership.tree_hash = &voleith_node_hash_aes_dm;
+    cfg->membership.sk_bytes = 16;
+    cfg->membership.depth_m = 2;
+    cfg->enable_opener = 1;
+    cfg->opener_set = set;
+    cfg->opener_pk = M;
+    cfg->opener_pk_bytes = Mlen;
+    *M_out = M;
+    *Mlen_out = Mlen;
+    return op;
+}
+
+/* OP.SIGN: voleith_rs_opener_seal determinism, freshness, ground-truth
+ * openability, and argument validation (no proof; fast).
+ *
+ * BOOTSTRAP KAT (vector 2): RS_OPENER_SEAL_KAT_PINNED starts at 0 so the first
+ * build prints a SHA3-256 digest of the sealed (support || s || tag_ct); copy
+ * the 32 bytes into seal_kat and flip to 1 to arm. */
+#define RS_OPENER_SEAL_KAT_PINNED 1
+static void
+test_rs_opener_seal(void)
+{
+    voleith_rs_config_t cfg;
+    uint8_t *M = NULL;
+    size_t Mlen, i;
+    const voleith_rs_opener_argus_params_t *op =
+        opener_seal_cfg(&cfg, &M, &Mlen);
+    uint8_t rnd[16], rnd2[16], id[16];
+    uint32_t *sup1 = NULL, *sup2 = NULL;
+    uint8_t *s1 = NULL, *s2 = NULL, *t1 = NULL, *t2 = NULL;
+    int ok;
+
+    if (op == NULL) {
+        check("seal: 128_5 params present", 0);
+        free(M);
+        return;
+    }
+    sup1 = malloc((size_t)op->t * 4);
+    sup2 = malloc((size_t)op->t * 4);
+    s1 = malloc(op->block_bytes);
+    s2 = malloc(op->block_bytes);
+    t1 = malloc(op->key_bytes);
+    t2 = malloc(op->key_bytes);
+    if (!sup1 || !sup2 || !s1 || !s2 || !t1 || !t2) {
+        check("seal: alloc", 0);
+        goto done;
+    }
+    for (i = 0; i < 16; i++) {
+        rnd[i] = (uint8_t)(0x11u + i);
+        rnd2[i] = (uint8_t)(0x22u + i);
+        id[i] = (uint8_t)(0xA0u + i);
+    }
+
+    check("seal: ok",
+          voleith_rs_opener_seal(&cfg, rnd, 16, id, 16, sup1, s1, t1) == 0);
+    check("seal: deterministic on same randomness",
+          voleith_rs_opener_seal(&cfg, rnd, 16, id, 16, sup2, s2, t2) == 0 &&
+              memcmp(sup1, sup2, (size_t)op->t * 4) == 0 &&
+              memcmp(s1, s2, op->block_bytes) == 0 &&
+              memcmp(t1, t2, op->key_bytes) == 0);
+
+    MUST_OK_FP(voleith_rs_opener_seal(&cfg, rnd2, 16, id, 16, sup2, s2, t2));
+    check("seal: fresh randomness -> different support",
+          memcmp(sup1, sup2, (size_t)op->t * 4) != 0);
+    check("seal: fresh randomness -> different s",
+          memcmp(s1, s2, op->block_bytes) != 0);
+    check("seal: fresh randomness -> different tag_ct",
+          memcmp(t1, t2, op->key_bytes) != 0);
+
+    ok = 1;
+    for (i = 1; i < op->t; i++)
+        if (sup1[i] <= sup1[i - 1])
+            ok = 0;
+    for (i = 0; i < op->t; i++)
+        if (sup1[i] >= op->n)
+            ok = 0;
+    check("seal: support ascending, distinct, in range", ok);
+
+    check("seal: output opens under argus_verify (ground truth)",
+          voleith_rs_opener_argus_verify(op, M, s1, t1, op->prim_default, sup1,
+                                         id, 16) == VOLEITH_RS_OPENER_OK);
+
+    /* KAT (vector 2): SHA3-256 digest of the sealed (support || s || tag_ct)
+     * over the fixed randomness/id/M.  A digest (not raw bytes) because these
+     * are param-set-sized; support is absorbed 4-byte LE per index so the pin
+     * is stable across endianness. */
+    {
+        ichor_hash_ctx_t hc;
+        uint8_t dg[32], le[4];
+        static const uint8_t seal_kat[32] = {
+            0x8e, 0xcf, 0x3c, 0x3f, 0xba, 0xb5, 0x58, 0x37, 0x15, 0x29, 0x7c,
+            0x2e, 0xb3, 0xa3, 0x1d, 0x0d, 0xf6, 0x36, 0x27, 0xb7, 0x9b, 0x59,
+            0xb2, 0xd2, 0xb4, 0x4d, 0x6f, 0xf5, 0x5d, 0x7b, 0x32, 0x74};
+        ichor_sha3_256_init(&hc);
+        for (i = 0; i < op->t; i++) {
+            le[0] = (uint8_t)(sup1[i]);
+            le[1] = (uint8_t)(sup1[i] >> 8);
+            le[2] = (uint8_t)(sup1[i] >> 16);
+            le[3] = (uint8_t)(sup1[i] >> 24);
+            (void)ichor_sha3_256_absorb(&hc, le, 4);
+        }
+        (void)ichor_sha3_256_absorb(&hc, s1, op->block_bytes);
+        (void)ichor_sha3_256_absorb(&hc, t1, op->key_bytes);
+        ichor_sha3_256_finalize(&hc, dg);
+        printf("  RS.OPENER seal digest (support||s||tag_ct):");
+        for (i = 0; i < sizeof(dg); i++)
+            printf(" %02x", dg[i]);
+        printf("\n");
+        if (RS_OPENER_SEAL_KAT_PINNED) {
+            check("kat: opener seal digest matches pinned",
+                  memcmp(dg, seal_kat, sizeof(dg)) == 0);
+        } else {
+            printf("  (opener seal KAT not yet pinned: copy the bytes above "
+                   "into seal_kat and set RS_OPENER_SEAL_KAT_PINNED to 1)\n");
+            (void)seal_kat;
+        }
+    }
+
+    check("seal: wrong randomness_len rejected",
+          voleith_rs_opener_seal(&cfg, rnd, 15, id, 16, sup1, s1, t1) == -1);
+    check("seal: wrong id_len rejected",
+          voleith_rs_opener_seal(&cfg, rnd, 16, id, 15, sup1, s1, t1) == -1);
+    cfg.enable_opener = 0;
+    check("seal: opener-off rejected",
+          voleith_rs_opener_seal(&cfg, rnd, 16, id, 16, sup1, s1, t1) == -1);
+
+done:
+    free(M);
+    free(sup1);
+    free(sup2);
+    free(s1);
+    free(s2);
+    free(t1);
+    free(t2);
+}
+
+/* OP.SIGN: fs_seed opener section binds s || tag_ct (bit 6 on) and is skipped
+ * with the section absent when the opener is off (bit-6-off byte-identical).
+ *
+ * BOOTSTRAP KAT (vector 1): RS_OPENER_FS_KAT_PINNED starts at 0 so the first
+ * build prints the opener-on fs_seed; copy the 16 bytes into opener_fs_kat and
+ * flip to 1 to arm.  Same pattern as test_fingerprint_kat_pin. */
+#define RS_OPENER_FS_KAT_PINNED 0
+static void
+test_rs_opener_fs_seed(void)
+{
+    voleith_rs_config_t cfg;
+    uint8_t *M = NULL;
+    size_t Mlen;
+    const voleith_rs_opener_argus_params_t *op =
+        opener_seal_cfg(&cfg, &M, &Mlen);
+    uint8_t rnd[16], id[16];
+    uint32_t *sup = NULL;
+    uint8_t *s = NULL, *tag = NULL;
+    uint8_t root[16];
+    uint8_t seed0[VOLEITH_RS_FS_SEED_BYTES], seed1[VOLEITH_RS_FS_SEED_BYTES];
+    uint8_t seed2[VOLEITH_RS_FS_SEED_BYTES], seed3[VOLEITH_RS_FS_SEED_BYTES];
+    voleith_rs_public_t pub;
+    const uint8_t m[] = "opener fs_seed";
+    size_t i;
+
+    if (op == NULL) {
+        check("fs_seed: 128_5 params present", 0);
+        free(M);
+        return;
+    }
+    sup = malloc((size_t)op->t * 4);
+    s = malloc(op->block_bytes);
+    tag = malloc(op->key_bytes);
+    if (!sup || !s || !tag) {
+        check("fs_seed: alloc", 0);
+        goto done;
+    }
+    for (i = 0; i < 16; i++) {
+        rnd[i] = (uint8_t)(0x55u + i);
+        id[i] = (uint8_t)(0x10u + i);
+    }
+    memset(root, 0x7c, sizeof(root));
+    MUST_OK_FP(voleith_rs_opener_seal(&cfg, rnd, 16, id, 16, sup, s, tag));
+
+    memset(&pub, 0, sizeof(pub));
+    pub.membership_root = root;
+    pub.opener_s = s;
+    pub.opener_tag_ct = tag;
+
+    MUST_OK_FP(voleith_rs_compute_fs_seed(&cfg, &pub, m, sizeof(m) - 1, seed0));
+
+    /* KAT (vector 1): opener-enabled fs_seed over the fixed opener cfg + fixed
+     * s/tag_ct/message.  Captured before seed0 is reused below. */
+    {
+        static const uint8_t opener_fs_kat[VOLEITH_RS_FS_SEED_BYTES] = {
+            0x0e, 0x76, 0xed, 0x57, 0x48, 0x0a, 0xeb, 0xd6,
+            0x68, 0xa1, 0x53, 0x04, 0x01, 0x12, 0x92, 0x8c};
+        printf("  RS.OPENER fs_seed (opener-on):");
+        for (i = 0; i < sizeof(seed0); i++)
+            printf(" %02x", seed0[i]);
+        printf("\n");
+        if (RS_OPENER_FS_KAT_PINNED) {
+            check("kat: opener fs_seed matches pinned",
+                  memcmp(seed0, opener_fs_kat, sizeof(seed0)) == 0);
+        } else {
+            printf(
+                "  (opener fs_seed KAT not yet pinned: copy the bytes above "
+                "into opener_fs_kat and set RS_OPENER_FS_KAT_PINNED to 1)\n");
+            (void)opener_fs_kat;
+        }
+    }
+
+    /* Flipping a public s bit changes the opener fs_seed. */
+    s[0] ^= 0x01u;
+    MUST_OK_FP(voleith_rs_compute_fs_seed(&cfg, &pub, m, sizeof(m) - 1, seed1));
+    s[0] ^= 0x01u;
+    check("fs_seed: opener-on binds s",
+          memcmp(seed0, seed1, sizeof(seed0)) != 0);
+
+    /* Flipping a tag_ct byte changes the opener fs_seed. */
+    tag[0] ^= 0x01u;
+    MUST_OK_FP(voleith_rs_compute_fs_seed(&cfg, &pub, m, sizeof(m) - 1, seed2));
+    tag[0] ^= 0x01u;
+    check("fs_seed: opener-on binds tag_ct",
+          memcmp(seed0, seed2, sizeof(seed0)) != 0);
+
+    /* Opener off: bit 6 clear, section skipped -> opener_s / opener_tag_ct are
+     * ignored, and a garbage value in them does not move the seed.  Clear the
+     * opener key too, else validate rejects opener-off-with-pk. */
+    cfg.enable_opener = 0;
+    cfg.opener_pk = NULL;
+    cfg.opener_pk_bytes = 0;
+    MUST_OK_FP(voleith_rs_compute_fs_seed(&cfg, &pub, m, sizeof(m) - 1, seed0));
+    s[0] ^= 0xFFu;
+    tag[0] ^= 0xFFu;
+    MUST_OK_FP(voleith_rs_compute_fs_seed(&cfg, &pub, m, sizeof(m) - 1, seed3));
+    check("fs_seed: opener-off ignores opener fields (bit-6-off unchanged)",
+          memcmp(seed0, seed3, sizeof(seed0)) == 0);
+
+done:
+    free(M);
+    free(sup);
+    free(s);
+    free(tag);
+}
+
+/* OP.SIGN: streaming ring builder is byte-identical to the one-shot builder for
+ * non-opener configs, order-free across fields, and validates enablement. */
+static void
+test_rs_ring_builder_stream(void)
+{
+    voleith_rs_config_t cfg;
+    const voleith_node_hash_vt *vt = &voleith_node_hash_aes_dm;
+    uint8_t sks[4 * 16];
+    uint8_t root_a[16], root_b[16];
+    uint8_t sib_a[4 * 2 * 16], sib_b[4 * 2 * 16];
+    voleith_rs_path_t paths_a[4], paths_b[4];
+    voleith_rs_ring_builder_t *b = NULL;
+    size_t i;
+    int ident;
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.membership.tree_hash = vt;
+    cfg.membership.sk_bytes = 16;
+    cfg.membership.depth_m = 2;
+    for (i = 0; i < sizeof(sks); i++)
+        sks[i] = (uint8_t)(0x31 + i);
+
+    MUST_OK_FP(
+        voleith_rs_ring_build(&cfg, sks, NULL, 4, root_a, paths_a, sib_a));
+
+    MUST_OK_FP(voleith_rs_ring_build_init(&b, &cfg, 4, root_b, paths_b, sib_b));
+    for (i = 0; i < 4; i++) {
+        MUST_OK_FP(voleith_rs_ring_member_begin(b));
+        MUST_OK_FP(voleith_rs_ring_member_set(b, VOLEITH_RS_LEAF_FIELD_SK,
+                                              sks + i * 16, 16));
+        MUST_OK_FP(voleith_rs_ring_member_end(b));
+    }
+    MUST_OK_FP(voleith_rs_ring_build_final(b)); /* consumes b */
+
+    ident = memcmp(root_a, root_b, 16) == 0 &&
+            memcmp(sib_a, sib_b, sizeof(sib_a)) == 0;
+    check("builder: streaming == one-shot (root + siblings)", ident);
+
+    /* Negatives on a fresh builder (abandon with free). */
+    b = NULL;
+    MUST_OK_FP(voleith_rs_ring_build_init(&b, &cfg, 4, root_b, paths_b, sib_b));
+    MUST_OK_FP(voleith_rs_ring_member_begin(b));
+    check("builder: member_end without sk rejected",
+          voleith_rs_ring_member_end(b) == -1);
+    check("builder: id field rejected when opener off",
+          voleith_rs_ring_member_set(b, VOLEITH_RS_LEAF_FIELD_ID, sks, 16) ==
+              -1);
+    check("builder: wrong sk width rejected",
+          voleith_rs_ring_member_set(b, VOLEITH_RS_LEAF_FIELD_SK, sks, 15) ==
+              -1);
+    voleith_rs_ring_build_free(b);
+}
+
+/* OP.SER: VRSC format_version 2 (tagged sections + opener tag blob).  Exercises
+ * the serialization envelope only (synthetic proof bytes, no proving): builder
+ * v1==legacy byte-identical, v2 roundtrip with the opener tag, legacy readers
+ * read v2, generic sections, and the framing/tamper sweep.
+ *
+ * BOOTSTRAP KAT (vector 4): RS_SER_V2_KAT_PINNED starts at 0 so the first build
+ * prints a SHA3-256 digest of the full v2 envelope bytes; copy the 32 bytes
+ * into ser_v2_kat and flip to 1 to arm the wire-format regression pin. */
+#define RS_SER_V2_KAT_PINNED 1
+static void
+test_rs_ser_v2(void)
+{
+    voleith_rs_config_t cfg;
+    voleith_params_t params = voleith_params_em_128f;
+    const voleith_rs_opener_argus_params_t *op;
+    uint8_t *M = NULL;
+    size_t Mlen = 0;
+    uint8_t proof_bytes[48];
+    voleith_rs_sig_t sig, sig2 = {NULL, 0};
+    voleith_rs_public_t pub;
+    uint8_t *s_buf, *tag_buf;
+    voleith_rs_sig_packer_t *b = NULL;
+    voleith_rs_sig_unpacker_t *u = NULL;
+    uint8_t *v2 = NULL, *legacy = NULL;
+    size_t v2_len = 0, legacy_len = 0, written = 0, i;
+
+    op = opener_seal_cfg(&cfg, &M, &Mlen);
+    if (op == NULL) {
+        check("ser2: opener cfg", 0);
+        return;
+    }
+    for (i = 0; i < sizeof(proof_bytes); i++)
+        proof_bytes[i] = (uint8_t)(0x30u + i);
+    sig.data = proof_bytes;
+    sig.len = sizeof(proof_bytes);
+
+    s_buf = calloc(op->block_bytes, 1);
+    tag_buf = calloc(op->key_bytes, 1);
+    if (s_buf == NULL || tag_buf == NULL) {
+        check("ser2: alloc", 0);
+        goto done;
+    }
+    for (i = 0; i < op->block_bytes; i++)
+        s_buf[i] = (uint8_t)(0xA0u + i);
+    for (i = 0; i < op->key_bytes; i++)
+        tag_buf[i] = (uint8_t)(0x5Cu + i);
+    memset(&pub, 0, sizeof(pub));
+    pub.opener_s = s_buf;
+    pub.opener_tag_ct = tag_buf;
+
+    /* Legacy pack (v1) for the byte-identity comparison. */
+    legacy_len = voleith_rs_sig_packed_len(&sig);
+    legacy = calloc(legacy_len, 1);
+    if (legacy == NULL) {
+        check("ser2: alloc legacy", 0);
+        goto done;
+    }
+    check("ser2: legacy pack ok",
+          voleith_rs_sig_pack(legacy, legacy_len, &written, &sig, &cfg,
+                              &params) == 0 &&
+              written == legacy_len);
+
+    /* Builder in V1 with only a proof == legacy bytes. */
+    {
+        uint8_t *b1;
+        size_t b1_len;
+
+        MUST_OK_FP(voleith_rs_sig_pack_init(&b, &cfg, &params,
+                                            VOLEITH_RS_SIG_FORMAT_V1));
+        MUST_OK_FP(voleith_rs_sig_pack_proof(b, &sig));
+        b1_len = voleith_rs_sig_pack_len(b);
+        check("ser2: builder v1 len == legacy", b1_len == legacy_len);
+        b1 = calloc(b1_len ? b1_len : 1, 1);
+        MUST_OK_FP(voleith_rs_sig_pack_final(b, b1, b1_len, NULL));
+        b = NULL;
+        check("ser2: builder v1 byte-identical to legacy",
+              memcmp(b1, legacy, legacy_len) == 0);
+        free(b1);
+    }
+
+    /* V1 must reject an opener section (openability opt-down guard). */
+    MUST_OK_FP(
+        voleith_rs_sig_pack_init(&b, &cfg, &params, VOLEITH_RS_SIG_FORMAT_V1));
+    MUST_OK_FP(voleith_rs_sig_pack_proof(b, &sig));
+    MUST_OK_FP(voleith_rs_sig_pack_opener(b, &pub));
+    check("ser2: v1 + opener -> pack_len 0", voleith_rs_sig_pack_len(b) == 0);
+    check("ser2: v1 + opener -> final rejects",
+          voleith_rs_sig_pack_final(b, legacy, legacy_len, NULL) == -1);
+    b = NULL; /* final frees on failure */
+
+    /* AUTO with an opener section -> v2. */
+    MUST_OK_FP(voleith_rs_sig_pack_init(&b, &cfg, &params,
+                                        VOLEITH_RS_SIG_FORMAT_AUTO));
+    MUST_OK_FP(voleith_rs_sig_pack_proof(b, &sig));
+    MUST_OK_FP(voleith_rs_sig_pack_opener(b, &pub));
+    v2_len = voleith_rs_sig_pack_len(b);
+    check("ser2: v2 len == 37 + (5+proof) + (5+1+s+tag)",
+          v2_len == 37u + (5u + sig.len) +
+                        (5u + 1u + op->block_bytes + op->key_bytes));
+    v2 = calloc(v2_len, 1);
+    if (v2 == NULL) {
+        voleith_rs_sig_pack_free(b);
+        b = NULL;
+        check("ser2: alloc v2", 0);
+        goto done;
+    }
+    MUST_OK_FP(voleith_rs_sig_pack_final(b, v2, v2_len, &written));
+    b = NULL;
+    check("ser2: v2 written == len", written == v2_len);
+    check("ser2: v2 version byte == 2", v2[4] == 2u);
+
+    /* KAT (vector 4): SHA3-256 digest of the full v2 envelope, locking the exact
+     * wire layout (section tags, lengths, ordering) for the frozen format. */
+    {
+        uint8_t dg[32];
+        static const uint8_t ser_v2_kat[32] = {
+            0xe3, 0xcb, 0x8b, 0xe7, 0x62, 0xb6, 0x23, 0x96, 0x01, 0x4e, 0xdb,
+            0x1a, 0x5b, 0x8a, 0x9a, 0xb7, 0x03, 0x40, 0x36, 0x7a, 0x61, 0x5c,
+            0xcc, 0x3c, 0x23, 0x9e, 0x85, 0x36, 0x46, 0xf8, 0xad, 0x49};
+        ichor_sha3_256(dg, v2, v2_len);
+        printf("  RS.SER v2 envelope digest:");
+        for (i = 0; i < sizeof(dg); i++)
+            printf(" %02x", dg[i]);
+        printf("\n");
+        if (RS_SER_V2_KAT_PINNED) {
+            check("kat: v2 envelope digest matches pinned",
+                  memcmp(dg, ser_v2_kat, sizeof(dg)) == 0);
+        } else {
+            printf("  (v2 envelope KAT not yet pinned: copy the bytes above "
+                   "into ser_v2_kat and set RS_SER_V2_KAT_PINNED to 1)\n");
+            (void)ser_v2_kat;
+        }
+    }
+
+    /* v2 roundtrip: proof back + verify-shape (bytes match), opener tag blob. */
+    MUST_OK_FP(voleith_rs_sig_unpack_init(&u, v2, v2_len, &cfg, &params));
+    check("ser2: v2 unpack proof matches",
+          voleith_rs_sig_unpack_proof(u, &sig2) == 0 && sig2.len == sig.len &&
+              memcmp(sig2.data, sig.data, sig.len) == 0);
+    voleith_rs_sig_free(&sig2);
+    {
+        const uint8_t *tag = NULL;
+        size_t tag_len = 0;
+        int ok;
+
+        ok = voleith_rs_sig_unpack_opener(u, &tag, &tag_len) == 0;
+        check("ser2: opener tag len == 1+s+tag_ct",
+              ok && tag_len == 1u + op->block_bytes + op->key_bytes);
+        if (ok) {
+            check("ser2: opener tag hash_id", tag[0] == op->prim_default);
+            check("ser2: opener tag s",
+                  memcmp(tag + 1, s_buf, op->block_bytes) == 0);
+            check("ser2: opener tag tag_ct",
+                  memcmp(tag + 1 + op->block_bytes, tag_buf, op->key_bytes) ==
+                      0);
+        }
+    }
+    voleith_rs_sig_unpack_free(u);
+    u = NULL;
+
+    /* Legacy one-shot unpack reads a v2 blob and returns the proof. */
+    check("ser2: legacy unpack reads v2 proof",
+          voleith_rs_sig_unpack(&sig2, v2, v2_len, &cfg, &params) == 0 &&
+              sig2.len == sig.len && memcmp(sig2.data, sig.data, sig.len) == 0);
+    voleith_rs_sig_free(&sig2);
+
+    /* Fixed-header tamper sweep -> unpack_init rejects. */
+    {
+        struct {
+            const char *name;
+            size_t off;
+        } tamp[] = {
+            {"magic", 0},
+            {"version", 4},
+            {"cfg_fp", 5},
+            {"params_fp", 21},
+        };
+        for (i = 0; i < sizeof(tamp) / sizeof(tamp[0]); i++) {
+            char name[80];
+
+            v2[tamp[i].off] ^= 0x01;
+            snprintf(name, sizeof(name), "ser2: tamper %s rejected",
+                     tamp[i].name);
+            check(name, voleith_rs_sig_unpack_init(&u, v2, v2_len, &cfg,
+                                                   &params) == -1);
+            v2[tamp[i].off] ^= 0x01;
+        }
+    }
+
+    /* Truncated buffer (drop the last payload byte) -> reject. */
+    check("ser2: truncation rejected",
+          voleith_rs_sig_unpack_init(&u, v2, v2_len - 1, &cfg, &params) == -1);
+
+    /* Tamper the OPENER section tag (byte after the proof section: at
+     * 37 + 5 + proof) -> proof still reads, opener now missing. */
+    {
+        size_t opener_tag_off = 37u + 5u + sig.len;
+
+        v2[opener_tag_off] ^= 0x01;
+        check("ser2: tampered opener tag -> init ok, opener missing",
+              voleith_rs_sig_unpack_init(&u, v2, v2_len, &cfg, &params) == 0);
+        if (u != NULL) {
+            const uint8_t *tag = NULL;
+            size_t tag_len = 0;
+
+            check("ser2: opener gone after tag tamper",
+                  voleith_rs_sig_unpack_opener(u, &tag, &tag_len) == -1);
+            check("ser2: proof survives opener tag tamper",
+                  voleith_rs_sig_unpack_proof(u, &sig2) == 0 &&
+                      sig2.len == sig.len);
+            voleith_rs_sig_free(&sig2);
+            voleith_rs_sig_unpack_free(u);
+            u = NULL;
+        }
+        v2[opener_tag_off] ^= 0x01;
+    }
+
+    /* Tamper the proof section tag -> no proof -> init rejects. */
+    check("ser2: tampered proof tag -> init rejects (no proof)",
+          (v2[37] ^= 0x01,
+           voleith_rs_sig_unpack_init(&u, v2, v2_len, &cfg, &params)) == -1);
+    v2[37] ^= 0x01;
+
+    /* Duplicate section: craft a blob with two OPENER sections -> reject. */
+    {
+        size_t opener_off = 37u + 5u + sig.len; /* start of opener section */
+        size_t opener_sec_len = 5u + 1u + op->block_bytes + op->key_bytes;
+        size_t dup_len = v2_len + opener_sec_len;
+        uint8_t *dup = calloc(dup_len, 1);
+
+        if (dup != NULL) {
+            memcpy(dup, v2, v2_len);
+            memcpy(dup + v2_len, v2 + opener_off, opener_sec_len);
+            check("ser2: duplicate section rejected",
+                  voleith_rs_sig_unpack_init(&u, dup, dup_len, &cfg, &params) ==
+                      -1);
+            free(dup);
+        }
+    }
+
+    /* Generic section round-trips (future modules). */
+    {
+        const uint8_t extra[] = {0xDE, 0xAD, 0xBE, 0xEF};
+        uint8_t *g;
+        size_t g_len;
+        const uint8_t *got = NULL;
+        size_t got_len = 0;
+
+        MUST_OK_FP(voleith_rs_sig_pack_init(&b, &cfg, &params,
+                                            VOLEITH_RS_SIG_FORMAT_V2));
+        MUST_OK_FP(voleith_rs_sig_pack_proof(b, &sig));
+        MUST_OK_FP(voleith_rs_sig_pack_section(b, 0x10u, extra, sizeof(extra)));
+        check("ser2: generic pack rejects reserved tag",
+              voleith_rs_sig_pack_section(b, VOLEITH_RS_SIG_SECTION_OPENER,
+                                          extra, sizeof(extra)) == -1);
+        g_len = voleith_rs_sig_pack_len(b);
+        g = calloc(g_len, 1);
+        MUST_OK_FP(voleith_rs_sig_pack_final(b, g, g_len, NULL));
+        b = NULL;
+        MUST_OK_FP(voleith_rs_sig_unpack_init(&u, g, g_len, &cfg, &params));
+        check("ser2: generic section roundtrips",
+              voleith_rs_sig_unpack_section(u, 0x10u, &got, &got_len) == 0 &&
+                  got_len == sizeof(extra) &&
+                  memcmp(got, extra, sizeof(extra)) == 0);
+        voleith_rs_sig_unpack_free(u);
+        u = NULL;
+        free(g);
+    }
+
+done:
+    if (b != NULL)
+        voleith_rs_sig_pack_free(b);
+    if (u != NULL)
+        voleith_rs_sig_unpack_free(u);
+    free(v2);
+    free(legacy);
+    free(s_buf);
+    free(tag_buf);
+    free(M);
+}
+
 int
 main(void)
 {
@@ -3831,6 +5109,13 @@ main(void)
     test_epoch_bitmap();
     test_epoch_validate();
     test_epoch_fingerprint();
+    test_opener_bitmap();
+    test_opener_validate();
+    test_opener_fingerprint();
+    test_opener_syndrome_reduced();
+    test_opener_dem_aesdm_reduced();
+    test_opener_dem_grostl_reduced();
+    test_opener_circuit();
     test_rs_v6_circuit();
     test_rs_v6_sign();
     test_rs_v6_nullifier_epoch();
@@ -3855,11 +5140,15 @@ main(void)
     test_rs_sign_wide_nullifier();
     test_rs_sign_composite();
     test_rs_ser();
+    test_rs_ser_v2();
     test_rs_link();
     test_rs_claim();
     test_rs_v3_sign();
     test_rs_anonymity_smoke();
     test_rs_determinism();
+    test_rs_opener_seal();
+    test_rs_opener_fs_seed();
+    test_rs_ring_builder_stream();
     printf("test_rs_gf8: %d/%d passed\n", pass_count, test_count);
     return (pass_count == test_count) ? 0 : 1;
 }

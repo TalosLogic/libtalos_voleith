@@ -29,11 +29,27 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     voleith_rs_config_t cfg;
     voleith_params_t params = voleith_params_em_128f;
     voleith_rs_sig_t sig;
+    voleith_rs_sig_unpacker_t *u = NULL;
 
     fuzz_rs_make_cfg(&cfg);
 
+    /* Legacy one-shot path (reads v1 and v2). */
     if (voleith_rs_sig_unpack(&sig, data, size, &cfg, &params) == 0)
         voleith_rs_sig_free(&sig);
+
+    /* Streaming reader path: exercise init + the section getters (v2 framing
+     * loop, opener/generic lookups) directly. */
+    if (voleith_rs_sig_unpack_init(&u, data, size, &cfg, &params) == 0) {
+        const uint8_t *payload = NULL;
+        size_t plen = 0;
+        voleith_rs_sig_t s2;
+
+        (void)voleith_rs_sig_unpack_opener(u, &payload, &plen);
+        (void)voleith_rs_sig_unpack_section(u, 0x10u, &payload, &plen);
+        if (voleith_rs_sig_unpack_proof(u, &s2) == 0)
+            voleith_rs_sig_free(&s2);
+        voleith_rs_sig_unpack_free(u);
+    }
 
     return 0;
 }

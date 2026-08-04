@@ -139,8 +139,13 @@ voleith_add_test(test_merkle_vt_gf8_helpers test_merkle_vt_gf8_helpers.c)
 voleith_add_test(test_indexed_merkle_vt_gf8_helpers test_indexed_merkle_vt_gf8_helpers.c)
 voleith_add_test(test_indexed_merkle_vt_gf8_equivalence test_indexed_merkle_vt_gf8_equivalence.c)
 voleith_add_test(test_node_hash_vt_conformance test_node_hash_vt_conformance.c)
+voleith_add_test(test_node_hash_fixed_multiblock_gf8 test_node_hash_fixed_multiblock_gf8.c)
 voleith_add_test(test_gf8_quicksilver test_gf8_quicksilver.c)
+voleith_add_test(test_syndrome_gf8 test_syndrome_gf8.c)
+voleith_add_test(test_syndrome_opener_e2e_gf8 test_syndrome_opener_e2e_gf8.c)
+voleith_label_test(test_syndrome_opener_e2e_gf8 slow)
 voleith_add_test(test_gf16_quicksilver test_gf16_quicksilver.c)
+voleith_add_test(test_syndrome_gf16 test_syndrome_gf16.c)
 voleith_add_test(test_rlnc_gf16_circuit test_rlnc_gf16_circuit.c)
 voleith_add_test(test_rlnc_gf16_cert_circuit test_rlnc_gf16_cert_circuit.c)
 voleith_add_test(test_permutation_gf16_circuit test_permutation_gf16_circuit.c)
@@ -149,6 +154,61 @@ voleith_add_test(test_gf8_proof test_gf8_proof.c)
 voleith_add_test(test_ring_sig_v1_gf8 test_ring_sig_v1_gf8.c)
 voleith_add_test(test_rs_gf8 test_rs_gf8.c)
 voleith_add_test(test_rs_epoch_gf8 test_rs_epoch_gf8.c)
+voleith_add_test(test_rs_opener_gf8 test_rs_opener_gf8.c)
+voleith_add_test(test_rs_opener_e2e_gf8 test_rs_opener_e2e_gf8.c)
+voleith_label_test(test_rs_opener_e2e_gf8 slow)
+voleith_add_test(test_rs_opener_sign_gf8 test_rs_opener_sign_gf8.c)
+voleith_label_test(test_rs_opener_sign_gf8 slow)
+# OP.TEST: V5 composition matrix (V5+V4 shared id, V5+V2 nullifier).
+voleith_add_test(test_rs_opener_compose_gf8 test_rs_opener_compose_gf8.c)
+voleith_label_test(test_rs_opener_compose_gf8 slow)
+
+# OP.ORACLE: syndrome-backed opener end-to-end. libtalos_syndrome is an OPTIONAL
+# test-only dependency (design Q1): when found the e2e links it as the real decap
+# oracle; otherwise the test still builds and runs as a loud SKIP. It is REQUIRED
+# at the 1.11.0 release gate. Point discovery at a checkout/install with
+# -DVOLEITH_SYNDROME_ROOT=<path> (its include/ and the built libtalos_syndrome.a);
+# the sibling ../libtalos_syndrome is searched by default.
+voleith_add_test(test_rs_opener_oracle_gf8 test_rs_opener_oracle_gf8.c)
+voleith_label_test(test_rs_opener_oracle_gf8 slow)
+
+set(VOLEITH_SYNDROME_ROOT "" CACHE PATH
+    "Path to a libtalos_syndrome checkout/install for the OP.ORACLE e2e test")
+find_path(VOLEITH_SYNDROME_INCLUDE_DIR talos_syndrome.h
+    HINTS "${VOLEITH_SYNDROME_ROOT}" "${CMAKE_SOURCE_DIR}/../libtalos_syndrome"
+    PATH_SUFFIXES include)
+find_library(VOLEITH_SYNDROME_LIB
+    NAMES talos_syndrome libtalos_syndrome
+    HINTS "${VOLEITH_SYNDROME_ROOT}" "${CMAKE_SOURCE_DIR}/../libtalos_syndrome"
+    PATH_SUFFIXES build lib build/lib)
+if(VOLEITH_SYNDROME_INCLUDE_DIR AND VOLEITH_SYNDROME_LIB)
+    # Pin the compatible range (design Q1): syndrome major version 1.
+    file(STRINGS "${VOLEITH_SYNDROME_INCLUDE_DIR}/talos_syndrome.h"
+        _syn_ver_lines REGEX "#define SYNDROME_VERSION_(MAJOR|MINOR|PATCH)")
+    string(REGEX MATCH "SYNDROME_VERSION_MAJOR ([0-9]+)" _ "${_syn_ver_lines}")
+    set(_syn_major "${CMAKE_MATCH_1}")
+    string(REGEX MATCH "SYNDROME_VERSION_MINOR ([0-9]+)" _ "${_syn_ver_lines}")
+    set(_syn_minor "${CMAKE_MATCH_1}")
+    string(REGEX MATCH "SYNDROME_VERSION_PATCH ([0-9]+)" _ "${_syn_ver_lines}")
+    set(_syn_patch "${CMAKE_MATCH_1}")
+    if(_syn_major STREQUAL "1")
+        target_include_directories(test_rs_opener_oracle_gf8 PRIVATE
+            "${VOLEITH_SYNDROME_INCLUDE_DIR}")
+        target_link_libraries(test_rs_opener_oracle_gf8
+            "${VOLEITH_SYNDROME_LIB}")
+        target_compile_definitions(test_rs_opener_oracle_gf8 PRIVATE
+            VOLEITH_HAVE_SYNDROME)
+        message(STATUS "OP.ORACLE: libtalos_syndrome "
+            "${_syn_major}.${_syn_minor}.${_syn_patch} found; opener e2e ENABLED")
+    else()
+        message(WARNING "OP.ORACLE: libtalos_syndrome "
+            "${_syn_major}.${_syn_minor}.${_syn_patch} outside supported [1.0, 2.0); "
+            "opener e2e will SKIP")
+    endif()
+else()
+    message(WARNING "OP.ORACLE: libtalos_syndrome not found; opener e2e will SKIP "
+        "(set -DVOLEITH_SYNDROME_ROOT). REQUIRED for the 1.11.0 release gate.")
+endif()
 voleith_add_test(test_lean_build_warning test_lean_build_warning.c)
 voleith_add_test(test_bristol_parser test_bristol_parser.c)
 target_compile_definitions(test_bristol_parser PRIVATE

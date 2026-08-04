@@ -43,7 +43,8 @@ size_t voleith_gf8_qs_ellhat(const voleith_gf8_circuit_t *circuit,
  *
  * Proves knowledge of a witness satisfying the GF(2⁸) circuit using
  * the provided VOLE correlation (u, V). Computes d (the VOLE correction)
- * and the three ZKHash outputs (a0_tilde, a1_tilde, a2_tilde).
+ * and the d+1 ZKHash coefficient outputs a_0..a_d, where d is the opening
+ * count for this circuit (voleith_gf8_circuit_qs_degree, 2 today).
  *
  * circuit:   the GF(2⁸) circuit to prove
  * witness:   witness bytes, one per witness wire (witness_count bytes)
@@ -53,9 +54,8 @@ size_t voleith_gf8_qs_ellhat(const voleith_gf8_circuit_t *circuit,
  * V:         array of lambda pointers, each pointing to ellhat_bytes of V matrix row
  * chall_2:   ZKHash parameters, 3*lambda/8+8 bytes
  * d_out:     output: VOLE correction bytes, ell bytes (one byte per element slot)
- * a0_tilde:  output: degree-0 hash, lambda/8 bytes
- * a1_tilde:  output: degree-1 hash, lambda/8 bytes
- * a2_tilde:  output: degree-2 hash, lambda/8 bytes
+ * a_out:     array of d+1 output buffers; a_out[i] receives coefficient a_i
+ *            (a_out[0] = degree-0 hash), each lambda/8 bytes.
  *
  * Returns 0 on success, -1 on allocation failure or invalid parameters.
  */
@@ -63,8 +63,7 @@ int voleith_gf8_qs_prove(const voleith_gf8_circuit_t *circuit,
                          const uint8_t *witness, const uint8_t *instance,
                          unsigned int lambda, const uint8_t *u,
                          const uint8_t **V, const uint8_t *chall_2,
-                         uint8_t *d_out, uint8_t *a0_tilde, uint8_t *a1_tilde,
-                         uint8_t *a2_tilde);
+                         uint8_t *d_out, uint8_t *const *a_out);
 
 /*
  * Compute only the VOLE correction d, without the full QuickSilver hash.

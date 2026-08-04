@@ -3,4 +3,4 @@
 	url = https://github.com/faest-sign/faest-ref.git
 [submodule "third_party/libtalos_ichor"]
 	path = third_party/libtalos_ichor
-	url = https://github.com/TalosLogic/libtalos_ichor.git
+	url = git@gitlab.taloslogic.com:taloslogic/cryptography/libtalos_ichor.git

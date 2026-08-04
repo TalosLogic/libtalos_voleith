@@ -506,6 +506,71 @@ grostl512_gf8_node_circuit(voleith_gf8_circuit_t *c, const uint8_t iv[128],
 }
 
 /* ================================================================
+ * Fixed-input multi-block node circuits.
+ *
+ * H = Omega(f(... f(f(iv, block0), block1) ..., block_{k-1})): inject
+ * iv as constant wires, run n_blocks raw compressions (chaining the
+ * wire-valued state h across blocks, NO output transform between
+ * them), then a single output transform and truncation.  This is the
+ * standard Grøstl MD chain with the IV carrying domain separation and
+ * NO Merkle-Damgård length/marker padding (the input is a fixed number
+ * of full-width blocks).  Reuses compress_wires / output_transform_wires
+ * exactly as the single-block node circuit does; the single-block
+ * path (grostl_node_circuit_impl) is untouched and byte-identical.
+ * ================================================================ */
+
+static void
+grostl_node_multiblock_impl(voleith_gf8_circuit_t *c, const uint8_t *iv,
+                            const gf8_wire_id *blocks, size_t n_blocks,
+                            int columns, int rounds,
+                            const uint8_t shift_p[ROWS],
+                            const uint8_t shift_q[ROWS], size_t out_bytes,
+                            gf8_wire_id *out)
+{
+    size_t n = (size_t)(ROWS * columns);
+    gf8_wire_id h[STATE_BYTES_512];
+
+    /* iv is public structural data: constant wires, zero VOLE slots. */
+    for (size_t i = 0; i < n; i++)
+        h[i] = voleith_gf8_add_const(c, iv[i]);
+
+    /* One raw compression per block; Omega only after the last. */
+    for (size_t bi = 0; bi < n_blocks; bi++)
+        compress_wires(c, h, blocks + bi * n, columns, rounds, shift_p,
+                       shift_q);
+
+    output_transform_wires(c, h, columns, rounds, shift_p);
+
+    for (size_t i = 0; i < out_bytes; i++)
+        out[i] = h[n - out_bytes + i];
+}
+
+void
+grostl256_gf8_node2_circuit(voleith_gf8_circuit_t *c, const uint8_t iv[64],
+                            const gf8_wire_id block[128], gf8_wire_id out[32])
+{
+    grostl_node_multiblock_impl(c, iv, block, 2, COLS_256, ROUNDS_256,
+                                SHIFT_P512, SHIFT_Q512, 32, out);
+}
+
+void
+grostl512_gf8_node2_circuit(voleith_gf8_circuit_t *c, const uint8_t iv[128],
+                            const gf8_wire_id block[256], gf8_wire_id out[64])
+{
+    grostl_node_multiblock_impl(c, iv, block, 2, COLS_512, ROUNDS_512,
+                                SHIFT_P1024, SHIFT_Q1024, 64, out);
+}
+
+void
+grostl256_gf8_nodeN_circuit(voleith_gf8_circuit_t *c, const uint8_t iv[64],
+                            const gf8_wire_id *blocks, size_t n_blocks,
+                            gf8_wire_id out[32])
+{
+    grostl_node_multiblock_impl(c, iv, blocks, n_blocks, COLS_256, ROUNDS_256,
+                                SHIFT_P512, SHIFT_Q512, 32, out);
+}
+
+/* ================================================================
  * Witness builder.
  *
  * Runs the byte-level Grøstl in lockstep with the circuit and
@@ -875,4 +940,75 @@ grostl512_gf8_node_build_witness(const uint8_t iv[128],
                                    &inv_out);
 
     voleith_secure_zero(h, sizeof(h));
+}
+
+/* ================================================================
+ * Multi-block node-circuit witness builders.  Mirror the multi-block
+ * node circuit: n_blocks compressions chained through h, then one
+ * output transform.  inv_in order = (P then Q) per block, then the
+ * output transform's P.  Excludes block bytes (caller-declared).
+ * ================================================================ */
+
+static void
+grostl_node_multiblock_build_witness_impl(
+    const uint8_t *iv, const uint8_t *blocks, size_t n_blocks, int columns,
+    int rounds, const uint8_t shift_p[ROWS], const uint8_t shift_q[ROWS],
+    uint8_t *inv_out)
+{
+    size_t n = (size_t)(ROWS * columns);
+    uint8_t h[STATE_BYTES_512];
+    memcpy(h, iv, n);
+
+    for (size_t bi = 0; bi < n_blocks; bi++)
+        compress_bytes_capture(h, blocks + bi * n, columns, rounds, shift_p,
+                               shift_q, &inv_out);
+    output_transform_bytes_capture(h, columns, rounds, shift_p, &inv_out);
+
+    voleith_secure_zero(h, sizeof(h));
+}
+
+size_t
+grostl256_gf8_node2_invin_bytes(void)
+{
+    /* Two compressions (2 * 1,280) + output transform P (640). */
+    return 2u * 1280u + 640u; /* 3200 */
+}
+
+size_t
+grostl512_gf8_node2_invin_bytes(void)
+{
+    /* Two compressions (2 * 3,584) + output transform P (1,792). */
+    return 2u * 3584u + 1792u; /* 8960 */
+}
+
+void
+grostl256_gf8_node2_build_witness(const uint8_t iv[64],
+                                  const uint8_t block[128], uint8_t *inv_out)
+{
+    grostl_node_multiblock_build_witness_impl(
+        iv, block, 2, COLS_256, ROUNDS_256, SHIFT_P512, SHIFT_Q512, inv_out);
+}
+
+void
+grostl512_gf8_node2_build_witness(const uint8_t iv[128],
+                                  const uint8_t block[256], uint8_t *inv_out)
+{
+    grostl_node_multiblock_build_witness_impl(
+        iv, block, 2, COLS_512, ROUNDS_512, SHIFT_P1024, SHIFT_Q1024, inv_out);
+}
+
+size_t
+grostl256_gf8_nodeN_invin_bytes(size_t n_blocks)
+{
+    /* n compressions (n * 1,280) + one output transform P (640). */
+    return n_blocks * 1280u + 640u;
+}
+
+void
+grostl256_gf8_nodeN_build_witness(const uint8_t iv[64], const uint8_t *blocks,
+                                  size_t n_blocks, uint8_t *inv_out)
+{
+    grostl_node_multiblock_build_witness_impl(iv, blocks, n_blocks, COLS_256,
+                                              ROUNDS_256, SHIFT_P512,
+                                              SHIFT_Q512, inv_out);
 }

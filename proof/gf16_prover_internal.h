@@ -39,8 +39,14 @@ int voleith_gf16_qs_prove_unchecked(const voleith_gf16_circuit_t *circuit,
                                     const voleith_gf16_t *instance,
                                     unsigned int lambda, const uint8_t *u,
                                     const uint8_t **V, const uint8_t *chall_2,
-                                    uint8_t *d_out, uint8_t *a0_tilde,
-                                    uint8_t *a1_tilde, uint8_t *a2_tilde);
+                                    uint8_t *d_out, uint8_t *const *a_out);
+
+/*
+ * Test-only syndrome accumulator selector (shared by the gf16 prover and
+ * verifier).  0 = collapsed; nonzero = reference (pre-collapse).  Never set in
+ * production.
+ */
+extern int voleith_gf16_syndrome_ref_mode;
 
 #ifdef __cplusplus
 }

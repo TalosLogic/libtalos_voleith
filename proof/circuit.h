@@ -197,6 +197,16 @@ size_t voleith_circuit_instance_count(const voleith_circuit_t *c);
 /* Number of AND gates (determines proof size) */
 size_t voleith_circuit_and_gate_count(const voleith_circuit_t *c);
 
+/*
+ * Maximum QuickSilver constraint degree d in force for this circuit.  The
+ * proof opens d+1 coefficients (a_0..a_d) and the QS mask region is d*lambda.
+ * All circuits built today are degree-2 (AND gate / assert baseline); the
+ * accessor exists so the serialization, transcript, and QS layers are
+ * parameterized by d rather than hardcoding 2.  d is derived per-circuit and
+ * is NOT transmitted on the wire.
+ */
+unsigned int voleith_circuit_qs_degree(const voleith_circuit_t *c);
+
 /* Number of constraints */
 size_t voleith_circuit_constraint_count(const voleith_circuit_t *c);
 

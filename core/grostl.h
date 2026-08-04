@@ -14,9 +14,10 @@
  *
  * voleith_grostl_dispatch_reset is test-only in ichor: its alias resolves only
  * under ICHOR_ENABLE_FORCE_BACKEND, matching the guard on the ichor
- * declaration.  ichor also exposes init_iv / finalize_fixed; voleith does not
- * use those names, so they are reached (if needed) through <ichor/grostl.h>
- * directly rather than aliased here.
+ * declaration.  The domain-separated init_iv / finalize_fixed entry points are
+ * aliased too (the opener KDF, proof/rs_opener_argus_gf8.c, uses them for the
+ * lambda256 Argus extractor); the in-circuit node-hash builders in circuits/
+ * that predate that reach the ichor_grostl* names directly, which is equivalent.
  */
 
 #ifndef VOLEITH_GROSTL_H
@@ -30,8 +31,11 @@ typedef ichor_grostl_ctx_t voleith_grostl_ctx_t;
 #define voleith_grostl512 ichor_grostl512
 #define voleith_grostl256_init ichor_grostl256_init
 #define voleith_grostl512_init ichor_grostl512_init
+#define voleith_grostl256_init_iv ichor_grostl256_init_iv
+#define voleith_grostl512_init_iv ichor_grostl512_init_iv
 #define voleith_grostl_absorb ichor_grostl_absorb
 #define voleith_grostl_finalize ichor_grostl_finalize
+#define voleith_grostl_finalize_fixed ichor_grostl_finalize_fixed
 #define voleith_grostl_clear ichor_grostl_clear
 #define voleith_grostl256_compress_node ichor_grostl256_compress_node
 #define voleith_grostl512_compress_node ichor_grostl512_compress_node

@@ -14,6 +14,7 @@
  * Vt instances exposed via this header:
  *   voleith_node_hash_hirose           - variable-leaf Hirose-AES-256 (32B, 2^128 CR)
  *   voleith_node_hash_hirose_fixed32   - fixed-32B-leaf Hirose-AES-256 (32B, 2^128 CR)
+ *   voleith_node_hash_hirose_fixed96   - fixed-96B-leaf Hirose-AES-256 (32B, 2^128 CR)
  *   voleith_node_hash_aes_dm           - AES-128 Davies-Meyer          (16B, 2^64  CR)
  *   voleith_node_hash_aes_cmac128      - AES-128-CMAC                  (16B, 2^64  CR)
  *   voleith_node_hash_grostl256        - Grøstl-256                    (32B, 2^128 CR)
@@ -161,6 +162,15 @@ typedef struct {
  */
 extern const voleith_node_hash_vt voleith_node_hash_hirose;
 extern const voleith_node_hash_vt voleith_node_hash_hirose_fixed32;
+/*
+ * hirose_fixed96: fixed-leaf Hirose-AES-256 over 6 iterations, 96-byte
+ * leaf-preimage capacity (32B node, 2^128 CR).  Min-cost 128-bit-CR
+ * leaf hash for the 65-96 byte range (Q11): a composable leaf preimage
+ * (V6 epoch_root || V5 id || V3 attrs || salt) that overflows the 64B
+ * single-compression fixed vts.  Block-count domain separation via a
+ * distinct c_leaf constant.
+ */
+extern const voleith_node_hash_vt voleith_node_hash_hirose_fixed96;
 
 /*
  * AES-family vts.  Both have node_bytes=16 and cr_bits=64.
@@ -223,5 +233,19 @@ extern const voleith_node_hash_vt voleith_node_hash_grostl512_t59;
  */
 extern const voleith_node_hash_vt voleith_node_hash_grostl256_fixed;
 extern const voleith_node_hash_vt voleith_node_hash_grostl512_fixed;
+
+/*
+ * Two-block fixed-input Grøstl vts.  H_leaf = Omega(f(f(IV_2blk, x0), x1))
+ * over the leaf preimage zero-padded to two full blocks (4*node_bytes);
+ * the inode (L || R = one block) reuses the single-block fixed inode.
+ * Min-cost leaf hashes for the wider composable preimages (Q11):
+ *
+ *   grostl256_fixed128 : 32B node, 2^128 CR, 128B leaf capacity, 3200 leaf S-boxes
+ *   grostl512_fixed256 : 64B node, 2^256 CR, 256B leaf capacity, 8960 leaf S-boxes
+ *
+ * Block-count domain separation is carried by a distinct 2-block leaf IV.
+ */
+extern const voleith_node_hash_vt voleith_node_hash_grostl256_fixed128;
+extern const voleith_node_hash_vt voleith_node_hash_grostl512_fixed256;
 
 #endif /* VOLEITH_NODE_HASH_VT_H */

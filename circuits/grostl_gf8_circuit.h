@@ -146,6 +146,35 @@ void grostl512_gf8_node_circuit(voleith_gf8_circuit_t *c, const uint8_t iv[128],
                                 gf8_wire_id out[64]);
 
 /*
+ * Fixed-input two-block node circuit: H = Omega(f(f(iv, block0), block1)).
+ *
+ * Standard Grøstl MD chain over exactly two full-width blocks under the
+ * public chaining value iv, with the output transform Omega applied once
+ * after the second compression.  No Merkle-Damgård padding (fixed block
+ * count).  block is the two blocks concatenated: 128 (256) / 256 (512)
+ * wire IDs.  Domain separation is carried by iv (distinct from the
+ * single-block leaf/inode IVs, per family and block count).
+ *
+ * Sibling of grostl{256,512}_gf8_node_circuit, sharing compress_wires /
+ * output_transform_wires; the single-block path is untouched.
+ *
+ *   c     : circuit to append to
+ *   iv    : 64 (256) / 128 (512) byte fixed public chaining value
+ *   block : 128 (256) / 256 (512) caller-declared input wire IDs
+ *   out   : receives 32 (256) / 64 (512) node-digest wire IDs
+ *
+ * Mul-gate cost = 3,200 (256) / 8,960 (512): two compressions plus one
+ * output transform.
+ */
+void grostl256_gf8_node2_circuit(voleith_gf8_circuit_t *c, const uint8_t iv[64],
+                                 const gf8_wire_id block[128],
+                                 gf8_wire_id out[32]);
+void grostl512_gf8_node2_circuit(voleith_gf8_circuit_t *c,
+                                 const uint8_t iv[128],
+                                 const gf8_wire_id block[256],
+                                 gf8_wire_id out[64]);
+
+/*
  * inv_in witness size (in bytes) for one node circuit.  Excludes the
  * block input bytes, which the caller declares as its own witness
  * wires before invoking grostl{256,512}_gf8_node_circuit (see
@@ -153,6 +182,36 @@ void grostl512_gf8_node_circuit(voleith_gf8_circuit_t *c, const uint8_t iv[128],
  */
 size_t grostl256_gf8_node_invin_bytes(void);
 size_t grostl512_gf8_node_invin_bytes(void);
+
+/*
+ * inv_in witness size for one two-block node circuit.  Returns 3,200
+ * (256) / 8,960 (512): two compressions plus the single output
+ * transform.  Excludes the block input bytes (caller-declared).
+ */
+size_t grostl256_gf8_node2_invin_bytes(void);
+size_t grostl512_gf8_node2_invin_bytes(void);
+
+/*
+ * Fixed-input N-block node circuit: H = Omega(f(...f(f(iv, b0), b1)..., b_{N-1})).
+ * The standard Grøstl MD chain over exactly n_blocks full-width (64-byte, 256)
+ * blocks under the public IV, Omega applied once after the last compression.
+ * No Merkle-Damgard length/marker padding (fixed block count) - the caller
+ * supplies exactly n_blocks blocks (zero-padding a final partial itself if the
+ * construction is the ichor_grostl_finalize_fixed KDF).  Generalizes the 1- and
+ * 2-block node circuits over the same compress_wires / output_transform_wires.
+ *
+ *   blocks : n_blocks * 64 (256) caller-declared input wire IDs.
+ *   out    : receives 32 (256) node-digest wire IDs.
+ *
+ * invin_bytes(n) = n * 1,280 + 640 (n compressions + one output transform).
+ */
+void grostl256_gf8_nodeN_circuit(voleith_gf8_circuit_t *c, const uint8_t iv[64],
+                                 const gf8_wire_id *blocks, size_t n_blocks,
+                                 gf8_wire_id out[32]);
+size_t grostl256_gf8_nodeN_invin_bytes(size_t n_blocks);
+void grostl256_gf8_nodeN_build_witness(const uint8_t iv[64],
+                                       const uint8_t *blocks, size_t n_blocks,
+                                       uint8_t *inv_out);
 
 /*
  * Fill inv_out with the grostl{256,512}_gf8_node_invin_bytes() inv_in
@@ -166,5 +225,18 @@ void grostl256_gf8_node_build_witness(const uint8_t iv[64],
 void grostl512_gf8_node_build_witness(const uint8_t iv[128],
                                       const uint8_t block[128],
                                       uint8_t *inv_out);
+
+/*
+ * Fill inv_out with the grostl{256,512}_gf8_node2_invin_bytes() inv_in
+ * values for one two-block node hash of (block0 || block1) under iv, in
+ * circuit-evaluation order (per block: P then Q; then the output
+ * transform's P).  Matches grostl{256,512}_gf8_node2_circuit.
+ */
+void grostl256_gf8_node2_build_witness(const uint8_t iv[64],
+                                       const uint8_t block[128],
+                                       uint8_t *inv_out);
+void grostl512_gf8_node2_build_witness(const uint8_t iv[128],
+                                       const uint8_t block[256],
+                                       uint8_t *inv_out);
 
 #endif /* VOLEITH_GROSTL_GF8_CIRCUIT_H */

@@ -197,9 +197,8 @@ Two example programs (`examples/example_ring_sig_v1_gf8.c`, `examples/example_ri
 
 ### Variant roadmap
 
-V1 shipped first as the smallest useful surface, with explicit hooks for follow-on variants. The composable V2 / V3 / V4 superset below shipped in 1.8.0 over the same `voleith_rs_membership_*` baseline; V6 (forward-secure key evolution) shipped in 1.10.0 as an additional module (see "Forward-secure key evolution (V6)" below). Still on the roadmap:
+V1 shipped first as the smallest useful surface, with explicit hooks for follow-on variants. The composable V2 / V3 / V4 superset below shipped in 1.8.0 over the same `voleith_rs_membership_*` baseline; V6 (forward-secure key evolution) shipped in 1.10.0 and the designated opener (V5) shipped in 1.11.0, both as additional modules (see "Forward-secure key evolution (V6)" and "Designated opener (V5)" below). Still on the roadmap:
 
-- **V5 (traceable line-reveal / designated opener).** Two signatures by the same member under the same context reveal the member, or a designated opener can decrypt the signer's identity.
 - **V7 (threshold t-of-n).** A signature requires t of n authorised members to cooperate.
 
 The `voleith_rs_membership_*` layer is named separately from `voleith_rsv1_*` precisely so V2 / V4 / V5 / V7 can share the membership baseline without copy-paste. V3 and V6 deviate from the baseline shape and get their own builders.
@@ -350,3 +349,60 @@ The epoch tree is an honestly-built Merkle tree over one-time keys, so its forge
 ### Tests and examples
 
 `tests/test_rs_gf8.c` covers the epoch config fingerprint and layout, keygen determinism (epoch-root KAT), sign/verify at several epochs, the forward-security properties (retired-epoch derivation refused; a thief-simulated wrong-epoch proof rejected at sign and verify), state serialize / deserialize with version and tamper rejection, and V6 composition with V2 / V4 / revocation. `example_rs_v6_forward_secure_gf8` runs an 8-member ring: sign at epoch 0, advance, sign at epoch 5, the retired-epoch refusal, and a verifier epoch-window policy check. Three dudect release-gate targets (`voleith_rs_epoch_keygen`, `voleith_rs_epoch_state_advance`, `voleith_rs_epoch_derive_sk`) validate that the key schedule is constant-time in the secret seeds.
+
+## Designated opener (V5)
+
+V5 (shipped in 1.11.0) adds a **designated opener**: a party holding an opener key can trace a signature back to the signer's enrolled identity, while every other verifier still learns only that some ring member signed. It is a composable module (enabled by `enable_opener` plus a public opener key `opener_pk`) and combines with V2 / V3 / V4 / V6 like the other modules. The traceability is code-based and post-quantum: it rests on a QC-MDPC syndrome, not on any number-theoretic trapdoor.
+
+### Trust model and split custody
+
+The opener is a single designated role: whoever holds the opener secret key (a QC-MDPC private key) can open any signature made under the matching public key. The library provides the tracing mechanism, not a policy for who may invoke it. **The default deployment narrative is split custody:** hold the opener key under threshold or multi-party control so no single operator can unilaterally deanonymize, and gate opening behind an out-of-band authorization (a court order, an abuse-review quorum). The opener key is independent of every signer's key: signers do not trust the opener with their secrets, and compromise of the opener key does not let it forge, only trace.
+
+Opening is **reveal-based**. The opener recovers the signer's identity and can publish it together with the evidence (the recovered support re-encrypts to the public tag), which anyone can check. A trace the opener keeps to itself has weaker standing: it is the opener's private claim until revealed, because the opener could in principle assert an opening without publishing the checkable witness. Deployments that need accountable opening should require the opener to publish the reveal.
+
+### How a tag traces
+
+Each signature carries an opener **tag** `prim_id || s || tag_ct` in its own serialization section:
+
+- The signer draws a fresh per-signature fixed-weight error `e` (weight `t`, the QC-MDPC error weight) and computes the public syndrome `s = M * e^T` under the opener public parity block `M = opener_pk`.
+- The signer's identity `id` (a fixed lambda-bit value, the same wire the V4 claimable commitment uses) is one-time-pad wrapped: `tag_ct = id XOR KDF(support(e))`, where the KDF hashes the sparse support of `e`. `prim_id` names the KDF hash so an opener knows how to reproduce it.
+
+In circuit, the signature proves three things bind together: (1) the committed support is a genuine weight-`t` distinct in-range set (the ascending less-than chain and range check); (2) its syndrome equals the public `s` (the syndrome relation); and (3) the same `id` sits inside the membership leaf preimage that the anonymity proof already hides. The syndrome relation, the less-than well-formedness chain, the KDF, and the OTP DEM are described in [`docs/CIRCUIT_DESIGN.md`](CIRCUIT_DESIGN.md) ("Designated-opener gadgets"); the degree-d opening mechanism they use is in [`docs/DESIGN.md`](DESIGN.md).
+
+To open, the opener runs its companion code-based KEM decapsulation on `s`, recovering the unique weight-`t` error `e`, recomputes `K = KDF(support(e))`, and unwraps `id = tag_ct XOR K`. Authentication is **re-encryption, not a MAC**: the opener accepts the recovered `id` only when `M * e'^T == s` and `weight(e') == t`, which unique bounded-distance decoding satisfies for exactly one `e'`. A decode failure returns "unopenable" rather than a wrong identity, and the OTP therefore needs no separate tag (its integrity is the enclosing VOLEitH proof plus this re-encryption check).
+
+### Security separation: what the opener cannot do
+
+- **No forgery.** The opener key is a tracing key, not a signing key. It grants no ability to produce a signature for any member.
+- **No framing.** Unique decoding forbids a second valid weight-`t` preimage of `s`, and constructing two colliding weight-`t` errors would be a low-weight codeword of the opener code, i.e. key recovery. So the identity a tag traces to is the one the signer committed, and the opener cannot make a signature open to a member who did not make it.
+- **No spillover.** Confidentiality of non-traced signatures and unforgeability of all signatures do not depend on the opener key at all; they hold even against an opener-key holder.
+- **Honest-error assumption.** A proof certifies `wt(e) = t` and `s = M * e^T`, but it cannot certify that a signer sampled `e` honestly. The only thing a malicious signer buys by choosing `e` adversarially is self-denial of tracing (deliberately picking a decode-failure syndrome so its own signature is unopenable); it cannot frame anyone or touch confidentiality. This residual is bounded by the code's decoding-failure rate (`<= 2^-lambda`) and by key-recovery hardness (the failure-inducing errors are functions of the secret opener key), so an opener-key-blind signer cannot construct one except at negligible rate. The library takes this honest-error posture deliberately rather than pay the extra gates to derive `e` from a bound seed in circuit.
+
+### Parameters and leaf capacity
+
+The opener commits `e` as its sparse support (`t` indices of `idx_bits` bits), never the dense `n`-bit vector, so the witness is the packed support, not the error. Four parameter sets ship, matched to the companion KEM (libtalos_syndrome), which is authoritative for the QC-MDPC parameters `p`, `n0`, and `t` (its `docs/DESIGN.md`); the table reproduces those alongside the voleith circuit view (`idx_bits`, key/id bytes, and the opening degree and gate cost below):
+
+| Opener set | p | n0 | t | n = n0·p | idx_bits | id / key bytes | KDF hash |
+|------------|-----|----|-----|----------|----------|----------------|----------|
+| 128_2 | 13613 | 2 | 130 | 27226 | 15 | 16 | AES-DM |
+| 128_5 | 7829 | 5 | 57 | 39145 | 16 | 16 | AES-DM |
+| 256_2 | 43451 | 2 | 261 | 86902 | 17 | 32 | Grøstl-256 |
+| 256_5 | 24733 | 5 | 113 | 123665 | 17 | 32 | Grøstl-256 |
+
+The `n0 = 2` sets minimize the opener public-key size; the `n0 = 5` sets minimize the in-circuit cost (fewer support indices). The opening degree is `idx_bits + 1` (16 to 18), and the opener adds roughly 3k to 17k multiply gates depending on the set, hash-dominated once the sparse syndrome relation removes the dense error. Verification stays linear in circuit size, as everywhere in this library.
+
+Because the opener `id` lives inside the membership leaf preimage (`OWF(sk || attributes || id)`), the leaf hash must have capacity for it. The multi-block fixed-input node hashes cover the range: `hirose_fixed96` (96-byte capacity, 2^128 CR), `grostl256_fixed128` (128-byte, 2^128 CR), and `grostl512_fixed256` (256-byte, 2^256 CR). The config validator rejects a leaf preimage wider than the chosen vt's capacity before circuit construction.
+
+### Tag wire contract
+
+The opener tag is byte-exact and self-describing, but voleith is not its source of truth. The companion code-based KEM (libtalos_syndrome) produces the tag, and its `docs/DESIGN.md` §6 is the single authority for the byte recipe: the `prim_id || s || tag_ct` layout and the `prim_id` hash registry (§6.2), the `M` / syndrome systematic form, the `K = H(support(e))` KDF and its per-set domain-separation IV (§6.1), the one-time-pad DEM, the re-encryption open check, and the parameter-set id space. The bytes are deliberately not restated here: keeping the recipe in one repo is what stops the two implementations from drifting.
+
+voleith reproduces that recipe in-circuit as a clean-room implementation sharing no source with the KEM. The shared Argus known-answer vectors are the cross-library ground truth both sides diff against; the small KDF / DEM-framing subset voleith cannot obtain from the shared ichor primitives is pinned by those vectors (see "Tests and examples" below). What is voleith-owned is the in-circuit reproduction and the degree-`d` opening it rides (see "Parameters and leaf capacity" above and [`docs/DESIGN.md`](DESIGN.md)); the wire bytes themselves belong to syndrome.
+
+### Serialization (VRSC v2) and the v1 downgrade
+
+The opener tag rides in a tagged, length-prefixed section of the version-2 `"VRSC"` envelope. The v2 format is a superset: a signature with the opener module off packs a v2 envelope byte-identical in its other sections, and the one-shot `voleith_rs_sig_pack` still emits v1 byte-identical to 1.8.0. **Opting a signature down to the v1 format drops the opener section:** a v1 envelope of an opener-enabled signature is no longer traceable, because the tag it needs is gone. Pack v1 only for signatures whose opener module is off; keep opener-enabled signatures in v2.
+
+### Tests and examples
+
+`tests/test_rs_opener_*` cover the opener config fingerprint and witness layout, the seal (support draw, syndrome, tag), sign/verify with the opener module on, the VRSC v2 opener section round-trip and the v1 opt-down, and composition with V4 (shared `id`), V2, V3 (leaf capacity), and V6 (opener id inside the epoch leaf). A syndrome-backed end-to-end test links the companion code-based KEM as the decap oracle and checks that a signature traces to the enrolled identity through the real opener, that an unverified signature is refused at the opener gate, and that the software cross-check agrees with the KEM decap. `example_rs_v5_designated_opener_gf8` runs an 8-member ring with a split-custody narrative: enroll with the opener id in the leaf, sign, verify anonymously, then open the trace.

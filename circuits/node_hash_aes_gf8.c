@@ -4,6 +4,10 @@
  *
  * node_hash_aes_gf8.c - AES-DM and AES-128-CMAC vt implementations.
  *
+ * "AES-DM" is a historical label: the compression is actually Matyas-
+ * Meyer-Oseas (chaining-value-keyed), NOT Davies-Meyer.  See the keying
+ * note above the AES-DM section.
+ *
  * Branch A of the merkle tree circuits hash-agnostic refactor: wraps
  * the leaf/inode compressions already used by merkle_gf8_circuit.c
  * (with the matching domain constants) behind the voleith_node_hash_vt
@@ -71,6 +75,21 @@ sw_aes128(const uint8_t key[16], const uint8_t pt[16], uint8_t out[16])
 
 /* ================================================================
  * AES-DM
+ *
+ * NOTE ON KEYING (do not confuse with Davies-Meyer): despite the "DM" in
+ * the vt name (historical / matching merkle_gf8_circuit.c), the single-
+ * block-length compression here is MATYAS-MEYER-OSEAS, not Davies-Meyer.
+ * Each iteration keys the AES block cipher with the CHAINING VALUE and
+ * feeds forward the MESSAGE block:
+ *
+ *     H_i = E_{H_{i-1}}(m_i) XOR m_i          (MMO: chaining value = key)
+ *
+ * see the leaf loop below (aes128_gf8_circuit(c, state, block, ...) then
+ * XOR block).  The inode form H(L,R) = AES_L(R XOR C) XOR (R XOR C) is the
+ * same MMO keying with L as the key.  Standard Davies-Meyer keys with the
+ * MESSAGE instead (H_i = E_{m_i}(H_{i-1}) XOR H_{i-1}); that is what
+ * ichor_aesdm_* / the V5 opener KDF use, so those must NOT reuse this
+ * gadget's compression.
  *
  * Number of AES calls in the leaf chain for an n-byte input:
  *   dm_n_aes(0) = 1   (one padding-only block)

@@ -22,9 +22,14 @@
 #include "../circuits/merkle_vt_gf8_helpers.h"
 #include "../circuits/rs_gf8_circuit.h"
 #include "../circuits/rs_leaf_gf8_circuit.h"
+#include "../circuits/rs_opener_gf8_circuit.h"
 #include "../core/hash.h"
+#include "../core/prg.h" /* V5 opener seal: fresh-e tape expansion */
 #include "../core/util.h"
 #include "gf8_proof.h"
+
+#include <ichor/sample.h> /* ichor_sample_fixed_weight (opener support draw) */
+#include <ichor/util.h>   /* ichor_bitpack_le32 (opener support packing) */
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -58,6 +63,8 @@ voleith_rs_module_bitmap(const voleith_rs_config_t *cfg)
         bitmap |= VOLEITH_RS_MODULE_SPENT_SET;
     if (cfg->depth_e > 0)
         bitmap |= VOLEITH_RS_MODULE_EPOCH;
+    if (cfg->enable_opener)
+        bitmap |= VOLEITH_RS_MODULE_OPENER;
 
     return bitmap;
 }
@@ -188,12 +195,41 @@ voleith_rs_config_validate(const voleith_rs_config_t *cfg)
     }
 
     /*
+     * V5 opener.  opener_set selects the Argus (lambda, n0) parameter set;
+     * M (opener_pk) must be present with the exact circulant-block length for
+     * the set.  The lambda/8-byte id joins the leaf preimage (Q2) and, when V4
+     * is also on, is the SAME witness as the commitment id handle
+     * (Q8: commit_id_bytes == lambda/8).  When the opener is off the pointer is
+     * the "configured" signal (opener_set is a don't-care since the fingerprint
+     * absorbs the opener section only when bit 6 is set).
+     */
+    size_t opener_id_bytes = 0;
+    if (cfg->enable_opener) {
+        const voleith_rs_opener_argus_params_t *op =
+            voleith_rs_opener_argus_params(cfg->opener_set);
+        if (op == NULL) /* reserved / unshipped set id */
+            return -1;
+        if (cfg->opener_pk == NULL)
+            return -1;
+        if (cfg->opener_pk_bytes != (size_t)(op->n0 - 1u) * op->block_bytes)
+            return -1;
+        opener_id_bytes = op->key_bytes; /* = lambda/8 */
+        if (cfg->enable_commitment && cfg->commit_id_bytes != opener_id_bytes)
+            return -1;
+    } else {
+        if (cfg->opener_pk != NULL || cfg->opener_pk_bytes != 0)
+            return -1;
+    }
+
+    /*
      * OWF input width bound.  With V6+V3 the preimage is
      * epoch_root || attributes || salt (epoch_root heads it in sk's
      * slot); with V6 and no V3 the leaf IS epoch_root and no OWF runs, so
      * no width check applies; otherwise (V6 off) it is sk || attributes.
+     * The V5 opener appends a lambda/8-byte id (Q2), which forces an OWF even
+     * in the V6-no-V3 case, so the bound runs whenever the opener is on.
      */
-    if (!(v6_on && cfg->attr_schema == NULL)) {
+    if (cfg->enable_opener || !(v6_on && cfg->attr_schema == NULL)) {
         size_t head = v6_on ? tree_vt->node_bytes : cfg->membership.sk_bytes;
         size_t salt = v6_on ? cfg->leaf_salt_bytes : 0u;
 
@@ -203,6 +239,9 @@ voleith_rs_config_validate(const voleith_rs_config_t *cfg)
         if (leaf_preimage > SIZE_MAX - salt)
             return -1;
         leaf_preimage += salt;
+        if (leaf_preimage > SIZE_MAX - opener_id_bytes)
+            return -1;
+        leaf_preimage += opener_id_bytes;
 
         if (owf_vt->leaf_block_bytes != 0) {
             if (leaf_preimage > owf_vt->leaf_block_bytes)
@@ -320,6 +359,33 @@ voleith_rs_config_fingerprint(const voleith_rs_config_t *cfg,
         rc |= voleith_shake256_absorb_u64_le(&ctx,
                                              (uint64_t)cfg->leaf_salt_bytes);
         rc |= voleith_shake256_absorb(&ctx, &flag_byte, 1);
+    }
+
+    /* Opener section absorbed last (highest module bit), so every bit-6-off
+     * fingerprint is byte-identical to the pre-opener value.  hash_id is the
+     * set's prim_default, so absorbing it binds the emitted KDF gadget (Q4). */
+    if (bitmap & VOLEITH_RS_MODULE_OPENER) {
+        const voleith_rs_opener_argus_params_t *op =
+            voleith_rs_opener_argus_params(cfg->opener_set);
+        uint8_t mdigest[16];
+        uint8_t hash_id;
+        voleith_hash_ctx_t mctx;
+
+        if (op == NULL || cfg->opener_pk == NULL) {
+            voleith_hash_ctx_clear(&ctx);
+            return -1;
+        }
+        hash_id = op->prim_default;
+
+        voleith_shake256_init(&mctx);
+        rc |= voleith_shake256_absorb(&mctx, cfg->opener_pk,
+                                      cfg->opener_pk_bytes);
+        voleith_shake256_squeeze(&mctx, mdigest, sizeof(mdigest));
+        voleith_hash_ctx_clear(&mctx);
+
+        rc |= voleith_shake256_absorb_u32_le(&ctx, (uint32_t)cfg->opener_set);
+        rc |= voleith_shake256_absorb(&ctx, mdigest, sizeof(mdigest));
+        rc |= voleith_shake256_absorb(&ctx, &hash_id, 1);
     }
 
     /* nonzero only on absorb-after-squeeze (unreachable here, single squeeze
@@ -522,39 +588,60 @@ voleith_rs_pack_witness(const voleith_rs_config_t *cfg,
                cfg->commit_rand_bytes);
     }
 
-    /* leaf_node and, when an OWF runs, its leaf inv_in.
-     *   non-V6:        leaf_node = OWF(sk || attrs)
-     *   V6 + V3:       leaf_node = OWF(epoch_root || attrs || salt)
-     *   V6 without V3: leaf_node := epoch_root (no OWF inv_in) */
-    if (epoch_enabled && cfg->attr_schema == NULL) {
+    /* [V5] opener: resolve params + the id/support inputs.  The id joins the
+     * leaf preimage (below) and, when V4 is off, is its own witness section
+     * (when V4 is on it already sits at commit_id_off == opener_id_off). */
+    int opener_enabled = cfg->enable_opener != 0;
+    const voleith_rs_opener_argus_params_t *op = NULL;
+    size_t opener_id_bytes = 0;
+    if (opener_enabled) {
+        op = voleith_rs_opener_argus_params(cfg->opener_set);
+        if (op == NULL)
+            return -1;
+        opener_id_bytes = op->key_bytes;
+        if (id == NULL || path->opener_support == NULL)
+            return -1;
+        if (commit_total == 0)
+            memcpy(witness_out + layout->opener_id_off, id, opener_id_bytes);
+    }
+
+    /* leaf_node and, when an OWF runs, its leaf inv_in.  Unified tail =
+     * attrs || salt || id (salt is V6-only; id is opener-only, Q2), head = sk
+     * (non-V6) or epoch_root (V6).  The one no-OWF case is V6 without V3 and
+     * without the opener: leaf_node := epoch_root.  Mirrors the builder's
+     * leaf stage exactly (rs_gf8_circuit.c). */
+    if (epoch_enabled && cfg->attr_schema == NULL && !opener_enabled) {
         memcpy(leaf_node, epoch_root, W);
-    } else if (epoch_enabled) {
-        size_t tail = attr_total + salt_bytes;
+    } else {
+        const uint8_t *head = epoch_enabled ? epoch_root : sk;
+        size_t head_bytes = epoch_enabled ? W : mcfg->sk_bytes;
+        size_t tail = attr_total + salt_bytes + opener_id_bytes;
         uint8_t *tailbuf = calloc(tail > 0 ? tail : 1, 1);
+        size_t off = 0;
         int lrc;
 
         if (tailbuf == NULL)
             goto out;
-        if (attr_total > 0)
-            memcpy(tailbuf, attrs, attr_total);
-        if (salt_bytes > 0)
-            memcpy(tailbuf + attr_total, path->epoch_salt, salt_bytes);
-        lrc = rs_leaf_gf8_build_witness(owf_vt, epoch_root, W, tailbuf, tail,
+        if (attr_total > 0) {
+            memcpy(tailbuf + off, attrs, attr_total);
+            off += attr_total;
+        }
+        if (salt_bytes > 0) {
+            memcpy(tailbuf + off, path->epoch_salt, salt_bytes);
+            off += salt_bytes;
+        }
+        if (opener_id_bytes > 0) {
+            memcpy(tailbuf + off, id, opener_id_bytes);
+            off += opener_id_bytes;
+        }
+        lrc = rs_leaf_gf8_build_witness(owf_vt, head, head_bytes, tailbuf, tail,
                                         witness_out + ml->owf_invin_off);
         if (lrc == 0)
-            lrc = rs_leaf_gf8_hash(owf_vt, epoch_root, W, tailbuf, tail,
+            lrc = rs_leaf_gf8_hash(owf_vt, head, head_bytes, tailbuf, tail,
                                    leaf_node);
         voleith_secure_zero(tailbuf, tail);
         free(tailbuf);
         if (lrc != 0)
-            goto out;
-    } else {
-        if (rs_leaf_gf8_build_witness(owf_vt, sk, mcfg->sk_bytes, attrs,
-                                      attr_total,
-                                      witness_out + ml->owf_invin_off) != 0)
-            goto out;
-        if (rs_leaf_gf8_hash(owf_vt, sk, mcfg->sk_bytes, attrs, attr_total,
-                             leaf_node) != 0)
             goto out;
     }
 
@@ -700,6 +787,25 @@ voleith_rs_pack_witness(const voleith_rs_config_t *cfg,
             goto out;
     }
 
+    /* [V5] opener: bit-pack the support into the support witness (LSB-first at
+     * idx_bits, contract A3), then derive the KDF S-box inv_in over those same
+     * packed bytes (dispatched on the set's prim_default). */
+    if (opener_enabled) {
+        uint8_t *support = witness_out + layout->opener_support_off;
+
+        if (ichor_bitpack_le32(support, layout->opener_support_bytes,
+                               path->opener_support, op->t, op->idx_bits) != 0)
+            goto out;
+        if (op->prim_default == VOLEITH_RS_OPENER_ARGUS_PRIM_AESDM)
+            voleith_rs_opener_kdf_aesdm_build_witness(
+                op->ds_iv, support, op->msg_bytes,
+                witness_out + layout->opener_kdf_invin_off);
+        else if (op->prim_default == VOLEITH_RS_OPENER_ARGUS_PRIM_GROSTL256)
+            voleith_rs_opener_kdf_grostl256_build_witness(
+                op->ds_iv, support, op->msg_bytes,
+                witness_out + layout->opener_kdf_invin_off);
+    }
+
     rc = 0;
 out:
     voleith_secure_zero(leaf_node, sizeof(leaf_node));
@@ -708,87 +814,282 @@ out:
     return rc;
 }
 
-int
-voleith_rs_ring_build(const voleith_rs_config_t *cfg, const uint8_t *sks,
-                      const uint8_t *attrs_or_null, size_t n_members,
-                      uint8_t *root_out, voleith_rs_path_t *paths_out,
-                      uint8_t *siblings_storage)
-{
-    const voleith_rs_membership_config_t *mcfg;
+/* ================================================================
+ * Streaming ring builder (RS.PACK): member_begin / member_set / member_end,
+ * enrolling one field at a time.  All leaf material is secret and its byte
+ * layout is fixed by cfg (leaf = OWF(sk || attrs || id), salt being V6-only and
+ * outside this non-V6 builder); the field selector lets the caller supply the
+ * fields in any order while the builder assembles the canonical preimage.  The
+ * one-shot voleith_rs_ring_build below is a thin wrapper, byte-identical for the
+ * no-id (non-opener) case.
+ * ================================================================ */
+
+struct voleith_rs_ring_builder {
     const voleith_node_hash_vt *tree_vt;
     const voleith_node_hash_vt *owf_vt;
     size_t W;
     size_t depth_m;
     size_t capacity;
+    size_t sk_bytes;
     size_t attr_total;
-    uint8_t *leaf_nodes = NULL;
-    int rc = -1;
+    size_t id_bytes; /* opener id width, 0 if opener off */
+    int opener_enabled;
+    size_t n_members;
+    size_t cursor; /* members finalized so far */
+    uint8_t *leaf_nodes;
+    uint8_t *tailbuf; /* attr_total + id_bytes scratch, reused per member */
+    uint8_t *root_out;
+    voleith_rs_path_t *paths_out;
+    uint8_t *siblings_storage;
 
-    if (cfg == NULL || sks == NULL || root_out == NULL || paths_out == NULL ||
+    /* per-member staging, valid between member_begin and member_end */
+    int in_member;
+    const uint8_t *m_sk;
+    const uint8_t *m_attrs;
+    const uint8_t *m_id;
+    int sk_set, attrs_set, id_set;
+};
+
+int
+voleith_rs_ring_build_init(voleith_rs_ring_builder_t **b_out,
+                           const voleith_rs_config_t *cfg, size_t n_members,
+                           uint8_t *root_out, voleith_rs_path_t *paths_out,
+                           uint8_t *siblings_storage)
+{
+    const voleith_rs_membership_config_t *mcfg;
+    voleith_rs_ring_builder_t *b;
+    size_t attr_total = 0, id_bytes = 0, capacity;
+
+    if (b_out == NULL || cfg == NULL || root_out == NULL || paths_out == NULL ||
         siblings_storage == NULL)
         return -1;
+    *b_out = NULL;
     if (voleith_rs_config_validate(cfg) != 0)
         return -1;
     if (n_members == 0)
         return -1;
 
     mcfg = &cfg->membership;
-    tree_vt = mcfg->tree_hash;
-    owf_vt = mcfg->owf_hash ? mcfg->owf_hash : mcfg->tree_hash;
-    W = tree_vt->node_bytes;
-    depth_m = mcfg->depth_m;
-
-    attr_total = 0;
     if (cfg->attr_schema != NULL)
         for (size_t i = 0; i < cfg->attr_schema->n_fields; i++)
             attr_total += cfg->attr_schema->fields[i].width_bytes;
 
-    /* attrs_or_null must be present iff the schema declares attributes. */
-    if ((attr_total > 0) != (attrs_or_null != NULL))
-        return -1;
+    if (cfg->enable_opener) {
+        const voleith_rs_opener_argus_params_t *op =
+            voleith_rs_opener_argus_params(cfg->opener_set);
 
-    if (depth_m >= sizeof(size_t) * 8) {
+        if (op == NULL)
+            return -1;
+        id_bytes = op->key_bytes;
+    }
+
+    if (mcfg->depth_m >= sizeof(size_t) * 8) {
         capacity = (size_t)-1;
     } else {
-        capacity = (size_t)1u << depth_m;
+        capacity = (size_t)1u << mcfg->depth_m;
         if (n_members > capacity)
             return -1;
     }
 
+    b = calloc(1, sizeof(*b));
+    if (b == NULL)
+        return -1;
+    b->tree_vt = mcfg->tree_hash;
+    b->owf_vt = mcfg->owf_hash ? mcfg->owf_hash : mcfg->tree_hash;
+    b->W = b->tree_vt->node_bytes;
+    b->depth_m = mcfg->depth_m;
+    b->capacity = capacity;
+    b->sk_bytes = mcfg->sk_bytes;
+    b->attr_total = attr_total;
+    b->id_bytes = id_bytes;
+    b->opener_enabled = cfg->enable_opener != 0;
+    b->n_members = n_members;
+    b->root_out = root_out;
+    b->paths_out = paths_out;
+    b->siblings_storage = siblings_storage;
+
     /* calloc zero-fills vacant slots with the documented sentinel
      * (VOLEITH_RSV1_SENTINEL_LEAF_BYTE == 0x00): an all-zero leaf node
      * cannot collide with a real OWF output. */
-    leaf_nodes = calloc(capacity, W);
-    if (leaf_nodes == NULL)
+    b->leaf_nodes = calloc(capacity, b->W);
+    b->tailbuf =
+        calloc(attr_total + id_bytes > 0 ? attr_total + id_bytes : 1, 1);
+    if (b->leaf_nodes == NULL || b->tailbuf == NULL) {
+        voleith_rs_ring_build_free(b);
+        return -1;
+    }
+    *b_out = b;
+    return 0;
+}
+
+int
+voleith_rs_ring_member_begin(voleith_rs_ring_builder_t *b)
+{
+    if (b == NULL || b->in_member || b->cursor >= b->n_members)
+        return -1;
+    b->in_member = 1;
+    b->sk_set = b->attrs_set = b->id_set = 0;
+    b->m_sk = b->m_attrs = b->m_id = NULL;
+    return 0;
+}
+
+int
+voleith_rs_ring_member_set(voleith_rs_ring_builder_t *b,
+                           voleith_rs_leaf_field_t field, const uint8_t *data,
+                           size_t len)
+{
+    if (b == NULL || !b->in_member || data == NULL)
+        return -1;
+    switch (field) {
+    case VOLEITH_RS_LEAF_FIELD_SK:
+        if (b->sk_bytes == 0 || len != b->sk_bytes)
+            return -1;
+        b->m_sk = data;
+        b->sk_set = 1;
+        return 0;
+    case VOLEITH_RS_LEAF_FIELD_ATTRS:
+        if (b->attr_total == 0 || len != b->attr_total)
+            return -1;
+        b->m_attrs = data;
+        b->attrs_set = 1;
+        return 0;
+    case VOLEITH_RS_LEAF_FIELD_ID:
+        if (!b->opener_enabled || len != b->id_bytes)
+            return -1;
+        b->m_id = data;
+        b->id_set = 1;
+        return 0;
+    default:
+        return -1;
+    }
+}
+
+int
+voleith_rs_ring_member_end(voleith_rs_ring_builder_t *b)
+{
+    size_t tail = 0, off = 0;
+    const uint8_t *tailp;
+
+    if (b == NULL || !b->in_member)
+        return -1;
+    /* Every cfg-enabled field must be supplied exactly (order-free). */
+    if ((b->sk_bytes > 0) != (b->sk_set != 0))
+        return -1;
+    if ((b->attr_total > 0) != (b->attrs_set != 0))
+        return -1;
+    if (b->opener_enabled != (b->id_set != 0))
         return -1;
 
-    for (size_t i = 0; i < n_members; i++) {
-        const uint8_t *ai =
-            attrs_or_null ? attrs_or_null + i * attr_total : NULL;
-        if (rs_leaf_gf8_hash(owf_vt, sks + i * mcfg->sk_bytes, mcfg->sk_bytes,
-                             ai, attr_total, leaf_nodes + i * W) != 0)
-            goto out;
+    if (b->attr_total > 0) {
+        memcpy(b->tailbuf + off, b->m_attrs, b->attr_total);
+        off += b->attr_total;
     }
+    if (b->id_bytes > 0) {
+        memcpy(b->tailbuf + off, b->m_id, b->id_bytes);
+        off += b->id_bytes;
+    }
+    tail = off;
+    tailp = tail > 0 ? b->tailbuf : NULL;
 
-    if (voleith_merkle_vt_build(tree_vt, leaf_nodes, capacity, root_out) != 0)
+    if (rs_leaf_gf8_hash(b->owf_vt, b->m_sk, b->sk_bytes, tailp, tail,
+                         b->leaf_nodes + b->cursor * b->W) != 0)
+        return -1;
+
+    b->in_member = 0;
+    b->cursor++;
+    return 0;
+}
+
+int
+voleith_rs_ring_build_final(voleith_rs_ring_builder_t *b)
+{
+    int rc = -1;
+
+    if (b == NULL)
+        return -1;
+    if (b->in_member || b->cursor != b->n_members)
         goto out;
 
-    for (size_t i = 0; i < n_members; i++) {
-        uint8_t *sib = siblings_storage + i * depth_m * W;
-        if (voleith_merkle_vt_compute_path(tree_vt, leaf_nodes, capacity, i,
-                                           sib) != 0)
+    if (voleith_merkle_vt_build(b->tree_vt, b->leaf_nodes, b->capacity,
+                                b->root_out) != 0)
+        goto out;
+
+    for (size_t i = 0; i < b->n_members; i++) {
+        uint8_t *sib = b->siblings_storage + i * b->depth_m * b->W;
+
+        if (voleith_merkle_vt_compute_path(b->tree_vt, b->leaf_nodes,
+                                           b->capacity, i, sib) != 0)
             goto out;
-        paths_out[i].membership.leaf_index = i;
-        paths_out[i].membership.siblings = sib;
+        b->paths_out[i].membership.leaf_index = i;
+        b->paths_out[i].membership.siblings = sib;
+    }
+    rc = 0;
+
+out:
+    voleith_rs_ring_build_free(b);
+    return rc;
+}
+
+void
+voleith_rs_ring_build_free(voleith_rs_ring_builder_t *b)
+{
+    if (b == NULL)
+        return;
+    if (b->leaf_nodes != NULL) {
+        voleith_secure_zero(b->leaf_nodes, b->capacity * b->W);
+        free(b->leaf_nodes);
+    }
+    if (b->tailbuf != NULL) {
+        voleith_secure_zero(b->tailbuf, b->attr_total + b->id_bytes);
+        free(b->tailbuf);
+    }
+    voleith_secure_zero(b, sizeof(*b));
+    free(b);
+}
+
+int
+voleith_rs_ring_build(const voleith_rs_config_t *cfg, const uint8_t *sks,
+                      const uint8_t *attrs_or_null, size_t n_members,
+                      uint8_t *root_out, voleith_rs_path_t *paths_out,
+                      uint8_t *siblings_storage)
+{
+    voleith_rs_ring_builder_t *b = NULL;
+    size_t sk_bytes, attr_total;
+
+    if (cfg == NULL || sks == NULL)
+        return -1;
+    if (voleith_rs_ring_build_init(&b, cfg, n_members, root_out, paths_out,
+                                   siblings_storage) != 0)
+        return -1;
+    sk_bytes = b->sk_bytes;
+    attr_total = b->attr_total;
+
+    /* attrs_or_null must be present iff the schema declares attributes. */
+    if ((attr_total > 0) != (attrs_or_null != NULL)) {
+        voleith_rs_ring_build_free(b);
+        return -1;
     }
 
-    rc = 0;
-out:
-    if (leaf_nodes != NULL) {
-        voleith_secure_zero(leaf_nodes, capacity * W);
-        free(leaf_nodes);
+    for (size_t i = 0; i < n_members; i++) {
+        if (voleith_rs_ring_member_begin(b) != 0)
+            goto err;
+        if (sk_bytes > 0 &&
+            voleith_rs_ring_member_set(b, VOLEITH_RS_LEAF_FIELD_SK,
+                                       sks + i * sk_bytes, sk_bytes) != 0)
+            goto err;
+        if (attr_total > 0 &&
+            voleith_rs_ring_member_set(b, VOLEITH_RS_LEAF_FIELD_ATTRS,
+                                       attrs_or_null + i * attr_total,
+                                       attr_total) != 0)
+            goto err;
+        if (voleith_rs_ring_member_end(b) != 0)
+            goto err;
     }
-    return rc;
+    return voleith_rs_ring_build_final(b); /* consumes b */
+
+err:
+    voleith_rs_ring_build_free(b);
+    return -1;
 }
 
 /* ================================================================
@@ -815,6 +1116,7 @@ voleith_rs_compute_fs_seed(const voleith_rs_config_t *cfg,
     uint8_t version = VOLEITH_RS_FS_SEED_FMT_VERSION;
     uint8_t fp[VOLEITH_RS_CONFIG_FINGERPRINT_BYTES];
     uint8_t zero_node[MERKLE_VT_MAX_NODE_BYTES];
+    const voleith_rs_opener_argus_params_t *op = NULL;
     uint8_t bitmap;
     size_t W;
     int rc = 0;
@@ -835,6 +1137,8 @@ voleith_rs_compute_fs_seed(const voleith_rs_config_t *cfg,
         return -1;
 
     bitmap = voleith_rs_module_bitmap(cfg);
+    if (bitmap & VOLEITH_RS_MODULE_OPENER)
+        op = voleith_rs_opener_argus_params(cfg->opener_set);
 
     /* Per-module required public inputs. */
     if ((bitmap & VOLEITH_RS_MODULE_COMMITMENT) && pub->commitment == NULL)
@@ -847,6 +1151,10 @@ voleith_rs_compute_fs_seed(const voleith_rs_config_t *cfg,
     if ((bitmap & VOLEITH_RS_MODULE_EPOCH) && cfg->depth_e < 64 &&
         pub->epoch >= ((uint64_t)1u << cfg->depth_e))
         return -1;
+    if (bitmap & VOLEITH_RS_MODULE_OPENER) {
+        if (op == NULL || pub->opener_s == NULL || pub->opener_tag_ct == NULL)
+            return -1;
+    }
     if (bitmap & VOLEITH_RS_MODULE_PREDICATE) {
         /* Enforce pub->bounds_len against the schema-derived total before the
          * absorb loop reads pub->bounds (N10-2): EQ contributes width, RANGE
@@ -936,6 +1244,19 @@ voleith_rs_compute_fs_seed(const voleith_rs_config_t *cfg,
      * the predicate section and immediately before m_len || m (design 6.4). */
     if (bitmap & VOLEITH_RS_MODULE_EPOCH)
         rc |= absorb_u64_be(&ctx, pub->epoch);
+
+    /* [V5] opener section: public syndrome s || DEM tag_ct, gated by bit 6,
+     * after the epoch section and before m_len || m.  The opener key identity
+     * (opener_set || SHAKE256(M)[0:16] || hash_id) already rides the cfg
+     * fingerprint absorbed above (fp).  Binding s || tag_ct here makes the
+     * per-signature VOLE seed (root_seed || iv = H_3(header || fs_seed),
+     * derived before the instance is absorbed) fresh whenever the opener error
+     * e is fresh, so two signatures over the same statement never reuse the
+     * same VOLE tape under different witnesses. */
+    if (bitmap & VOLEITH_RS_MODULE_OPENER) {
+        rc |= voleith_shake256_absorb(&ctx, pub->opener_s, op->block_bytes);
+        rc |= voleith_shake256_absorb(&ctx, pub->opener_tag_ct, op->key_bytes);
+    }
 
     rc |= absorb_u64_be(&ctx, (uint64_t)m_len);
     if (m_len != 0)
@@ -1029,7 +1350,126 @@ rs_fill_instance(const voleith_rs_layout_t *layout,
         memcpy(instance + layout->inst_spent_root_off, pub->spent_root,
                layout->inst_spent_root_bytes);
     }
+    /* [V5] opener: expand the packed syndrome s to p bit wires (LSB-first,
+     * s_j at bit j), and copy the DEM tag_ct. */
+    if (layout->inst_opener_s_bytes > 0) {
+        if (pub->opener_s == NULL || pub->opener_tag_ct == NULL)
+            return -1;
+        for (size_t j = 0; j < layout->inst_opener_s_bytes; j++)
+            instance[layout->inst_opener_s_off + j] =
+                (uint8_t)((pub->opener_s[j >> 3] >> (j & 7u)) & 1u);
+        memcpy(instance + layout->inst_opener_tag_ct_off, pub->opener_tag_ct,
+               layout->inst_opener_tag_ct_bytes);
+    }
     return 0;
+}
+
+int
+voleith_rs_pack_instance(const voleith_rs_config_t *cfg,
+                         const voleith_rs_layout_t *layout,
+                         const voleith_rs_public_t *pub, uint8_t *instance_out)
+{
+    if (cfg == NULL || layout == NULL || pub == NULL || instance_out == NULL)
+        return -1;
+    if (pub->membership_root == NULL)
+        return -1;
+    memset(instance_out, 0, layout->instance_bytes);
+    return rs_fill_instance(layout, pub, instance_out);
+}
+
+/* Domain-separating IV for the V5 opener seal's PRG expansion.  Distinct from
+ * the GGM vector-commitment PRG (vc.c) and the V6 epoch schedule so the same
+ * caller seed never collides across uses.  14 visible bytes + two NUL pad. */
+static const uint8_t rs_opener_seal_prg_iv[16] = "VOLEitH-RSv5-e\x00\x00";
+
+int
+voleith_rs_opener_seal(const voleith_rs_config_t *cfg,
+                       const uint8_t *randomness, size_t randomness_len,
+                       const uint8_t *id, size_t id_len, uint32_t *support_out,
+                       uint8_t *s_out, uint8_t *tag_ct_out)
+{
+    const voleith_rs_opener_argus_params_t *op;
+    voleith_prg_ctx_t prg;
+    uint8_t *tape = NULL;
+    uint8_t K[32];
+    uint8_t pad[32];
+    size_t tape_len, i;
+    int lambda, rc = -1;
+
+    if (cfg == NULL || randomness == NULL || id == NULL ||
+        support_out == NULL || s_out == NULL || tag_ct_out == NULL)
+        return -1;
+    if (!cfg->enable_opener || cfg->opener_pk == NULL)
+        return -1;
+
+    op = voleith_rs_opener_argus_params(cfg->opener_set);
+    if (op == NULL)
+        return -1;
+    lambda = (int)op->lambda;
+    /* Seal id width is fixed to the DEM key width (the ring-opener leaf id, no
+     * CTR): matches pub->opener_tag_ct and the in-circuit DEM gadget. */
+    if (id_len != op->key_bytes || op->key_bytes > sizeof(K))
+        return -1;
+    if (randomness_len != (size_t)(lambda / 8))
+        return -1;
+    if (cfg->opener_pk_bytes != (size_t)(op->n0 - 1u) * op->block_bytes)
+        return -1;
+
+    tape_len = ichor_sample_fixed_weight_tape_bytes(lambda, op->t);
+    if (tape_len == 0)
+        return -1;
+    tape = calloc(tape_len, 1);
+    if (tape == NULL)
+        return -1;
+
+    /* Fresh error support: expand the caller randomness to the sampler tape
+     * under the V5 domain IV, then draw t distinct ascending indices in [0,n). */
+    if (voleith_prg_init(&prg, randomness, lambda) != 0)
+        goto out;
+    voleith_prg_gen(&prg, tape, rs_opener_seal_prg_iv, 0, tape_len * 8u);
+    voleith_prg_clear(&prg);
+
+    if (ichor_sample_fixed_weight(support_out, op->t, op->n, lambda, tape,
+                                  tape_len) != 0)
+        goto out;
+
+    /*
+     * Canonicalize the support to ascending: the KDF hashes the sparse index
+     * list AS AN ORDERED LIST (H(support(e))), so K matches syndrome's decap
+     * only if both hash byte-identical sparse bytes.  syndrome's decap rebuilds
+     * the list ascending from the recovered dense error, so the seal conforms.
+     * The syndrome multiply below scatters and is order-independent; the
+     * distinctness gadget consumes this same ascending witness.
+     */
+    ichor_sample_sort_ascending(support_out, op->t);
+
+    /* Public syndrome s = M*e^T. */
+    if (voleith_rs_opener_argus_syndrome(op, s_out, cfg->opener_pk,
+                                         support_out) != VOLEITH_RS_OPENER_OK)
+        goto out;
+
+    /* DEM: tag_ct = id XOR pad(K), K = KDF(support) under the set's default
+     * primitive (id_len == key_bytes, so pad is K truncated, no CTR). */
+    if (voleith_rs_opener_argus_kdf(op, K, op->prim_default, support_out) !=
+        VOLEITH_RS_OPENER_OK)
+        goto out;
+    if (voleith_rs_opener_argus_dem_pad(op, pad, id_len, K) !=
+        VOLEITH_RS_OPENER_OK)
+        goto out;
+    for (i = 0; i < id_len; i++)
+        tag_ct_out[i] = (uint8_t)(id[i] ^ pad[i]);
+
+    rc = 0;
+
+out:
+    if (tape != NULL) {
+        voleith_secure_zero(tape, tape_len);
+        free(tape);
+    }
+    voleith_secure_zero(K, sizeof(K));
+    voleith_secure_zero(pad, sizeof(pad));
+    voleith_secure_zero(&prg, sizeof(prg));
+    return rc;
 }
 
 int
@@ -1114,6 +1554,19 @@ out:
     return rc;
 }
 
+/* Reject a non-canonical packed syndrome s: the top (block_bytes*8 - p) pad
+ * bits of the last byte MUST be zero (contract A0 canonical packing), mirroring
+ * Argus's EMALFORMED check.  s is block_bytes = ceil(p/8) bytes, LSB-first. */
+static int
+opener_s_canonical(const voleith_rs_opener_argus_params_t *op, const uint8_t *s)
+{
+    unsigned rem = (unsigned)(op->p & 7u); /* valid bits in the top byte */
+
+    if (rem == 0)
+        return 1; /* p a multiple of 8: no pad bits */
+    return (s[op->block_bytes - 1] & (uint8_t) ~((1u << rem) - 1u)) == 0;
+}
+
 int
 voleith_rs_verify(const voleith_rs_sig_t *sig, const voleith_rs_config_t *cfg,
                   const voleith_params_t *params,
@@ -1134,6 +1587,18 @@ voleith_rs_verify(const voleith_rs_sig_t *sig, const voleith_rs_config_t *cfg,
         return -1;
     if (voleith_rs_config_validate(cfg) != 0)
         return -1;
+
+    /* [V5] boundary validation: reject a non-canonical public syndrome s before
+     * touching the proof, mirroring Argus's malformed-ciphertext rejection. */
+    if (cfg->enable_opener) {
+        const voleith_rs_opener_argus_params_t *op =
+            voleith_rs_opener_argus_params(cfg->opener_set);
+
+        if (op == NULL || pub->opener_s == NULL)
+            return -1;
+        if (!opener_s_canonical(op, pub->opener_s))
+            return -1;
+    }
 
     circuit = voleith_gf8_circuit_new();
     if (circuit == NULL)
@@ -1190,48 +1655,499 @@ voleith_rs_sig_packed_len(const voleith_rs_sig_t *sig)
     return VOLEITH_RS_SIG_HEADER_BYTES + sig->len;
 }
 
-int
-voleith_rs_sig_pack(uint8_t *out_buf, size_t out_len, size_t *written_out,
-                    const voleith_rs_sig_t *sig, const voleith_rs_config_t *cfg,
-                    const voleith_params_t *params)
-{
+/* ---- streaming builder / reader (RS.SER, OP.SER) ---- */
+
+struct rs_sig_frag {
+    const uint8_t *p;
+    size_t len;
+};
+
+struct rs_sig_section {
+    uint8_t tag;
+    uint8_t
+        inline_byte; /* stable storage for a 1-byte fragment (e.g. hash_id) */
+    unsigned nfrag;
+    struct rs_sig_frag frag[VOLEITH_RS_SIG_MAX_FRAGS];
+};
+
+struct voleith_rs_sig_packer {
+    const voleith_rs_config_t *cfg; /* for opener param derivation */
+    voleith_rs_sig_format_t format;
     uint8_t cfg_fp[VOLEITH_RS_CONFIG_FINGERPRINT_BYTES];
     uint8_t params_fp[VOLEITH_PARAMS_FINGERPRINT_BYTES];
-    size_t off;
+    unsigned n_sections;
+    struct rs_sig_section sec[VOLEITH_RS_SIG_MAX_SECTIONS];
+};
 
-    if (out_buf == NULL || sig == NULL || cfg == NULL || params == NULL)
+struct voleith_rs_sig_unpacker {
+    const uint8_t *buf;
+    size_t len;
+    uint8_t version;
+    unsigned n_sections;
+    struct {
+        uint8_t tag;
+        const uint8_t *payload;
+        size_t len;
+    } sec[VOLEITH_RS_SIG_MAX_SECTIONS];
+};
+
+static size_t
+rs_section_payload_len(const struct rs_sig_section *s)
+{
+    size_t t = 0;
+    unsigned i;
+
+    for (i = 0; i < s->nfrag; i++)
+        t += s->frag[i].len;
+    return t;
+}
+
+/* Append a fresh section with a unique tag; NULL if full or duplicate. */
+static struct rs_sig_section *
+rs_packer_new_section(voleith_rs_sig_packer_t *b, uint8_t tag)
+{
+    struct rs_sig_section *s;
+    unsigned i;
+
+    if (b->n_sections >= VOLEITH_RS_SIG_MAX_SECTIONS)
+        return NULL;
+    for (i = 0; i < b->n_sections; i++)
+        if (b->sec[i].tag == tag)
+            return NULL;
+    s = &b->sec[b->n_sections++];
+    s->tag = tag;
+    s->inline_byte = 0;
+    s->nfrag = 0;
+    return s;
+}
+
+static int
+rs_section_add_frag(struct rs_sig_section *s, const uint8_t *p, size_t len)
+{
+    if (len == 0)
+        return 0; /* empty fragment contributes nothing */
+    if (s->nfrag >= VOLEITH_RS_SIG_MAX_FRAGS)
+        return -1;
+    s->frag[s->nfrag].p = p;
+    s->frag[s->nfrag].len = len;
+    s->nfrag++;
+    return 0;
+}
+
+/*
+ * Resolve the effective format and total serialized length for the sections
+ * added so far.  Returns -1 (and leaves outputs untouched) if the section set
+ * is invalid: no PROOF section, a non-proof section under v1, or a payload that
+ * would overflow the be32 length field.
+ */
+static int
+rs_packer_resolve(const voleith_rs_sig_packer_t *b,
+                  voleith_rs_sig_format_t *fmt_out, size_t *len_out)
+{
+    voleith_rs_sig_format_t fmt = b->format;
+    int have_proof = 0, have_nonproof = 0;
+    size_t total, proof_payload = 0, i;
+
+    for (i = 0; i < b->n_sections; i++) {
+        size_t plen = rs_section_payload_len(&b->sec[i]);
+
+        if (plen > UINT32_MAX)
+            return -1;
+        if (b->sec[i].tag == VOLEITH_RS_SIG_SECTION_PROOF) {
+            have_proof = 1;
+            proof_payload = plen;
+        } else {
+            have_nonproof = 1;
+        }
+    }
+    if (!have_proof)
+        return -1;
+
+    if (fmt == VOLEITH_RS_SIG_FORMAT_AUTO)
+        fmt =
+            have_nonproof ? VOLEITH_RS_SIG_FORMAT_V2 : VOLEITH_RS_SIG_FORMAT_V1;
+    if (fmt == VOLEITH_RS_SIG_FORMAT_V1 && have_nonproof)
+        return -1;
+
+    if (fmt == VOLEITH_RS_SIG_FORMAT_V1) {
+        total = VOLEITH_RS_SIG_HEADER_BYTES + proof_payload;
+    } else {
+        total = VOLEITH_RS_SIG_V2_HEADER_BYTES;
+        for (i = 0; i < b->n_sections; i++)
+            total += VOLEITH_RS_SIG_SECTION_OVERHEAD +
+                     rs_section_payload_len(&b->sec[i]);
+    }
+    *fmt_out = fmt;
+    *len_out = total;
+    return 0;
+}
+
+int
+voleith_rs_sig_pack_init(voleith_rs_sig_packer_t **b_out,
+                         const voleith_rs_config_t *cfg,
+                         const voleith_params_t *params,
+                         voleith_rs_sig_format_t format)
+{
+    voleith_rs_sig_packer_t *b;
+
+    if (b_out == NULL)
+        return -1;
+    *b_out = NULL;
+    if (cfg == NULL || params == NULL)
+        return -1;
+    if (format != VOLEITH_RS_SIG_FORMAT_AUTO &&
+        format != VOLEITH_RS_SIG_FORMAT_V1 &&
+        format != VOLEITH_RS_SIG_FORMAT_V2)
+        return -1;
+
+    b = calloc(1, sizeof(*b));
+    if (b == NULL)
+        return -1;
+    if (voleith_rs_config_fingerprint(cfg, b->cfg_fp) != 0 ||
+        voleith_params_fingerprint(params, b->params_fp) != 0) {
+        free(b);
+        return -1;
+    }
+    b->cfg = cfg;
+    b->format = format;
+    b->n_sections = 0;
+    *b_out = b;
+    return 0;
+}
+
+int
+voleith_rs_sig_pack_proof(voleith_rs_sig_packer_t *b,
+                          const voleith_rs_sig_t *sig)
+{
+    struct rs_sig_section *s;
+
+    if (b == NULL || sig == NULL)
         return -1;
     if ((sig->data == NULL) != (sig->len == 0))
         return -1;
     if (sig->len > UINT32_MAX)
         return -1;
-    if (out_len != VOLEITH_RS_SIG_HEADER_BYTES + sig->len)
+
+    s = rs_packer_new_section(b, VOLEITH_RS_SIG_SECTION_PROOF);
+    if (s == NULL)
+        return -1;
+    return rs_section_add_frag(s, sig->data, sig->len);
+}
+
+int
+voleith_rs_sig_pack_opener(voleith_rs_sig_packer_t *b,
+                           const voleith_rs_public_t *pub)
+{
+    const voleith_rs_opener_argus_params_t *op;
+    struct rs_sig_section *s;
+
+    if (b == NULL || pub == NULL)
+        return -1;
+    if (b->cfg == NULL || !b->cfg->enable_opener)
+        return -1;
+    if (pub->opener_s == NULL || pub->opener_tag_ct == NULL)
+        return -1;
+    op = voleith_rs_opener_argus_params(b->cfg->opener_set);
+    if (op == NULL)
         return -1;
 
-    if (voleith_rs_config_fingerprint(cfg, cfg_fp) != 0)
+    s = rs_packer_new_section(b, VOLEITH_RS_SIG_SECTION_OPENER);
+    if (s == NULL)
         return -1;
-    if (voleith_params_fingerprint(params, params_fp) != 0)
+    s->inline_byte = op->prim_default; /* hash_id */
+    if (rs_section_add_frag(s, &s->inline_byte, 1) != 0 ||
+        rs_section_add_frag(s, pub->opener_s, op->block_bytes) != 0 ||
+        rs_section_add_frag(s, pub->opener_tag_ct, op->key_bytes) != 0)
         return -1;
+    return 0;
+}
+
+int
+voleith_rs_sig_pack_section(voleith_rs_sig_packer_t *b, uint8_t tag,
+                            const uint8_t *payload, size_t len)
+{
+    struct rs_sig_section *s;
+
+    if (b == NULL)
+        return -1;
+    if (payload == NULL && len != 0)
+        return -1;
+    if (len > UINT32_MAX)
+        return -1;
+    if (tag == VOLEITH_RS_SIG_SECTION_PROOF ||
+        tag == VOLEITH_RS_SIG_SECTION_OPENER)
+        return -1; /* reserved for the typed helpers */
+
+    s = rs_packer_new_section(b, tag);
+    if (s == NULL)
+        return -1;
+    return rs_section_add_frag(s, payload, len);
+}
+
+size_t
+voleith_rs_sig_pack_len(const voleith_rs_sig_packer_t *b)
+{
+    voleith_rs_sig_format_t fmt;
+    size_t len;
+
+    if (b == NULL)
+        return 0;
+    if (rs_packer_resolve(b, &fmt, &len) != 0)
+        return 0;
+    return len;
+}
+
+int
+voleith_rs_sig_pack_final(voleith_rs_sig_packer_t *b, uint8_t *out_buf,
+                          size_t out_len, size_t *written_out)
+{
+    voleith_rs_sig_format_t fmt;
+    size_t need, off, i, j;
+    int rc = -1;
+
+    if (b == NULL)
+        return -1;
+    if (out_buf == NULL)
+        goto out;
+    if (rs_packer_resolve(b, &fmt, &need) != 0)
+        goto out;
+    if (out_len != need)
+        goto out;
 
     off = 0;
     out_buf[off++] = VOLEITH_RS_SIG_MAGIC_0;
     out_buf[off++] = VOLEITH_RS_SIG_MAGIC_1;
     out_buf[off++] = VOLEITH_RS_SIG_MAGIC_2;
     out_buf[off++] = VOLEITH_RS_SIG_MAGIC_3;
-    out_buf[off++] = (uint8_t)VOLEITH_RS_SIG_FORMAT_VERSION;
-    memcpy(out_buf + off, cfg_fp, sizeof(cfg_fp));
-    off += sizeof(cfg_fp);
-    memcpy(out_buf + off, params_fp, sizeof(params_fp));
-    off += sizeof(params_fp);
-    rs_write_u32_be(out_buf + off, (uint32_t)sig->len);
-    off += 4;
-    if (sig->len != 0)
-        memcpy(out_buf + off, sig->data, sig->len);
-    off += sig->len;
+    out_buf[off++] = (uint8_t)fmt;
+    memcpy(out_buf + off, b->cfg_fp, sizeof(b->cfg_fp));
+    off += sizeof(b->cfg_fp);
+    memcpy(out_buf + off, b->params_fp, sizeof(b->params_fp));
+    off += sizeof(b->params_fp);
+
+    if (fmt == VOLEITH_RS_SIG_FORMAT_V1) {
+        /* Legacy bare framing: only the proof section is present. */
+        for (i = 0; i < b->n_sections; i++) {
+            const struct rs_sig_section *s = &b->sec[i];
+
+            if (s->tag != VOLEITH_RS_SIG_SECTION_PROOF)
+                continue;
+            rs_write_u32_be(out_buf + off, (uint32_t)rs_section_payload_len(s));
+            off += 4;
+            for (j = 0; j < s->nfrag; j++) {
+                memcpy(out_buf + off, s->frag[j].p, s->frag[j].len);
+                off += s->frag[j].len;
+            }
+        }
+    } else {
+        for (i = 0; i < b->n_sections; i++) {
+            const struct rs_sig_section *s = &b->sec[i];
+
+            out_buf[off++] = s->tag;
+            rs_write_u32_be(out_buf + off, (uint32_t)rs_section_payload_len(s));
+            off += 4;
+            for (j = 0; j < s->nfrag; j++) {
+                memcpy(out_buf + off, s->frag[j].p, s->frag[j].len);
+                off += s->frag[j].len;
+            }
+        }
+    }
 
     if (written_out != NULL)
         *written_out = off;
+    rc = 0;
+
+out:
+    free(b);
+    return rc;
+}
+
+void
+voleith_rs_sig_pack_free(voleith_rs_sig_packer_t *b)
+{
+    free(b);
+}
+
+int
+voleith_rs_sig_unpack_init(voleith_rs_sig_unpacker_t **u_out,
+                           const uint8_t *buf, size_t buf_len,
+                           const voleith_rs_config_t *cfg,
+                           const voleith_params_t *params)
+{
+    uint8_t expected_cfg_fp[VOLEITH_RS_CONFIG_FINGERPRINT_BYTES];
+    uint8_t expected_params_fp[VOLEITH_PARAMS_FINGERPRINT_BYTES];
+    voleith_rs_sig_unpacker_t *u;
+    uint8_t ver;
+    size_t off;
+
+    if (u_out == NULL)
+        return -1;
+    *u_out = NULL;
+    if (buf == NULL || cfg == NULL || params == NULL)
+        return -1;
+    if (buf_len < VOLEITH_RS_SIG_V2_HEADER_BYTES)
+        return -1;
+    if (buf[0] != VOLEITH_RS_SIG_MAGIC_0 || buf[1] != VOLEITH_RS_SIG_MAGIC_1 ||
+        buf[2] != VOLEITH_RS_SIG_MAGIC_2 || buf[3] != VOLEITH_RS_SIG_MAGIC_3)
+        return -1;
+    ver = buf[4];
+    if (ver != (uint8_t)VOLEITH_RS_SIG_FORMAT_VERSION &&
+        ver != (uint8_t)VOLEITH_RS_SIG_FORMAT_VERSION_V2)
+        return -1;
+    if (voleith_rs_config_fingerprint(cfg, expected_cfg_fp) != 0)
+        return -1;
+    if (voleith_params_fingerprint(params, expected_params_fp) != 0)
+        return -1;
+    if (voleith_const_memcmp(buf + 5, expected_cfg_fp,
+                             sizeof(expected_cfg_fp)) != 0)
+        return -1;
+    if (voleith_const_memcmp(buf + 5 + sizeof(expected_cfg_fp),
+                             expected_params_fp,
+                             sizeof(expected_params_fp)) != 0)
+        return -1;
+
+    u = calloc(1, sizeof(*u));
+    if (u == NULL)
+        return -1;
+    u->buf = buf;
+    u->len = buf_len;
+    u->version = ver;
+    u->n_sections = 0;
+
+    off = VOLEITH_RS_SIG_V2_HEADER_BYTES;
+    if (ver == (uint8_t)VOLEITH_RS_SIG_FORMAT_VERSION) {
+        uint32_t proof_len;
+
+        if (buf_len < VOLEITH_RS_SIG_HEADER_BYTES)
+            goto fail;
+        proof_len = rs_read_u32_be(buf + off);
+        off += 4;
+        if (buf_len != (size_t)VOLEITH_RS_SIG_HEADER_BYTES + proof_len)
+            goto fail;
+        u->sec[0].tag = VOLEITH_RS_SIG_SECTION_PROOF;
+        u->sec[0].payload = buf + off;
+        u->sec[0].len = proof_len;
+        u->n_sections = 1;
+    } else {
+        int have_proof = 0;
+
+        while (off < buf_len) {
+            uint8_t tag;
+            uint32_t slen;
+            unsigned k;
+
+            if (buf_len - off < VOLEITH_RS_SIG_SECTION_OVERHEAD)
+                goto fail; /* truncated section header */
+            tag = buf[off];
+            slen = rs_read_u32_be(buf + off + 1);
+            off += VOLEITH_RS_SIG_SECTION_OVERHEAD;
+            if (slen > buf_len - off)
+                goto fail; /* truncated payload */
+            if (u->n_sections >= VOLEITH_RS_SIG_MAX_SECTIONS)
+                goto fail;
+            for (k = 0; k < u->n_sections; k++)
+                if (u->sec[k].tag == tag)
+                    goto fail; /* duplicate */
+            u->sec[u->n_sections].tag = tag;
+            u->sec[u->n_sections].payload = buf + off;
+            u->sec[u->n_sections].len = slen;
+            u->n_sections++;
+            off += slen;
+            if (tag == VOLEITH_RS_SIG_SECTION_PROOF)
+                have_proof = 1;
+        }
+        if (!have_proof)
+            goto fail; /* proof is mandatory */
+    }
+
+    *u_out = u;
     return 0;
+
+fail:
+    free(u);
+    return -1;
+}
+
+static int
+rs_unpacker_find(const voleith_rs_sig_unpacker_t *u, uint8_t tag,
+                 const uint8_t **payload_out, size_t *len_out)
+{
+    unsigned i;
+
+    for (i = 0; i < u->n_sections; i++)
+        if (u->sec[i].tag == tag) {
+            *payload_out = u->sec[i].payload;
+            *len_out = u->sec[i].len;
+            return 0;
+        }
+    return -1;
+}
+
+int
+voleith_rs_sig_unpack_proof(voleith_rs_sig_unpacker_t *u,
+                            voleith_rs_sig_t *sig_out)
+{
+    const uint8_t *payload;
+    size_t plen;
+
+    if (u == NULL || sig_out == NULL)
+        return -1;
+    sig_out->data = NULL;
+    sig_out->len = 0;
+    if (rs_unpacker_find(u, VOLEITH_RS_SIG_SECTION_PROOF, &payload, &plen) != 0)
+        return -1;
+    if (plen == 0)
+        return 0;
+    sig_out->data = malloc(plen);
+    if (sig_out->data == NULL)
+        return -1;
+    memcpy(sig_out->data, payload, plen);
+    sig_out->len = plen;
+    return 0;
+}
+
+int
+voleith_rs_sig_unpack_opener(voleith_rs_sig_unpacker_t *u,
+                             const uint8_t **tag_out, size_t *tag_len_out)
+{
+    if (u == NULL || tag_out == NULL || tag_len_out == NULL)
+        return -1;
+    return rs_unpacker_find(u, VOLEITH_RS_SIG_SECTION_OPENER, tag_out,
+                            tag_len_out);
+}
+
+int
+voleith_rs_sig_unpack_section(voleith_rs_sig_unpacker_t *u, uint8_t tag,
+                              const uint8_t **payload_out, size_t *len_out)
+{
+    if (u == NULL || payload_out == NULL || len_out == NULL)
+        return -1;
+    return rs_unpacker_find(u, tag, payload_out, len_out);
+}
+
+void
+voleith_rs_sig_unpack_free(voleith_rs_sig_unpacker_t *u)
+{
+    free(u);
+}
+
+int
+voleith_rs_sig_pack(uint8_t *out_buf, size_t out_len, size_t *written_out,
+                    const voleith_rs_sig_t *sig, const voleith_rs_config_t *cfg,
+                    const voleith_params_t *params)
+{
+    voleith_rs_sig_packer_t *b = NULL;
+    int rc;
+
+    if (voleith_rs_sig_pack_init(&b, cfg, params, VOLEITH_RS_SIG_FORMAT_V1) !=
+        0)
+        return -1;
+    rc = voleith_rs_sig_pack_proof(b, sig);
+    if (rc != 0) {
+        voleith_rs_sig_pack_free(b);
+        return -1;
+    }
+    return voleith_rs_sig_pack_final(b, out_buf, out_len, written_out);
 }
 
 int
@@ -1239,55 +2155,18 @@ voleith_rs_sig_unpack(voleith_rs_sig_t *sig_out, const uint8_t *buf,
                       size_t buf_len, const voleith_rs_config_t *cfg,
                       const voleith_params_t *params)
 {
-    uint8_t expected_cfg_fp[VOLEITH_RS_CONFIG_FINGERPRINT_BYTES];
-    uint8_t expected_params_fp[VOLEITH_PARAMS_FINGERPRINT_BYTES];
-    uint32_t proof_len;
-    size_t off;
+    voleith_rs_sig_unpacker_t *u = NULL;
+    int rc;
 
-    if (sig_out == NULL || buf == NULL || cfg == NULL || params == NULL)
+    if (sig_out == NULL)
         return -1;
     sig_out->data = NULL;
     sig_out->len = 0;
-
-    if (buf_len < VOLEITH_RS_SIG_HEADER_BYTES)
+    if (voleith_rs_sig_unpack_init(&u, buf, buf_len, cfg, params) != 0)
         return -1;
-
-    if (buf[0] != VOLEITH_RS_SIG_MAGIC_0 || buf[1] != VOLEITH_RS_SIG_MAGIC_1 ||
-        buf[2] != VOLEITH_RS_SIG_MAGIC_2 || buf[3] != VOLEITH_RS_SIG_MAGIC_3)
-        return -1;
-    if (buf[4] != (uint8_t)VOLEITH_RS_SIG_FORMAT_VERSION)
-        return -1;
-
-    if (voleith_rs_config_fingerprint(cfg, expected_cfg_fp) != 0)
-        return -1;
-    if (voleith_params_fingerprint(params, expected_params_fp) != 0)
-        return -1;
-
-    off = 5;
-    if (voleith_const_memcmp(buf + off, expected_cfg_fp,
-                             sizeof(expected_cfg_fp)) != 0)
-        return -1;
-    off += sizeof(expected_cfg_fp);
-    if (voleith_const_memcmp(buf + off, expected_params_fp,
-                             sizeof(expected_params_fp)) != 0)
-        return -1;
-    off += sizeof(expected_params_fp);
-
-    proof_len = rs_read_u32_be(buf + off);
-    off += 4;
-
-    if (buf_len != (size_t)VOLEITH_RS_SIG_HEADER_BYTES + proof_len)
-        return -1;
-
-    if (proof_len == 0)
-        return 0;
-
-    sig_out->data = malloc(proof_len);
-    if (sig_out->data == NULL)
-        return -1;
-    memcpy(sig_out->data, buf + off, proof_len);
-    sig_out->len = proof_len;
-    return 0;
+    rc = voleith_rs_sig_unpack_proof(u, sig_out);
+    voleith_rs_sig_unpack_free(u);
+    return rc;
 }
 
 /* ================================================================

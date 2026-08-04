@@ -33,6 +33,7 @@
 
 #include "prover.h"
 #include "circuit.h"
+#include "qs_degree.h"
 #include "../core/field.h"
 #include "../core/util.h"
 
@@ -164,28 +165,36 @@ sum_poly_bits_at(uint8_t *out, uint8_t *tmp, const uint8_t *buf,
 }
 
 /* =====================================================================
- * zk_hash_3 context (prover side): three separate Horner accumulators
+ * zk_hash context (prover side): d+1 separate Horner accumulators, one per
+ * opened coefficient a_0..a_d of a degree-d QuickSilver constraint.  Named
+ * "_3" historically (the d=2 AND-gate case has 3 streams); it is now degree-
+ * parameterized by ctx->d (QS_DEGREE_D_DESIGN section 11).
  *
- * For each gate, prover calls update(v0, v1, v2):
- *   h0[i] = h0[i]*s + v_i
- *   h1[i] = h1[i]*t + v_i    (t is a GF(2^64) element, treated as GF(2^lambda))
+ * For each constraint, prover calls update(v[], nv):
+ *   h0[i] = h0[i]*s + v_i        (v_i = 0 for i >= nv: a lower-degree
+ *   h1[i] = h1[i]*t + v_i         constraint zero-pads its high streams)
+ * over ALL i in 0..d, so the Horner s/t powers stay aligned across streams.
+ * t is a GF(2^64) element treated as GF(2^lambda).
  *
- * Finalize: h_i = r0*h0[i] + r1*h1[i] + x1_i
+ * Finalize: h_i = r0*h0[i] + r1*h1[i] + x1_i, for i in 0..d.
  * ===================================================================== */
 
 typedef struct {
-    uint8_t h0[3][32]; /* 3 GF(2^lambda) accumulators for h0 */
-    uint8_t h1[3][32]; /* 3 GF(2^lambda) accumulators for h1 */
-    uint8_t s[32];     /* GF(2^lambda) Horner key for h0 */
-    uint8_t t[32];     /* GF(2^64) key for h1, zero-padded to lambda_bytes */
+    uint8_t h0[VOLEITH_QS_COEFFS_MAX][32]; /* d+1 h0 accumulators */
+    uint8_t h1[VOLEITH_QS_COEFFS_MAX][32]; /* d+1 h1 accumulators */
+    uint8_t s[32];                         /* GF(2^lambda) Horner key for h0 */
+    uint8_t t[32]; /* GF(2^64) key for h1, zero-padded to lambda_bytes */
     unsigned int lambda;
+    unsigned int d; /* constraint degree; streams 0..d are live */
 } zk_hash_3_ctx;
 
 static void
-zk_hash_3_init(zk_hash_3_ctx *ctx, const uint8_t *chall_2, unsigned int lambda)
+zk_hash_3_init(zk_hash_3_ctx *ctx, const uint8_t *chall_2, unsigned int lambda,
+               unsigned int d)
 {
     unsigned int nb = lambda / 8;
     ctx->lambda = lambda;
+    ctx->d = d;
     memset(ctx->h0, 0, sizeof(ctx->h0));
     memset(ctx->h1, 0, sizeof(ctx->h1));
     /* r0 = chall_2[0..nb-1]
@@ -229,32 +238,35 @@ gf_mul(uint8_t *out, const uint8_t *a, const uint8_t *b, unsigned int lambda)
 }
 
 /*
- * Accumulate one AND gate (or assert_zero) into the zk_hash_3 context.
- * v0, v1, v2 are degree-2, degree-1, degree-0 coefficients respectively.
- * All are lambda_bytes wide.
+ * Accumulate one constraint into the zk_hash context.  v[i] is the coefficient
+ * of delta^i (v[0] = degree-0, up to v[nv-1]; the d=2 AND-gate passes its
+ * v0/v1/v2 = degree-0/1/2 as nv=3).  Every stream i in 0..d is folded, with
+ * v_i = 0 for i >= nv so a lower-degree constraint zero-pads its high-power
+ * coefficients (the Horner s/t powers must advance on every stream each call).
+ * All coefficient pointers are lambda_bytes wide.
  *
  * h0[i] = h0[i]*s + v_i
  * h1[i] = h1[i]*t + v_i
  */
 static void
-zk_hash_3_update(zk_hash_3_ctx *ctx, const uint8_t *v0, /* degree-2 */
-                 const uint8_t *v1,                     /* degree-1 */
-                 const uint8_t *v2,                     /* degree-0 */
+zk_hash_3_update(zk_hash_3_ctx *ctx, const uint8_t *const *v, unsigned int nv,
                  uint8_t *tmp1, uint8_t *tmp2)
 {
+    static const uint8_t zero[32] = {0};
     unsigned int nb = ctx->lambda / 8;
-    const uint8_t *vs[3] = {v0, v1, v2};
 
-    for (int i = 0; i < 3; i++) {
+    for (unsigned int i = 0; i <= ctx->d; i++) {
+        const uint8_t *vi = (i < nv) ? v[i] : zero;
+
         /* h0[i] = h0[i]*s + v_i */
         gf_mul(tmp1, ctx->h0[i], ctx->s, ctx->lambda);
         for (unsigned int k = 0; k < nb; k++)
-            ctx->h0[i][k] = tmp1[k] ^ vs[i][k];
+            ctx->h0[i][k] = tmp1[k] ^ vi[k];
 
         /* h1[i] = h1[i]*t + v_i */
         gf_mul(tmp2, ctx->h1[i], ctx->t, ctx->lambda);
         for (unsigned int k = 0; k < nb; k++)
-            ctx->h1[i][k] = tmp2[k] ^ vs[i][k];
+            ctx->h1[i][k] = tmp2[k] ^ vi[k];
     }
 }
 
@@ -264,25 +276,22 @@ zk_hash_3_update(zk_hash_3_ctx *ctx, const uint8_t *v0, /* degree-2 */
  * Outputs a0_tilde (from h_0), a1_tilde (h_1), a2_tilde (h_2).
  */
 static void
-zk_hash_3_finalize(uint8_t *a0_tilde, uint8_t *a1_tilde, uint8_t *a2_tilde,
-                   const zk_hash_3_ctx *ctx, const uint8_t *x1_0,
-                   const uint8_t *x1_1, const uint8_t *x1_2,
-                   const uint8_t *chall_2, uint8_t *tmp1, uint8_t *tmp2)
+zk_hash_3_finalize(uint8_t *const *a_tilde, const zk_hash_3_ctx *ctx,
+                   const uint8_t *const *x1, const uint8_t *chall_2,
+                   uint8_t *tmp1, uint8_t *tmp2)
 {
     unsigned int nb = ctx->lambda / 8;
     const uint8_t *r0 = chall_2;
     const uint8_t *r1 = chall_2 + nb;
-    uint8_t *outputs[3] = {a0_tilde, a1_tilde, a2_tilde};
-    const uint8_t *x1s[3] = {x1_0, x1_1, x1_2};
 
-    for (int i = 0; i < 3; i++) {
+    for (unsigned int i = 0; i <= ctx->d; i++) {
         /* tmp1 = r0 * h0[i] */
         gf_mul(tmp1, r0, ctx->h0[i], ctx->lambda);
         /* tmp2 = r1 * h1[i] */
         gf_mul(tmp2, r1, ctx->h1[i], ctx->lambda);
-        /* output = tmp1 + tmp2 + x1[i] */
+        /* a_tilde[i] = tmp1 + tmp2 + x1[i] */
         for (unsigned int k = 0; k < nb; k++)
-            outputs[i][k] = tmp1[k] ^ tmp2[k] ^ x1s[i][k];
+            a_tilde[i][k] = tmp1[k] ^ tmp2[k] ^ x1[i][k];
     }
 }
 
@@ -300,7 +309,10 @@ voleith_qs_ell(const voleith_circuit_t *circuit)
 size_t
 voleith_qs_ellhat(const voleith_circuit_t *circuit, unsigned int lambda)
 {
-    return voleith_qs_ell(circuit) + 3u * lambda + UNIVERSAL_HASH_B_BITS;
+    /* QS mask region is d*lambda (one mask block per opened degree) plus the
+     * VOLE-hash mask lambda + B.  d=2 gives the historical 3*lambda + B. */
+    unsigned int d = voleith_circuit_qs_degree(circuit);
+    return voleith_qs_ell(circuit) + (d + 1u) * lambda + UNIVERSAL_HASH_B_BITS;
 }
 
 int
@@ -476,8 +488,12 @@ voleith_qs_prove(const voleith_circuit_t *circuit, const uint8_t *witness,
      *   v1 = tag[a]*bit[b] + tag[b]*bit[a] + bit[c]  (degree-1)
      *   v2 = bit[a]*bit[b]  (degree-2)
      * ------------------------------------------------------------------ */
+    /* Constraint degree in force.  d=2 is the AND-gate/assert baseline (three
+     * opened coefficients a0/a1/a2); the machinery below is degree-parameterized
+     * (QS_DEGREE_D_DESIGN) but the bit-level QuickSilver here is fixed at 2. */
+    const unsigned int d = 2;
     zk_hash_3_ctx hasher;
-    zk_hash_3_init(&hasher, chall_2, lambda);
+    zk_hash_3_init(&hasher, chall_2, lambda, d);
 
     {
         uint8_t v0[32], v1[32], v2[32], prod[32], zero[32];
@@ -517,7 +533,9 @@ voleith_qs_prove(const voleith_circuit_t *circuit, const uint8_t *witness,
             memset(v2, 0, nb);
             v2[0] = (uint8_t)(ba & bb);
 
-            zk_hash_3_update(&hasher, v0, v1, v2, tmp1, tmp2);
+            /* v[i] = coeff of delta^i: v0/v1/v2 = degree-0/1/2. */
+            const uint8_t *vv[3] = {v0, v1, v2};
+            zk_hash_3_update(&hasher, vv, 3, tmp1, tmp2);
         }
 
         /* P-3: zero per-gate working buffers at end of scope.
@@ -538,57 +556,59 @@ voleith_qs_prove(const voleith_circuit_t *circuit, const uint8_t *witness,
      * underlying XOR wire (whose tag = tag[a]+tag[b]) gets the check.
      * ------------------------------------------------------------------ */
     {
-        uint8_t zero[32];
-        memset(zero, 0, nb);
-
         for (size_t ci = 0; ci < n_constraints; ci++) {
             const constraint_entry_t *c = &constraints[ci];
             if (c->kind == CONSTRAINT_ZERO) {
-                zk_hash_3_update(&hasher, tags + c->a * nb, zero, zero, tmp1,
-                                 tmp2);
+                /* assert_zero(w): degree-0 constraint, only stream 0 = tag[w];
+                 * higher streams zero-pad. */
+                const uint8_t *vv[1] = {tags + c->a * nb};
+                zk_hash_3_update(&hasher, vv, 1, tmp1, tmp2);
             }
             /* CONSTRAINT_EQUAL is expressed as assert_zero(a XOR b)
              * which creates a XOR gate output as the constrained wire.
              * The circuit builder handles this, so we only see ZERO here. */
         }
-        /* `zero` is a public zero constant - no security need to clear,
-         * done for hygiene-bar consistency with the other per-block
-         * buffers. */
-        voleith_secure_zero(zero, sizeof(zero));
     }
 
     /* ------------------------------------------------------------------
-     * Step 6: Compute x1 corrections from VOLE bits beyond ell.
+     * Step 6: Compute the d+1 x1 corrections from the VOLE mask blocks beyond
+     * ell (d blocks of lambda columns each, cols ell..ell+d*lambda).
      *
-     * x1_0 = sum_poly(V columns ell..ell+lambda-1)
-     * x1_1 = sum_poly(V columns ell+lambda..ell+2*lambda-1) + u_star_0
-     *       where u_star_0 = sum_poly_bits(u bits ell..ell+lambda-1)
-     * x1_2 = u_star_1 = sum_poly_bits(u bits ell+lambda..ell+2*lambda-1)
+     * Staircase (QS_DEGREE_D_DESIGN section 11): x1_i = v*_i + u*_{i-1}, with
+     *   v*_j = sum_poly(V cols of block j),  u*_j = sum_poly_bits(u of block j),
+     *   v*_d = 0, u*_{-1} = 0.  At d=2: x1_0 = v*_0, x1_1 = u*_0 + v*_1,
+     *   x1_2 = u*_1 (byte-identical to the prior three-way form).
      * ------------------------------------------------------------------ */
-    uint8_t x1_0[32], x1_1[32], x1_2[32];
+    uint8_t x1[VOLEITH_QS_COEFFS_MAX][32];
     {
-        /* v_star_0 = sum_poly(V cols ell..ell+lambda-1) */
-        sum_poly_cols(x1_0, tmp1, V_T, lambda, nb, ell, lambda);
+        for (unsigned int i = 0; i <= d; i++)
+            memset(x1[i], 0, nb);
+        for (unsigned int j = 0; j < d; j++) {
+            size_t off = ell + (size_t)j * lambda;
 
-        /* u_star_0 = sum_poly_bits(u, ell..ell+lambda-1) */
-        sum_poly_bits_at(tmp3, tmp1, u, ell, lambda);
+            /* v*_j -> x1[j] */
+            sum_poly_cols(tmp3, tmp1, V_T, lambda, nb, off, lambda);
+            for (unsigned int k = 0; k < nb; k++)
+                x1[j][k] ^= tmp3[k];
 
-        /* v_star_1 = sum_poly(V cols ell+lambda..ell+2*lambda-1) */
-        sum_poly_cols(x1_1, tmp1, V_T, lambda, nb, ell + lambda, lambda);
-
-        /* x1_1 = u_star_0 + v_star_1 */
-        for (unsigned int k = 0; k < nb; k++)
-            x1_1[k] ^= tmp3[k];
-
-        /* x1_2 = u_star_1 = sum_poly_bits(u, ell+lambda..ell+2*lambda-1) */
-        sum_poly_bits_at(x1_2, tmp1, u, ell + lambda, lambda);
+            /* u*_j -> x1[j+1] */
+            sum_poly_bits_at(tmp3, tmp1, u, off, lambda);
+            for (unsigned int k = 0; k < nb; k++)
+                x1[j + 1][k] ^= tmp3[k];
+        }
     }
 
     /* ------------------------------------------------------------------
-     * Step 7: Finalize zk_hash_3 to get a0_tilde, a1_tilde, a2_tilde.
+     * Step 7: Finalize the zk_hash to get a0_tilde..ad_tilde (d+1 outputs).
      * ------------------------------------------------------------------ */
-    zk_hash_3_finalize(a0_tilde, a1_tilde, a2_tilde, &hasher, x1_0, x1_1, x1_2,
-                       chall_2, tmp1, tmp2);
+    {
+        uint8_t *a_out[3] = {a0_tilde, a1_tilde, a2_tilde};
+        const uint8_t *x1p[VOLEITH_QS_COEFFS_MAX];
+
+        for (unsigned int i = 0; i <= d; i++)
+            x1p[i] = x1[i];
+        zk_hash_3_finalize(a_out, &hasher, x1p, chall_2, tmp1, tmp2);
+    }
 
     {
         /*
@@ -617,9 +637,7 @@ voleith_qs_prove(const voleith_circuit_t *circuit, const uint8_t *witness,
         voleith_secure_zero(tmp1, sizeof(tmp1));
         voleith_secure_zero(tmp2, sizeof(tmp2));
         voleith_secure_zero(tmp3, sizeof(tmp3));
-        voleith_secure_zero(x1_0, sizeof(x1_0));
-        voleith_secure_zero(x1_1, sizeof(x1_1));
-        voleith_secure_zero(x1_2, sizeof(x1_2));
+        voleith_secure_zero(x1, sizeof(x1));
         voleith_secure_zero(&hasher, sizeof(hasher));
         free(V_T);
         free(bits_heap);
@@ -649,9 +667,7 @@ err:
     voleith_secure_zero(tmp1, sizeof(tmp1));
     voleith_secure_zero(tmp2, sizeof(tmp2));
     voleith_secure_zero(tmp3, sizeof(tmp3));
-    voleith_secure_zero(x1_0, sizeof(x1_0));
-    voleith_secure_zero(x1_1, sizeof(x1_1));
-    voleith_secure_zero(x1_2, sizeof(x1_2));
+    voleith_secure_zero(x1, sizeof(x1));
     voleith_secure_zero(&hasher, sizeof(hasher));
     free(V_T);
     free(bits_heap);

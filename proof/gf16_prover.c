@@ -36,6 +36,7 @@
 #include "gf16_prover.h"
 #include "gf16_prover_internal.h"
 #include "gf16_circuit.h"
+#include "qs_degree.h"
 #include "../core/field.h"
 #include "../core/field16.h"
 #include "../core/util.h"
@@ -218,23 +219,27 @@ gf16p_apply_linear_map(uint8_t *out_tabs, const uint8_t *in_tabs,
 }
 
 /* =====================================================================
- * zk_hash_3 context (three accumulators; field-agnostic, mirror gf8)
+ * zk_hash context: d+1 accumulators, one per opened coefficient of a degree-d
+ * constraint (ctx->d; QS_DEGREE_D_DESIGN section 11).  Field-agnostic, mirrors
+ * gf8/base; "_3" is historical (the d=2 case has 3 streams).
  * ===================================================================== */
 
 typedef struct {
-    uint8_t h0[3][32];
-    uint8_t h1[3][32];
+    uint8_t h0[VOLEITH_QS_COEFFS_MAX][32];
+    uint8_t h1[VOLEITH_QS_COEFFS_MAX][32];
     uint8_t s[32];
     uint8_t t[32];
     unsigned int lambda;
+    unsigned int d; /* constraint degree; streams 0..d are live */
 } gf16p_zk_hash_3_ctx;
 
 static void
 gf16p_zk_hash_3_init(gf16p_zk_hash_3_ctx *ctx, const uint8_t *chall_2,
-                     unsigned int lambda)
+                     unsigned int lambda, unsigned int d)
 {
     unsigned int nb = lambda / 8;
     ctx->lambda = lambda;
+    ctx->d = d;
     memset(ctx->h0, 0, sizeof(ctx->h0));
     memset(ctx->h1, 0, sizeof(ctx->h1));
     memcpy(ctx->s, chall_2 + 2 * nb, nb);
@@ -243,41 +248,404 @@ gf16p_zk_hash_3_init(gf16p_zk_hash_3_ctx *ctx, const uint8_t *chall_2,
     memcpy(ctx->t, chall_2 + 3 * nb, t_bytes);
 }
 
+/*
+ * v[i] is the coefficient of delta^i (v[0] = degree-0); streams i in 0..d are
+ * all folded, with v_i = 0 for i >= nv so a lower-degree constraint zero-pads
+ * its high-power coefficients (Horner s/t powers must advance on every stream).
+ */
 static void
-gf16p_zk_hash_3_update(gf16p_zk_hash_3_ctx *ctx, const uint8_t *v0,
-                       const uint8_t *v1, const uint8_t *v2, uint8_t *tmp1,
-                       uint8_t *tmp2)
+gf16p_zk_hash_3_update(gf16p_zk_hash_3_ctx *ctx, const uint8_t *const *v,
+                       unsigned int nv, uint8_t *tmp1, uint8_t *tmp2)
 {
+    static const uint8_t zero[32] = {0};
     unsigned int nb = ctx->lambda / 8;
-    const uint8_t *vs[3] = {v0, v1, v2};
-    for (int i = 0; i < 3; i++) {
+    for (unsigned int i = 0; i <= ctx->d; i++) {
+        const uint8_t *vi = (i < nv) ? v[i] : zero;
         gf16p_gf_mul(tmp1, ctx->h0[i], ctx->s, ctx->lambda);
         for (unsigned int k = 0; k < nb; k++)
-            ctx->h0[i][k] = tmp1[k] ^ vs[i][k];
+            ctx->h0[i][k] = tmp1[k] ^ vi[k];
         gf16p_gf_mul(tmp2, ctx->h1[i], ctx->t, ctx->lambda);
         for (unsigned int k = 0; k < nb; k++)
-            ctx->h1[i][k] = tmp2[k] ^ vs[i][k];
+            ctx->h1[i][k] = tmp2[k] ^ vi[k];
     }
 }
 
 static void
-gf16p_zk_hash_3_finalize(uint8_t *a0_tilde, uint8_t *a1_tilde,
-                         uint8_t *a2_tilde, const gf16p_zk_hash_3_ctx *ctx,
-                         const uint8_t *x1_0, const uint8_t *x1_1,
-                         const uint8_t *x1_2, const uint8_t *chall_2,
+gf16p_zk_hash_3_finalize(uint8_t *const *a_tilde,
+                         const gf16p_zk_hash_3_ctx *ctx,
+                         const uint8_t *const *x1, const uint8_t *chall_2,
                          uint8_t *tmp1, uint8_t *tmp2)
 {
     unsigned int nb = ctx->lambda / 8;
     const uint8_t *r0 = chall_2;
     const uint8_t *r1 = chall_2 + nb;
-    uint8_t *outputs[3] = {a0_tilde, a1_tilde, a2_tilde};
-    const uint8_t *x1s[3] = {x1_0, x1_1, x1_2};
-    for (int i = 0; i < 3; i++) {
+    for (unsigned int i = 0; i <= ctx->d; i++) {
         gf16p_gf_mul(tmp1, r0, ctx->h0[i], ctx->lambda);
         gf16p_gf_mul(tmp2, r1, ctx->h1[i], ctx->lambda);
         for (unsigned int k = 0; k < nb; k++)
-            outputs[i][k] = tmp1[k] ^ tmp2[k] ^ x1s[i][k];
+            a_tilde[i][k] = tmp1[k] ^ tmp2[k] ^ x1[i][k];
     }
+}
+
+/* =====================================================================
+ * Less-than (NLT) degree-(w+1) constraint (GF(2^16) mirror of the gf8
+ * gadget; see gf8_prover.c / QS_DEGREE_D_DESIGN §18.1).  Asserts A<B by
+ * committing NLT = [A>=B] = 0.  Each wire is a line L(X)=tag+emb(val)*X; the
+ * public constant 1 is [0, one] with one=embed(1).  Terms are top-aligned to
+ * X^(w+1); rho[0..w] pushed, rho[w+1] (value) omitted.
+ * ===================================================================== */
+static void
+gf16p_poly_mul(uint8_t out[][32], const uint8_t a[][32], unsigned int da,
+               const uint8_t b[][32], unsigned int db, unsigned int lambda,
+               unsigned int nb, uint8_t *tmp)
+{
+    for (unsigned int i = 0; i <= da + db; i++)
+        memset(out[i], 0, nb);
+    for (unsigned int i = 0; i <= da; i++)
+        for (unsigned int j = 0; j <= db; j++) {
+            gf16p_gf_mul(tmp, a[i], b[j], lambda);
+            for (unsigned int k = 0; k < nb; k++)
+                out[i + j][k] ^= tmp[k];
+        }
+}
+
+static int
+gf16p_accumulate_lt(gf16p_zk_hash_3_ctx *hasher, const gf16_lt_entry_t *lt,
+                    const gf16_wire_id *bits, const uint8_t *bit_tags,
+                    const voleith_gf16_t *wire_vals, unsigned int lambda,
+                    unsigned int nb, const uint8_t *beta, uint8_t *tmp1,
+                    uint8_t *tmp2)
+{
+    unsigned int w = lt->width;
+
+    /* INFO-3 defense in depth: the fixed [VOLEITH_QS_COEFFS_MAX] coefficient
+     * scratch below is indexed by the per-entry width w (up to w+1); bound w
+     * locally so a degree-array overrun is impossible even if the aggregate
+     * qs_degree guard in qs_prove_impl were ever bypassed.  Unreachable on
+     * shipped circuits (w = idx_bits <= 17).  Real check (survives -DNDEBUG),
+     * not an assert. */
+    if (w > VOLEITH_QS_D_MAX - 1u)
+        return -1;
+
+    uint8_t one[32];
+    gf16p_embed(one, 1, lambda);
+
+    uint8_t rho[VOLEITH_QS_COEFFS_MAX][32];
+    uint8_t prefix[VOLEITH_QS_COEFFS_MAX][32];
+    uint8_t prefix_next[VOLEITH_QS_COEFFS_MAX][32];
+    uint8_t gt[3][32];
+    uint8_t term[VOLEITH_QS_COEFFS_MAX][32];
+    for (unsigned int k = 0; k <= w + 1; k++)
+        memset(rho[k], 0, nb);
+
+    memcpy(prefix[0], one, nb);
+    unsigned int prefix_deg = 0;
+
+    for (unsigned int i = 0; i < w; i++) {
+        const uint8_t *bt_a = bit_tags + (size_t)bits[i] * GF16_ELEM_BITS * nb;
+        const uint8_t *bt_b =
+            bit_tags + (size_t)bits[w + i] * GF16_ELEM_BITS * nb;
+        uint8_t ta[32], ea[32], tb[32], eb[32], nb_c1[32];
+        gf16p_word_combine(ta, bt_a, nb, lambda, beta);
+        gf16p_word_combine(tb, bt_b, nb, lambda, beta);
+        gf16p_embed(ea, wire_vals[bits[i]], lambda);
+        gf16p_embed(eb, wire_vals[bits[w + i]], lambda);
+        for (unsigned int k = 0; k < nb; k++)
+            nb_c1[k] = one[k] ^ eb[k];
+
+        gf16p_gf_mul(gt[0], ta, tb, lambda);
+        gf16p_gf_mul(gt[1], ta, nb_c1, lambda);
+        gf16p_gf_mul(tmp1, ea, tb, lambda);
+        for (unsigned int k = 0; k < nb; k++)
+            gt[1][k] ^= tmp1[k];
+        gf16p_gf_mul(gt[2], ea, nb_c1, lambda);
+
+        gf16p_poly_mul(term, gt, 2, prefix, prefix_deg, lambda, nb, tmp2);
+        unsigned int tdeg = prefix_deg + 2;
+        unsigned int shift = (w + 1) - tdeg;
+        for (unsigned int k = 0; k <= tdeg; k++)
+            for (unsigned int m = 0; m < nb; m++)
+                rho[shift + k][m] ^= term[k][m];
+
+        uint8_t eq[2][32];
+        for (unsigned int k = 0; k < nb; k++) {
+            eq[0][k] = ta[k] ^ tb[k];
+            eq[1][k] = one[k] ^ ea[k] ^ eb[k];
+        }
+        gf16p_poly_mul(prefix_next, prefix, prefix_deg, eq, 1, lambda, nb,
+                       tmp1);
+        prefix_deg += 1;
+        for (unsigned int k = 0; k <= prefix_deg; k++)
+            memcpy(prefix[k], prefix_next[k], nb);
+    }
+
+    for (unsigned int k = 0; k <= w; k++)
+        for (unsigned int m = 0; m < nb; m++)
+            rho[1 + k][m] ^= prefix[k][m];
+
+    const uint8_t *vv[VOLEITH_QS_COEFFS_MAX];
+    for (unsigned int k = 0; k <= w; k++)
+        vv[k] = rho[k];
+    gf16p_zk_hash_3_update(hasher, vv, w + 1, tmp1, tmp2);
+
+    voleith_secure_zero(rho, sizeof(rho));
+    voleith_secure_zero(prefix, sizeof(prefix));
+    voleith_secure_zero(prefix_next, sizeof(prefix_next));
+    voleith_secure_zero(term, sizeof(term));
+    voleith_secure_zero(gt, sizeof(gt));
+    return 0;
+}
+
+/* Lever 1 demux tree, GF(2^16) prover (twin of gf8p_demux_fold). */
+static void
+gf16p_demux_fold(unsigned int depth, unsigned int w, uint32_t prefix,
+                 const uint8_t *facbuf, const uint8_t node[][32],
+                 unsigned int nodedeg, const uint8_t *R, uint32_t n,
+                 unsigned int lambda, unsigned int nb, uint8_t G[][32],
+                 uint8_t *tmp)
+{
+    if (depth == w) {
+        if (prefix < n) {
+            const uint8_t *Ri = R + (size_t)prefix * nb;
+            for (unsigned int c = 0; c <= w; c++) {
+                gf16p_gf_mul(tmp, Ri, node[c], lambda);
+                for (unsigned int m = 0; m < nb; m++)
+                    G[c][m] ^= tmp[m];
+            }
+        }
+        return;
+    }
+    uint8_t child[VOLEITH_QS_COEFFS_MAX][32];
+    for (unsigned int bit = 0; bit < 2; bit++) {
+        const uint8_t(*line)[32] = (const uint8_t(*)[32])(
+            facbuf + ((size_t)(depth * 2u + bit)) * 2u * 32u);
+        gf16p_poly_mul(child, node, nodedeg, line, 1, lambda, nb, tmp);
+        gf16p_demux_fold(depth + 1u, w, (prefix << 1) | bit, facbuf, child,
+                         nodedeg + 1u, R, n, lambda, nb, G, tmp);
+    }
+}
+
+/* =====================================================================
+ * Syndrome constraint (GF(2^16) twin of gf8p_accumulate_syndrome):
+ * Horner/circulant COLLAPSED prover (QS_DEGREE_D section 8 lever 2).  Push one
+ * degree-w (w = idx_bits) vector G = sum_k sum_i R_i * E_i^{(k)}, with the
+ * per-column weight R_i = sum_{j:M[j,i]=1} s^j (identity block s^l; non-identity
+ * block the cyclic sum of pow_s[u]=s^u; s = hasher->s), removing the per-column
+ * M-row scatter.  Value coeff w omitted; the public s_j folds into it as
+ * sum_j s^j s_j, so the assert-zero is sum_j s^j (synd_j ^ s_j) = 0 (sound to
+ * (p-1)/2^lambda, the same Schwartz-Zippel bound the reference zk_hash used).
+ * Returns 0 on success, -1 on OOM.
+ * ===================================================================== */
+static int
+gf16p_accumulate_syndrome(gf16p_zk_hash_3_ctx *hasher,
+                          const gf16_syndrome_entry_t *sy,
+                          const gf16_wire_id *sbits, const uint8_t *bit_tags,
+                          const voleith_gf16_t *wire_vals, unsigned int lambda,
+                          unsigned int nb, const uint8_t *beta, uint8_t *tmp1,
+                          uint8_t *tmp2)
+{
+    unsigned int w = sy->idx_bits;
+    uint32_t p = sy->p;
+    uint32_t n = sy->n0 * p;
+    size_t block_bytes = ((size_t)p + 7u) / 8u;
+    const gf16_wire_id *idx = sbits + sy->idx_off;
+
+    uint8_t one[32];
+    gf16p_embed(one, 1, lambda);
+
+    /* INFO-3 defense in depth: bound w before it sizes/indexes the fixed
+     * [VOLEITH_QS_COEFFS_MAX] scratch (G, demux node/child).  Unreachable on
+     * shipped circuits (w = idx_bits <= 17); real check, survives -DNDEBUG. */
+    if (w > VOLEITH_QS_D_MAX - 1u)
+        return -1;
+
+    uint8_t *pow_s = calloc((size_t)p, nb);
+    uint8_t *R = calloc((size_t)n, nb);
+    uint8_t *facbuf = calloc((size_t)w * 2u * 2u, 32); /* [b][line][coeff] */
+    if (!pow_s || !R || !facbuf) {
+        free(pow_s);
+        free(R);
+        free(facbuf);
+        return -1;
+    }
+
+    memcpy(pow_s, one, nb);
+    for (uint32_t u = 1; u < p; u++)
+        gf16p_gf_mul(pow_s + (size_t)u * nb, pow_s + (size_t)(u - 1) * nb,
+                     hasher->s, lambda);
+
+    {
+        uint8_t *Rid = R + (size_t)(sy->n0 - 1u) * p * nb;
+        for (uint32_t l = 0; l < p; l++)
+            memcpy(Rid + (size_t)l * nb, pow_s + (size_t)l * nb, nb);
+        for (uint32_t b = 0; b + 1u < sy->n0; b++) {
+            const uint8_t *mb = sy->M + (size_t)b * block_bytes;
+            uint8_t *Rb = R + (size_t)b * p * nb;
+            for (uint32_t a = 0; a < p; a++) {
+                if (!((mb[a >> 3] >> (a & 7u)) & 1u))
+                    continue;
+                for (uint32_t l = 0; l < p; l++) {
+                    uint32_t u = (l + a) % p;
+                    uint8_t *rl = Rb + (size_t)l * nb;
+                    const uint8_t *pu = pow_s + (size_t)u * nb;
+                    for (unsigned int m = 0; m < nb; m++)
+                        rl[m] ^= pu[m];
+                }
+            }
+        }
+    }
+
+    uint8_t G[VOLEITH_QS_COEFFS_MAX][32];
+    for (unsigned int c = 0; c <= w; c++)
+        memset(G[c], 0, nb);
+
+    uint8_t node0[VOLEITH_QS_COEFFS_MAX][32]; /* constant-1 poly (degree 0) */
+    memcpy(node0[0], one, nb);
+
+    for (uint32_t k = 0; k < sy->t; k++) {
+        for (unsigned int b = 0; b < w; b++) {
+            gf16_wire_id wid = idx[(size_t)k * w + b];
+            uint8_t tag[32], val[32];
+            gf16p_word_combine(tag,
+                               bit_tags + (size_t)wid * GF16_ELEM_BITS * nb, nb,
+                               lambda, beta);
+            gf16p_embed(val, wire_vals[wid], lambda);
+            uint8_t *l1 = facbuf + ((size_t)(b * 2u + 1u)) * 2u * 32u;
+            uint8_t *l0 = facbuf + ((size_t)(b * 2u + 0u)) * 2u * 32u;
+            memcpy(l1, tag, nb);
+            memcpy(l1 + 32, val, nb);
+            memcpy(l0, tag, nb);
+            for (unsigned int m = 0; m < nb; m++)
+                l0[32 + m] = (uint8_t)(one[m] ^ val[m]);
+        }
+        gf16p_demux_fold(0, w, 0, facbuf, node0, 0, R, n, lambda, nb, G, tmp1);
+    }
+
+    const uint8_t *vv[VOLEITH_QS_COEFFS_MAX];
+    for (unsigned int c = 0; c < w; c++)
+        vv[c] = G[c];
+    gf16p_zk_hash_3_update(hasher, vv, w, tmp1, tmp2);
+
+    voleith_secure_zero(G, sizeof(G));
+    voleith_secure_zero(facbuf, (size_t)w * 2u * 2u * 32u);
+    free(pow_s);
+    free(R);
+    free(facbuf);
+    return 0;
+}
+
+/* Test-only mode flag (declared in gf16_prover_internal.h): 0 = collapsed,
+ * nonzero = reference.  Never set outside tests. */
+int voleith_gf16_syndrome_ref_mode = 0;
+
+/*
+ * Reference syndrome accumulator (pre-collapse): one degree-w constraint per
+ * syndrome bit, pushed p times.  The collapsed prover is cross-checked against
+ * it (verdict-level).  Returns 0, -1 on OOM.
+ */
+static int
+gf16p_accumulate_syndrome_ref(gf16p_zk_hash_3_ctx *hasher,
+                              const gf16_syndrome_entry_t *sy,
+                              const gf16_wire_id *sbits,
+                              const uint8_t *bit_tags,
+                              const voleith_gf16_t *wire_vals,
+                              unsigned int lambda, unsigned int nb,
+                              const uint8_t *beta, uint8_t *tmp1, uint8_t *tmp2)
+{
+    unsigned int w = sy->idx_bits;
+    uint32_t p = sy->p;
+    uint32_t n = sy->n0 * p;
+    size_t block_bytes = ((size_t)p + 7u) / 8u;
+    const gf16_wire_id *idx = sbits + sy->idx_off;
+
+    uint8_t one[32];
+    gf16p_embed(one, 1, lambda);
+
+    /* INFO-3 defense in depth: bound w before it sizes the rho scratch
+     * (p*(w+1)) and indexes the fixed [VOLEITH_QS_COEFFS_MAX] push buffer.
+     * Unreachable on shipped circuits (w = idx_bits <= 17); survives -DNDEBUG. */
+    if (w > VOLEITH_QS_D_MAX - 1u)
+        return -1;
+
+    uint8_t *rho = calloc((size_t)p * (w + 1u), nb);
+    uint8_t *tags = calloc((size_t)w, 32);
+    uint8_t *vals = calloc((size_t)w, 32);
+    if (!rho || !tags || !vals) {
+        free(rho);
+        free(tags);
+        free(vals);
+        return -1;
+    }
+
+    uint8_t Ecur[VOLEITH_QS_COEFFS_MAX][32];
+    uint8_t Enext[VOLEITH_QS_COEFFS_MAX][32];
+    uint8_t fac[2][32];
+
+    for (uint32_t k = 0; k < sy->t; k++) {
+        for (unsigned int b = 0; b < w; b++) {
+            const uint8_t *bt =
+                bit_tags + (size_t)idx[(size_t)k * w + b] * GF16_ELEM_BITS * nb;
+            gf16p_word_combine(tags + (size_t)b * 32, bt, nb, lambda, beta);
+            gf16p_embed(vals + (size_t)b * 32,
+                        wire_vals[idx[(size_t)k * w + b]], lambda);
+        }
+
+        for (uint32_t i = 0; i < n; i++) {
+            unsigned int bit0 = (i >> (w - 1u)) & 1u;
+            memcpy(Ecur[0], tags + 0, nb);
+            for (unsigned int m = 0; m < nb; m++)
+                Ecur[1][m] = bit0 ? vals[m] : (uint8_t)(one[m] ^ vals[m]);
+            unsigned int Edeg = 1;
+            for (unsigned int b = 1; b < w; b++) {
+                unsigned int bitb = (i >> (w - 1u - b)) & 1u;
+                memcpy(fac[0], tags + (size_t)b * 32, nb);
+                const uint8_t *vb = vals + (size_t)b * 32;
+                for (unsigned int m = 0; m < nb; m++)
+                    fac[1][m] = bitb ? vb[m] : (uint8_t)(one[m] ^ vb[m]);
+                gf16p_poly_mul(Enext, Ecur, Edeg, fac, 1, lambda, nb, tmp1);
+                Edeg += 1;
+                for (unsigned int c = 0; c <= Edeg; c++)
+                    memcpy(Ecur[c], Enext[c], nb);
+            }
+            uint32_t b_col = i / p;
+            uint32_t l = i % p;
+            if (b_col == sy->n0 - 1u) {
+                uint8_t *rj = rho + (size_t)l * (w + 1u) * nb;
+                for (unsigned int c = 0; c <= w; c++)
+                    for (unsigned int m = 0; m < nb; m++)
+                        rj[(size_t)c * nb + m] ^= Ecur[c][m];
+            } else {
+                const uint8_t *mb = sy->M + (size_t)b_col * block_bytes;
+                for (uint32_t a = 0; a < p; a++) {
+                    if (!((mb[a >> 3] >> (a & 7u)) & 1u))
+                        continue;
+                    uint32_t j = (l + a) % p;
+                    uint8_t *rj = rho + (size_t)j * (w + 1u) * nb;
+                    for (unsigned int c = 0; c <= w; c++)
+                        for (unsigned int m = 0; m < nb; m++)
+                            rj[(size_t)c * nb + m] ^= Ecur[c][m];
+                }
+            }
+        }
+    }
+
+    const uint8_t *vv[VOLEITH_QS_COEFFS_MAX];
+    for (uint32_t j = 0; j < p; j++) {
+        const uint8_t *rj = rho + (size_t)j * (w + 1u) * nb;
+        for (unsigned int c = 0; c < w; c++)
+            vv[c] = rj + (size_t)c * nb;
+        gf16p_zk_hash_3_update(hasher, vv, w, tmp1, tmp2);
+    }
+
+    voleith_secure_zero(rho, (size_t)p * (w + 1u) * nb);
+    voleith_secure_zero(tags, (size_t)w * 32);
+    voleith_secure_zero(vals, (size_t)w * 32);
+    voleith_secure_zero(Ecur, sizeof(Ecur));
+    voleith_secure_zero(Enext, sizeof(Enext));
+    free(rho);
+    free(tags);
+    free(vals);
+    return 0;
 }
 
 /* =====================================================================
@@ -289,7 +657,8 @@ voleith_gf16_qs_ellhat(const voleith_gf16_circuit_t *circuit,
                        unsigned int lambda)
 {
     size_t ell = voleith_gf16_qs_ell(circuit);
-    return 2u * ell + (3u * lambda + UNIVERSAL_HASH_B_BITS + 7u) / 8u;
+    unsigned int d = voleith_gf16_circuit_qs_degree(circuit);
+    return 2u * ell + ((d + 1u) * lambda + UNIVERSAL_HASH_B_BITS + 7u) / 8u;
 }
 
 static int
@@ -297,16 +666,24 @@ gf16_qs_prove_impl(const voleith_gf16_circuit_t *circuit,
                    const voleith_gf16_t *witness,
                    const voleith_gf16_t *instance, unsigned int lambda,
                    const uint8_t *u, const uint8_t **V, const uint8_t *chall_2,
-                   uint8_t *d_out, uint8_t *a0_tilde, uint8_t *a1_tilde,
-                   uint8_t *a2_tilde, int reject_invalid)
+                   uint8_t *d_out, uint8_t *const *a_out, int reject_invalid)
 {
-    if (!circuit || !witness || !u || !V || !chall_2 || !d_out || !a0_tilde ||
-        !a1_tilde || !a2_tilde)
+    if (!circuit || !witness || !u || !V || !chall_2 || !d_out || !a_out)
         return -1;
     if (voleith_gf16_circuit_instance_count(circuit) > 0 && !instance)
         return -1;
     if (lambda != 128 && lambda != 192 && lambda != 256)
         return -1;
+
+    /* Opening count d = max constraint degree in force (2 today; the opener
+     * raises it).  a_out[0..d] receive coefficients a_0..a_d.  No allocations
+     * yet, so a bad degree / null buffer returns directly. */
+    unsigned int d = voleith_gf16_circuit_qs_degree(circuit);
+    if (d > VOLEITH_QS_D_MAX)
+        return -1;
+    for (unsigned int i = 0; i <= d; i++)
+        if (!a_out[i])
+            return -1;
 
     unsigned int nb = lambda / 8;
     size_t n_wires = voleith_gf16_circuit_wire_count(circuit);
@@ -322,7 +699,9 @@ gf16_qs_prove_impl(const voleith_gf16_circuit_t *circuit,
     voleith_gf16_t *wire_vals = NULL;
     uint8_t *bit_tags = NULL; /* n_wires * 16 * nb bytes */
     uint8_t *V_T = NULL;
-    size_t n_bit_cols = ell * GF16_ELEM_BITS + 2 * (size_t)lambda;
+    /* deg mask blocks of lambda columns (x1 staircase); scales with d (was
+     * 2*lambda, d=2 only). */
+    size_t n_bit_cols = ell * GF16_ELEM_BITS + (size_t)d * lambda;
 
     /* The squaring matrix used for SQUARE-gate tag propagation. */
     uint16_t sq_matrix[16];
@@ -431,14 +810,15 @@ gf16_qs_prove_impl(const voleith_gf16_circuit_t *circuit,
 
     /* Step 4 + 5: accumulate MUL gate checks and constraints. */
     gf16p_zk_hash_3_ctx hasher;
-    gf16p_zk_hash_3_init(&hasher, chall_2, lambda);
+    /* d (opening count) was derived from qs_degree at entry; zk_hash is
+     * degree-parameterized. */
+    gf16p_zk_hash_3_init(&hasher, chall_2, lambda, d);
 
     {
         uint8_t tag_a[32], tag_b[32], tag_c[32];
         uint8_t emb_a[32], emb_b[32], emb_c[32];
         uint8_t v0[32], v1[32], v2[32];
-        uint8_t prod[32], zero[32];
-        memset(zero, 0, nb);
+        uint8_t prod[32];
 
         for (size_t w = 0; w < n_wires; w++) {
             const gf16_wire_entry_t *e = &wires[w];
@@ -474,7 +854,8 @@ gf16_qs_prove_impl(const voleith_gf16_circuit_t *circuit,
             /* v2 = embed(gf16_mul(val_a, val_b)) */
             gf16p_embed(v2, voleith_gf16_mul(val_a, val_b), lambda);
 
-            gf16p_zk_hash_3_update(&hasher, v0, v1, v2, tmp1, tmp2);
+            const uint8_t *vv[3] = {v0, v1, v2};
+            gf16p_zk_hash_3_update(&hasher, vv, 3, tmp1, tmp2);
         }
 
         for (size_t ci = 0; ci < n_constraints; ci++) {
@@ -511,13 +892,15 @@ gf16_qs_prove_impl(const voleith_gf16_circuit_t *circuit,
                  * wrong one they differ and verification fails (soundness). */
                 gf16p_embed(v2, val_c, lambda);
 
-                gf16p_zk_hash_3_update(&hasher, v0, v1, v2, tmp1, tmp2);
+                const uint8_t *vv[3] = {v0, v1, v2};
+                gf16p_zk_hash_3_update(&hasher, vv, 3, tmp1, tmp2);
                 break;
             }
             case GF16_CONSTRAINT_ZERO: {
                 gf16p_word_combine(tag_a, bit_tags + c->a * GF16_ELEM_BITS * nb,
                                    nb, lambda, beta);
-                gf16p_zk_hash_3_update(&hasher, tag_a, zero, zero, tmp1, tmp2);
+                const uint8_t *vv[1] = {tag_a};
+                gf16p_zk_hash_3_update(&hasher, vv, 1, tmp1, tmp2);
                 break;
             }
             case GF16_CONSTRAINT_EQUAL: {
@@ -527,9 +910,45 @@ gf16_qs_prove_impl(const voleith_gf16_circuit_t *circuit,
                                    nb, lambda, beta);
                 for (unsigned int k = 0; k < nb; k++)
                     tag_a[k] ^= tag_b[k];
-                gf16p_zk_hash_3_update(&hasher, tag_a, zero, zero, tmp1, tmp2);
+                const uint8_t *vv[1] = {tag_a};
+                gf16p_zk_hash_3_update(&hasher, vv, 1, tmp1, tmp2);
                 break;
             }
+            }
+        }
+
+        /* Less-than (NLT) constraints: degree-(w+1) family batched into the
+         * same zk_hash at natural degree (§18.1). */
+        {
+            size_t n_lt = voleith_gf16_circuit_lt_count(circuit);
+            const gf16_lt_entry_t *lts =
+                voleith_gf16_circuit_lt_constraints(circuit);
+            const gf16_wire_id *lt_bits = voleith_gf16_circuit_lt_bits(circuit);
+            for (size_t li = 0; li < n_lt; li++)
+                if (gf16p_accumulate_lt(
+                        &hasher, &lts[li], lt_bits + lts[li].bits_off, bit_tags,
+                        wire_vals, lambda, nb, beta, tmp1, tmp2) != 0)
+                    goto err;
+        }
+
+        /* Syndrome constraints (s = M*e^T): degree-idx_bits family, batched
+         * into the same zk_hash at natural degree (sections 8-10). */
+        {
+            size_t n_syn = voleith_gf16_circuit_syndrome_count(circuit);
+            const gf16_syndrome_entry_t *syn =
+                voleith_gf16_circuit_syndrome_constraints(circuit);
+            const gf16_wire_id *syn_bits =
+                voleith_gf16_circuit_syndrome_bits(circuit);
+            for (size_t si = 0; si < n_syn; si++) {
+                int src = voleith_gf16_syndrome_ref_mode
+                              ? gf16p_accumulate_syndrome_ref(
+                                    &hasher, &syn[si], syn_bits, bit_tags,
+                                    wire_vals, lambda, nb, beta, tmp1, tmp2)
+                              : gf16p_accumulate_syndrome(
+                                    &hasher, &syn[si], syn_bits, bit_tags,
+                                    wire_vals, lambda, nb, beta, tmp1, tmp2);
+                if (src != 0)
+                    goto err;
             }
         }
 
@@ -544,25 +963,36 @@ gf16_qs_prove_impl(const voleith_gf16_circuit_t *circuit,
         voleith_secure_zero(v1, sizeof(v1));
         voleith_secure_zero(v2, sizeof(v2));
         voleith_secure_zero(prod, sizeof(prod));
-        voleith_secure_zero(zero, sizeof(zero));
     }
 
-    /* Step 6: x1 corrections from VOLE bits beyond ell*16. */
-    uint8_t x1_0[32], x1_1[32], x1_2[32], tmp3[32];
+    /* Step 6: d+1 x1 corrections from the VOLE mask blocks beyond ell*16.
+     * Staircase (QS_DEGREE_D_DESIGN section 11): x1_i = v*_i + u*_{i-1} over d
+     * blocks; at d=2 identical to x1_0=v*_0, x1_1=u*_0+v*_1, x1_2=u*_1. */
+    uint8_t x1[VOLEITH_QS_COEFFS_MAX][32], tmp3[32];
     {
         size_t corr_start = ell * GF16_ELEM_BITS;
-        gf16p_sum_poly_cols(x1_0, tmp1, V_T, lambda, nb, corr_start, lambda);
-        gf16p_sum_poly_bits_at(tmp3, tmp1, u, corr_start, lambda);
-        gf16p_sum_poly_cols(x1_1, tmp1, V_T, lambda, nb, corr_start + lambda,
-                            lambda);
-        for (unsigned int k = 0; k < nb; k++)
-            x1_1[k] ^= tmp3[k];
-        gf16p_sum_poly_bits_at(x1_2, tmp1, u, corr_start + lambda, lambda);
+        for (unsigned int i = 0; i <= d; i++)
+            memset(x1[i], 0, nb);
+        for (unsigned int j = 0; j < d; j++) {
+            size_t off = corr_start + (size_t)j * lambda;
+
+            gf16p_sum_poly_cols(tmp3, tmp1, V_T, lambda, nb, off, lambda);
+            for (unsigned int k = 0; k < nb; k++)
+                x1[j][k] ^= tmp3[k]; /* v*_j -> x1[j] */
+            gf16p_sum_poly_bits_at(tmp3, tmp1, u, off, lambda);
+            for (unsigned int k = 0; k < nb; k++)
+                x1[j + 1][k] ^= tmp3[k]; /* u*_j -> x1[j+1] */
+        }
     }
 
-    /* Step 7: finalize. */
-    gf16p_zk_hash_3_finalize(a0_tilde, a1_tilde, a2_tilde, &hasher, x1_0, x1_1,
-                             x1_2, chall_2, tmp1, tmp2);
+    /* Step 7: finalize (d+1 outputs a0_tilde..ad_tilde). */
+    {
+        const uint8_t *x1p[VOLEITH_QS_COEFFS_MAX];
+
+        for (unsigned int i = 0; i <= d; i++)
+            x1p[i] = x1[i];
+        gf16p_zk_hash_3_finalize(a_out, &hasher, x1p, chall_2, tmp1, tmp2);
+    }
 
     if (wire_vals)
         voleith_secure_zero(wire_vals, n_wires * sizeof(voleith_gf16_t));
@@ -573,9 +1003,7 @@ gf16_qs_prove_impl(const voleith_gf16_circuit_t *circuit,
     voleith_secure_zero(tmp1, sizeof(tmp1));
     voleith_secure_zero(tmp2, sizeof(tmp2));
     voleith_secure_zero(tmp3, sizeof(tmp3));
-    voleith_secure_zero(x1_0, sizeof(x1_0));
-    voleith_secure_zero(x1_1, sizeof(x1_1));
-    voleith_secure_zero(x1_2, sizeof(x1_2));
+    voleith_secure_zero(x1, sizeof(x1));
     voleith_secure_zero(beta, sizeof(beta));
     voleith_secure_zero(&hasher, sizeof(hasher));
     voleith_secure_zero(sq_matrix, sizeof(sq_matrix));
@@ -604,11 +1032,11 @@ voleith_gf16_qs_prove(const voleith_gf16_circuit_t *circuit,
                       const voleith_gf16_t *witness,
                       const voleith_gf16_t *instance, unsigned int lambda,
                       const uint8_t *u, const uint8_t **V,
-                      const uint8_t *chall_2, uint8_t *d_out, uint8_t *a0_tilde,
-                      uint8_t *a1_tilde, uint8_t *a2_tilde)
+                      const uint8_t *chall_2, uint8_t *d_out,
+                      uint8_t *const *a_out)
 {
     return gf16_qs_prove_impl(circuit, witness, instance, lambda, u, V, chall_2,
-                              d_out, a0_tilde, a1_tilde, a2_tilde, 1);
+                              d_out, a_out, 1);
 }
 
 int
@@ -617,11 +1045,10 @@ voleith_gf16_qs_prove_unchecked(const voleith_gf16_circuit_t *circuit,
                                 const voleith_gf16_t *instance,
                                 unsigned int lambda, const uint8_t *u,
                                 const uint8_t **V, const uint8_t *chall_2,
-                                uint8_t *d_out, uint8_t *a0_tilde,
-                                uint8_t *a1_tilde, uint8_t *a2_tilde)
+                                uint8_t *d_out, uint8_t *const *a_out)
 {
     return gf16_qs_prove_impl(circuit, witness, instance, lambda, u, V, chall_2,
-                              d_out, a0_tilde, a1_tilde, a2_tilde, 0);
+                              d_out, a_out, 0);
 }
 
 static int
