@@ -122,6 +122,28 @@ extern const voleith_params_t voleith_params_em_256s;
 extern const voleith_params_t voleith_params_em_256f;
 
 /*
+ * Threading options for the *_prove / *_prove_commit _ex entry points.
+ *
+ * nthreads: worker-thread count for the prover's internal pool.  0 means
+ *     the physical-core count (ichor_cpu_physical_cores()).  Ignored when
+ *     `pool` is non-NULL, and ignored entirely on a non-threaded ichor
+ *     build (every job runs inline).
+ * pool: a caller-owned ichor pool to borrow instead of creating one.  When
+ *     non-NULL the prover uses it and does NOT destroy it, so a host that
+ *     drives its own pool (e.g. shared-transcript composition) can avoid a
+ *     second set of worker threads.  NULL means the prover creates and owns
+ *     an internal pool sized by `nthreads`.
+ *
+ * The non-_ex entry points behave as if called with nthreads = 1 and
+ * pool = NULL, i.e. single-threaded, matching their historical behavior.
+ */
+struct ichor_pool;
+typedef struct {
+    unsigned int nthreads;
+    struct ichor_pool *pool;
+} voleith_threading_opts_t;
+
+/*
  * Construct a voleith_params_t from variant choices.
  *
  * set:  named parameter set (see voleith_param_set_id_t).
@@ -237,6 +259,16 @@ int voleith_prove(voleith_proof_t *proof, const voleith_params_t *params,
                   size_t fs_seed_len);
 
 /*
+ * As voleith_prove, with threading options.  opts == NULL defaults to the
+ * physical-core count; see voleith_threading_opts_t.  voleith_prove is the
+ * special case opts = { .nthreads = 1 } (single-threaded).
+ */
+int voleith_prove_ex(voleith_proof_t *proof, const voleith_params_t *params,
+                     const voleith_circuit_t *circuit, const uint8_t *witness,
+                     const uint8_t *instance, const uint8_t *fs_seed,
+                     size_t fs_seed_len, const voleith_threading_opts_t *opts);
+
+/*
  * Expected byte length of the witness / instance buffer for the
  * bit-level prove/verify API.  Witness and instance bits are
  * bit-packed LSB-first per byte, so the buffer size is
@@ -281,6 +313,17 @@ int voleith_prove_v2(voleith_proof_t *proof, const voleith_params_t *params,
                      size_t witness_len, const uint8_t *instance,
                      size_t instance_len, const uint8_t *fs_seed,
                      size_t fs_seed_len);
+
+/*
+ * As voleith_prove_v2, with threading options.  See voleith_threading_opts_t.
+ * voleith_prove_v2 is the special case opts = { .nthreads = 1 }.
+ */
+int voleith_prove_v2_ex(voleith_proof_t *proof, const voleith_params_t *params,
+                        const voleith_circuit_t *circuit,
+                        const uint8_t *witness, size_t witness_len,
+                        const uint8_t *instance, size_t instance_len,
+                        const uint8_t *fs_seed, size_t fs_seed_len,
+                        const voleith_threading_opts_t *opts);
 
 /*
  * Verify a non-interactive proof.
@@ -425,6 +468,19 @@ int voleith_prove_commit(voleith_prover_commit_t **ctx_out,
                          const uint8_t *witness, const uint8_t *instance,
                          const uint8_t *fs_seed, size_t fs_seed_len,
                          uint8_t *commitment_out);
+
+/*
+ * As voleith_prove_commit, with threading options for the commit context's
+ * worker pool.  See voleith_threading_opts_t.  voleith_prove_commit is the
+ * special case opts = { .nthreads = 1 } (single-threaded).
+ */
+int voleith_prove_commit_ex(voleith_prover_commit_t **ctx_out,
+                            const voleith_params_t *params,
+                            const voleith_circuit_t *circuit,
+                            const uint8_t *witness, const uint8_t *instance,
+                            const uint8_t *fs_seed, size_t fs_seed_len,
+                            uint8_t *commitment_out,
+                            const voleith_threading_opts_t *opts);
 
 /*
  * Phase 2 (Prove): Complete the proof given the external Fiat-Shamir challenge.

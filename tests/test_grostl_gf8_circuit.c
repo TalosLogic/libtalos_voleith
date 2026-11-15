@@ -19,11 +19,31 @@
  */
 
 #include "../circuits/grostl_gf8_circuit.h"
+#include "../circuits/grostl_norm_gf8_circuit.h"
 #include "../core/grostl.h"
 #include "../proof/gf8_circuit.h"
+#include "../proof/gf8_circuit_fingerprint.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/*
+ * Golden fingerprints of the norm S-box Grostl circuits (new twins).  Capture
+ * once from a build of this commit: run the test, copy the bytes printed under
+ * the matching "... norm circuit fingerprint:" line, and replace the
+ * placeholder.  Until pinned, the all-zero placeholder prints a NOTE and the
+ * golden assert is skipped.
+ */
+#ifndef GROSTL256_NORM_GF8_FP_GOLDEN_BYTES
+#define GROSTL256_NORM_GF8_FP_GOLDEN_BYTES                                     \
+    0x4c, 0x32, 0x77, 0x81, 0xd8, 0xa1, 0xe9, 0x63, 0x68, 0xf5, 0xc0, 0x25,    \
+        0x33, 0x4c, 0x06, 0xd8
+#endif
+#ifndef GROSTL512_NORM_GF8_FP_GOLDEN_BYTES
+#define GROSTL512_NORM_GF8_FP_GOLDEN_BYTES                                     \
+    0x18, 0x61, 0x14, 0xe2, 0x11, 0xe2, 0xfe, 0x76, 0x3f, 0x17, 0x3d, 0xbd,    \
+        0x93, 0xd0, 0x71, 0xf7
+#endif
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -643,6 +663,407 @@ test_differential_random(void)
         PASS();
 }
 
+/* ================================================================
+ * Norm S-box Grostl: same hash, 75% witness.  Output parity (vs software and
+ * the NIST KATs), VOLE-slot counts, witness/invin sizes, node-circuit parity
+ * against the frozen node circuits, and fingerprint pins.
+ * ================================================================ */
+
+static voleith_gf8_circuit_t *
+build_grostl256_norm_circuit(size_t msg_bytes, gf8_wire_id out[32])
+{
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    gf8_wire_id *msg_wires =
+        (msg_bytes > 0) ? malloc(msg_bytes * sizeof(*msg_wires)) : NULL;
+    for (size_t i = 0; i < msg_bytes; i++)
+        msg_wires[i] = voleith_gf8_add_witness(c);
+    grostl256_norm_gf8_circuit(c, msg_wires, msg_bytes, out);
+    free(msg_wires);
+    return c;
+}
+
+static voleith_gf8_circuit_t *
+build_grostl512_norm_circuit(size_t msg_bytes, gf8_wire_id out[64])
+{
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    gf8_wire_id *msg_wires =
+        (msg_bytes > 0) ? malloc(msg_bytes * sizeof(*msg_wires)) : NULL;
+    for (size_t i = 0; i < msg_bytes; i++)
+        msg_wires[i] = voleith_gf8_add_witness(c);
+    grostl512_norm_gf8_circuit(c, msg_wires, msg_bytes, out);
+    free(msg_wires);
+    return c;
+}
+
+static int
+eval_grostl256_norm(const uint8_t *msg, size_t msg_bytes, uint8_t md[32])
+{
+    gf8_wire_id out[32];
+    voleith_gf8_circuit_t *c = build_grostl256_norm_circuit(msg_bytes, out);
+    size_t wbytes = grostl256_norm_gf8_witness_bytes(msg_bytes);
+    uint8_t *witness = malloc(wbytes);
+    grostl256_norm_gf8_build_witness(msg, msg_bytes, witness);
+
+    size_t n_wires = voleith_gf8_circuit_wire_count(c);
+    uint8_t *vals = calloc(n_wires, 1);
+    int ok = vals && voleith_gf8_circuit_eval(c, witness, NULL, vals) == 1;
+    if (ok)
+        for (int i = 0; i < 32; i++)
+            md[i] = vals[out[i]];
+
+    free(vals);
+    free(witness);
+    voleith_gf8_circuit_free(c);
+    return ok;
+}
+
+static int
+eval_grostl512_norm(const uint8_t *msg, size_t msg_bytes, uint8_t md[64])
+{
+    gf8_wire_id out[64];
+    voleith_gf8_circuit_t *c = build_grostl512_norm_circuit(msg_bytes, out);
+    size_t wbytes = grostl512_norm_gf8_witness_bytes(msg_bytes);
+    uint8_t *witness = malloc(wbytes);
+    grostl512_norm_gf8_build_witness(msg, msg_bytes, witness);
+
+    size_t n_wires = voleith_gf8_circuit_wire_count(c);
+    uint8_t *vals = calloc(n_wires, 1);
+    int ok = vals && voleith_gf8_circuit_eval(c, witness, NULL, vals) == 1;
+    if (ok)
+        for (int i = 0; i < 64; i++)
+            md[i] = vals[out[i]];
+
+    free(vals);
+    free(witness);
+    voleith_gf8_circuit_free(c);
+    return ok;
+}
+
+static void
+check_norm_fp(const char *name, voleith_gf8_circuit_t *c,
+              const uint8_t golden[16])
+{
+    uint8_t fp[VOLEITH_GF8_CIRCUIT_FINGERPRINT_BYTES];
+    uint8_t zero[16] = {0};
+    TEST(name);
+    if (voleith_gf8_circuit_fingerprint(c, fp) != 0) {
+        FAIL("fingerprint error");
+        return;
+    }
+    if (memcmp(golden, zero, 16) == 0) {
+        printf("UNPINNED:");
+        for (int i = 0; i < 16; i++)
+            printf(" %02x", fp[i]);
+        printf("  (pin the bytes above)\n");
+        tests_passed++; /* NOTE, not a failure */
+        return;
+    }
+    if (memcmp(fp, golden, 16) == 0) {
+        PASS();
+    } else {
+        printf("FAIL\n        got:   ");
+        hex_print(fp, 16);
+        printf("\n        golden:");
+        hex_print(golden, 16);
+        printf("\n");
+    }
+}
+
+static void
+test_grostl256_norm(void)
+{
+    /* Output parity vs software, same shapes as the frozen circuit. */
+    struct {
+        size_t n;
+        const char *label;
+    } shapes[] = {
+        {0, "empty"},    {3, "3-byte"},   {55, "55-byte (1 block)"},
+        {56, "56-byte"}, {64, "64-byte"}, {200, "200-byte random"},
+    };
+    for (size_t s = 0; s < sizeof(shapes) / sizeof(shapes[0]); s++) {
+        char name[80];
+        snprintf(name, sizeof(name), "Grostl-256 norm vs software: %s",
+                 shapes[s].label);
+        TEST(name);
+
+        uint8_t msg[200];
+        fill_random(msg, shapes[s].n);
+        uint8_t md_c[32], md_s[32];
+        int ok = eval_grostl256_norm(msg, shapes[s].n, md_c);
+        voleith_grostl256(md_s, msg, shapes[s].n);
+        if (ok && memcmp(md_c, md_s, 32) == 0)
+            PASS();
+        else
+            printf("FAIL: eval ok=%d match=%d\n", ok,
+                   memcmp(md_c, md_s, 32) == 0);
+    }
+
+    /* Witness count is 75% of the frozen circuit's S-box witness. */
+    TEST("Grostl-256 norm: witness size 75% of frozen, matches qs_ell");
+    {
+        int fail = 0;
+        size_t cases[] = {0, 3, 64, 128, 200};
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            size_t mb = cases[i];
+            size_t wn = grostl256_norm_gf8_witness_bytes(mb);
+            size_t wf = grostl256_gf8_witness_bytes(mb);
+            gf8_wire_id out[32];
+            voleith_gf8_circuit_t *c = build_grostl256_norm_circuit(mb, out);
+            if (wn != voleith_gf8_qs_ell(c) ||
+                voleith_gf8_circuit_mul_count(c) != 0 ||
+                voleith_gf8_circuit_qs_degree(c) != 2 ||
+                (wn - mb) * 4u != (wf - mb) * 3u)
+                fail = 1;
+            voleith_gf8_circuit_free(c);
+        }
+        if (fail)
+            FAIL("size / degree / mul mismatch");
+        else
+            PASS();
+    }
+
+    gf8_wire_id out[32];
+    voleith_gf8_circuit_t *c = build_grostl256_norm_circuit(64, out);
+    static const uint8_t GOLDEN[16] = {GROSTL256_NORM_GF8_FP_GOLDEN_BYTES};
+    check_norm_fp("Grostl-256 norm circuit fingerprint", c, GOLDEN);
+    voleith_gf8_circuit_free(c);
+}
+
+static void
+test_grostl512_norm(void)
+{
+    struct {
+        size_t n;
+        const char *label;
+    } shapes[] = {
+        {0, "empty"},
+        {3, "3-byte"},
+        {119, "119-byte (1 block)"},
+        {120, "120-byte"},
+        {256, "256-byte random"},
+    };
+    for (size_t s = 0; s < sizeof(shapes) / sizeof(shapes[0]); s++) {
+        char name[80];
+        snprintf(name, sizeof(name), "Grostl-512 norm vs software: %s",
+                 shapes[s].label);
+        TEST(name);
+
+        uint8_t msg[256];
+        fill_random(msg, shapes[s].n);
+        uint8_t md_c[64], md_s[64];
+        int ok = eval_grostl512_norm(msg, shapes[s].n, md_c);
+        voleith_grostl512(md_s, msg, shapes[s].n);
+        if (ok && memcmp(md_c, md_s, 64) == 0)
+            PASS();
+        else
+            printf("FAIL: eval ok=%d match=%d\n", ok,
+                   memcmp(md_c, md_s, 64) == 0);
+    }
+
+    TEST("Grostl-512 norm: witness size 75% of frozen, matches qs_ell");
+    {
+        int fail = 0;
+        size_t cases[] = {0, 3, 128, 256};
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            size_t mb = cases[i];
+            size_t wn = grostl512_norm_gf8_witness_bytes(mb);
+            size_t wf = grostl512_gf8_witness_bytes(mb);
+            gf8_wire_id out[64];
+            voleith_gf8_circuit_t *c = build_grostl512_norm_circuit(mb, out);
+            if (wn != voleith_gf8_qs_ell(c) ||
+                voleith_gf8_circuit_mul_count(c) != 0 ||
+                (wn - mb) * 4u != (wf - mb) * 3u)
+                fail = 1;
+            voleith_gf8_circuit_free(c);
+        }
+        if (fail)
+            FAIL("size / degree / mul mismatch");
+        else
+            PASS();
+    }
+
+    gf8_wire_id out[64];
+    voleith_gf8_circuit_t *c = build_grostl512_norm_circuit(128, out);
+    static const uint8_t GOLDEN[16] = {GROSTL512_NORM_GF8_FP_GOLDEN_BYTES};
+    check_norm_fp("Grostl-512 norm circuit fingerprint", c, GOLDEN);
+    voleith_gf8_circuit_free(c);
+}
+
+/* Node-circuit output parity: the norm node circuit must produce the same
+ * digest as the frozen node circuit (both via circuit-eval), and its inv_in
+ * witness must be 75% of the frozen node's. */
+static int
+eval_node256(int norm, const uint8_t iv[64], const uint8_t *blocks,
+             size_t n_blocks, uint8_t md[32])
+{
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    size_t blk_bytes = n_blocks * 64;
+    gf8_wire_id *bw = malloc(blk_bytes * sizeof(*bw));
+    gf8_wire_id out[32];
+    for (size_t i = 0; i < blk_bytes; i++)
+        bw[i] = voleith_gf8_add_witness(c);
+
+    size_t invin;
+    if (norm) {
+        if (n_blocks == 1)
+            grostl256_norm_gf8_node_circuit(c, iv, bw, out);
+        else
+            grostl256_norm_gf8_node2_circuit(c, iv, bw, out);
+        invin = (n_blocks == 1) ? grostl256_norm_gf8_node_invin_bytes()
+                                : grostl256_norm_gf8_node2_invin_bytes();
+    } else {
+        if (n_blocks == 1)
+            grostl256_gf8_node_circuit(c, iv, bw, out);
+        else
+            grostl256_gf8_node2_circuit(c, iv, bw, out);
+        invin = (n_blocks == 1) ? grostl256_gf8_node_invin_bytes()
+                                : grostl256_gf8_node2_invin_bytes();
+    }
+
+    uint8_t *witness = malloc(blk_bytes + invin);
+    memcpy(witness, blocks, blk_bytes);
+    if (norm) {
+        if (n_blocks == 1)
+            grostl256_norm_gf8_node_build_witness(iv, blocks,
+                                                  witness + blk_bytes);
+        else
+            grostl256_norm_gf8_node2_build_witness(iv, blocks,
+                                                   witness + blk_bytes);
+    } else {
+        if (n_blocks == 1)
+            grostl256_gf8_node_build_witness(iv, blocks, witness + blk_bytes);
+        else
+            grostl256_gf8_node2_build_witness(iv, blocks, witness + blk_bytes);
+    }
+
+    size_t nw = voleith_gf8_circuit_wire_count(c);
+    uint8_t *vals = calloc(nw, 1);
+    int ok = vals && voleith_gf8_circuit_eval(c, witness, NULL, vals) == 1;
+    if (ok)
+        for (int i = 0; i < 32; i++)
+            md[i] = vals[out[i]];
+
+    free(vals);
+    free(witness);
+    free(bw);
+    voleith_gf8_circuit_free(c);
+    return ok;
+}
+
+static int
+eval_node512(int norm, const uint8_t iv[128], const uint8_t *blocks,
+             size_t n_blocks, uint8_t md[64])
+{
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    size_t blk_bytes = n_blocks * 128;
+    gf8_wire_id *bw = malloc(blk_bytes * sizeof(*bw));
+    gf8_wire_id out[64];
+    for (size_t i = 0; i < blk_bytes; i++)
+        bw[i] = voleith_gf8_add_witness(c);
+
+    size_t invin;
+    if (norm) {
+        if (n_blocks == 1)
+            grostl512_norm_gf8_node_circuit(c, iv, bw, out);
+        else
+            grostl512_norm_gf8_node2_circuit(c, iv, bw, out);
+        invin = (n_blocks == 1) ? grostl512_norm_gf8_node_invin_bytes()
+                                : grostl512_norm_gf8_node2_invin_bytes();
+    } else {
+        if (n_blocks == 1)
+            grostl512_gf8_node_circuit(c, iv, bw, out);
+        else
+            grostl512_gf8_node2_circuit(c, iv, bw, out);
+        invin = (n_blocks == 1) ? grostl512_gf8_node_invin_bytes()
+                                : grostl512_gf8_node2_invin_bytes();
+    }
+
+    uint8_t *witness = malloc(blk_bytes + invin);
+    memcpy(witness, blocks, blk_bytes);
+    if (norm) {
+        if (n_blocks == 1)
+            grostl512_norm_gf8_node_build_witness(iv, blocks,
+                                                  witness + blk_bytes);
+        else
+            grostl512_norm_gf8_node2_build_witness(iv, blocks,
+                                                   witness + blk_bytes);
+    } else {
+        if (n_blocks == 1)
+            grostl512_gf8_node_build_witness(iv, blocks, witness + blk_bytes);
+        else
+            grostl512_gf8_node2_build_witness(iv, blocks, witness + blk_bytes);
+    }
+
+    size_t nw = voleith_gf8_circuit_wire_count(c);
+    uint8_t *vals = calloc(nw, 1);
+    int ok = vals && voleith_gf8_circuit_eval(c, witness, NULL, vals) == 1;
+    if (ok)
+        for (int i = 0; i < 64; i++)
+            md[i] = vals[out[i]];
+
+    free(vals);
+    free(witness);
+    free(bw);
+    voleith_gf8_circuit_free(c);
+    return ok;
+}
+
+static void
+test_node_parity(void)
+{
+    uint8_t iv256[64], iv512[128], blk256[128], blk512[256];
+    fill_random(iv256, 64);
+    fill_random(iv512, 128);
+    fill_random(blk256, 128);
+    fill_random(blk512, 256);
+
+    struct {
+        int is512;
+        size_t nb;
+        const char *label;
+    } cases[] = {
+        {0, 1, "Grostl-256 norm node vs frozen"},
+        {0, 2, "Grostl-256 norm node2 vs frozen"},
+        {1, 1, "Grostl-512 norm node vs frozen"},
+        {1, 2, "Grostl-512 norm node2 vs frozen"},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        TEST(cases[i].label);
+        int ok;
+        if (!cases[i].is512) {
+            uint8_t a[32], b[32];
+            ok = eval_node256(1, iv256, blk256, cases[i].nb, a) &&
+                 eval_node256(0, iv256, blk256, cases[i].nb, b) &&
+                 memcmp(a, b, 32) == 0;
+        } else {
+            uint8_t a[64], b[64];
+            ok = eval_node512(1, iv512, blk512, cases[i].nb, a) &&
+                 eval_node512(0, iv512, blk512, cases[i].nb, b) &&
+                 memcmp(a, b, 64) == 0;
+        }
+        if (ok)
+            PASS();
+        else
+            FAIL("node digest mismatch");
+    }
+
+    /* inv_in sizes are 75% of the frozen node witnesses. */
+    TEST("node inv_in sizes are 75% of frozen");
+    if (grostl256_norm_gf8_node_invin_bytes() * 4u ==
+            grostl256_gf8_node_invin_bytes() * 3u &&
+        grostl256_norm_gf8_node2_invin_bytes() * 4u ==
+            grostl256_gf8_node2_invin_bytes() * 3u &&
+        grostl512_norm_gf8_node_invin_bytes() * 4u ==
+            grostl512_gf8_node_invin_bytes() * 3u &&
+        grostl512_norm_gf8_node2_invin_bytes() * 4u ==
+            grostl512_gf8_node2_invin_bytes() * 3u &&
+        grostl256_norm_gf8_nodeN_invin_bytes(3) * 4u ==
+            grostl256_gf8_nodeN_invin_bytes(3) * 3u)
+        PASS();
+    else
+        FAIL("node inv_in size mismatch");
+}
+
 int
 main(void)
 {
@@ -665,6 +1086,11 @@ main(void)
 
     printf("\n  Random differential\n");
     test_differential_random();
+
+    printf("\n  Norm S-box twins\n");
+    test_grostl256_norm();
+    test_grostl512_norm();
+    test_node_parity();
 
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

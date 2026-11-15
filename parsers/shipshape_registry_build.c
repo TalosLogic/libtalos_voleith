@@ -27,8 +27,11 @@
 #include "shipshape_registry.h"
 
 #include "aes_cmac_gf8_circuit.h"
+#include "aes_cmac_norm_gf8_circuit.h"
 #include "aes_gf8_circuit.h"
+#include "aes_norm_gf8_circuit.h"
 #include "grostl_gf8_circuit.h"
+#include "grostl_norm_gf8_circuit.h"
 #include "indexed_merkle_vt_gf8_circuit.h"
 #include "merkle_vt_gf8_circuit.h"
 #include "node_hash_vt.h"
@@ -195,6 +198,116 @@ inl_grostl_512_t59(voleith_gf8_circuit_t *c, const gf8_wire_id *in,
 }
 
 /* ================================================================
+ * crypto-v3 norm S-box body inliners.  Same gate structure as the frozen
+ * twins above, with the FAEST paired-round norm data path; the key
+ * schedule stays the frozen 8-bit expansion, so the signatures (and thus
+ * the input-wire layout `in`) are identical to the frozen entries.
+ * ================================================================ */
+
+static int
+inl_aes_encrypt_rounds_128_norm(voleith_gf8_circuit_t *c, const gf8_wire_id *in,
+                                uint32_t param, gf8_wire_id *out)
+{
+    gf8_wire_id rk[11][16];
+
+    (void)param;
+    memcpy(rk, in, sizeof(rk)); /* flat round-major -> rk[round][byte] */
+    aes128_norm_gf8_encrypt_rk(c, rk, in + 176, out);
+    return 0;
+}
+
+static int
+inl_aes_encrypt_128_norm(voleith_gf8_circuit_t *c, const gf8_wire_id *in,
+                         uint32_t param, gf8_wire_id *out)
+{
+    (void)param;
+    aes128_norm_gf8_circuit(c, in, in + 16, out);
+    return 0;
+}
+
+static int
+inl_aes_encrypt_rounds_256_norm(voleith_gf8_circuit_t *c, const gf8_wire_id *in,
+                                uint32_t param, gf8_wire_id *out)
+{
+    gf8_wire_id rk[15][16];
+
+    (void)param;
+    memcpy(rk, in, sizeof(rk)); /* flat round-major -> rk[round][byte] */
+    aes256_norm_gf8_encrypt_rk(c, rk, in + 240, out);
+    return 0;
+}
+
+static int
+inl_aes_encrypt_256_norm(voleith_gf8_circuit_t *c, const gf8_wire_id *in,
+                         uint32_t param, gf8_wire_id *out)
+{
+    (void)param;
+    aes256_norm_gf8_circuit(c, in, in + 32, out);
+    return 0;
+}
+
+static int
+inl_cmac_norm(voleith_gf8_circuit_t *c, const gf8_wire_id *in, size_t key_bytes,
+              uint32_t param, gf8_wire_id *out)
+{
+    aes_cmac_norm_gf8_circuit(c, in, key_bytes,
+                              param > 0 ? in + key_bytes : NULL, param, out);
+    return 0;
+}
+
+static int
+inl_cmac_aes_128_norm(voleith_gf8_circuit_t *c, const gf8_wire_id *in,
+                      uint32_t param, gf8_wire_id *out)
+{
+    return inl_cmac_norm(c, in, 16, param, out);
+}
+
+static int
+inl_cmac_aes_256_norm(voleith_gf8_circuit_t *c, const gf8_wire_id *in,
+                      uint32_t param, gf8_wire_id *out)
+{
+    return inl_cmac_norm(c, in, 32, param, out);
+}
+
+static int
+inl_grostl_256_norm(voleith_gf8_circuit_t *c, const gf8_wire_id *in,
+                    uint32_t param, gf8_wire_id *out)
+{
+    grostl256_norm_gf8_circuit(c, param > 0 ? in : NULL, param, out);
+    return 0;
+}
+
+static int
+inl_grostl_256_t27_norm(voleith_gf8_circuit_t *c, const gf8_wire_id *in,
+                        uint32_t param, gf8_wire_id *out)
+{
+    gf8_wire_id full[32];
+
+    grostl256_norm_gf8_circuit(c, param > 0 ? in : NULL, param, full);
+    memcpy(out, full, 27 * sizeof(full[0]));
+    return 0;
+}
+
+static int
+inl_grostl_512_norm(voleith_gf8_circuit_t *c, const gf8_wire_id *in,
+                    uint32_t param, gf8_wire_id *out)
+{
+    grostl512_norm_gf8_circuit(c, param > 0 ? in : NULL, param, out);
+    return 0;
+}
+
+static int
+inl_grostl_512_t59_norm(voleith_gf8_circuit_t *c, const gf8_wire_id *in,
+                        uint32_t param, gf8_wire_id *out)
+{
+    gf8_wire_id full[64];
+
+    grostl512_norm_gf8_circuit(c, param > 0 ? in : NULL, param, full);
+    memcpy(out, full, 59 * sizeof(full[0]));
+    return 0;
+}
+
+/* ================================================================
  * Cost formulas (the Shipshape spec §7.2): blocks is the derived block
  * count, invs the INV count == witness slots the body adds.  FIXED
  * entries carry their constant invs in the descriptor instead.
@@ -236,6 +349,46 @@ cost_grostl_512(uint32_t param, size_t *blocks, size_t *invs)
 
     *blocks = b;
     *invs = 3584 * b + 1792;
+}
+
+/* crypto-v3 norm cost formulas.  Same block count as the frozen twin; the
+ * per-block/per-call INV count shrinks with the norm S-box (CMAC keeps the
+ * frozen 8-bit key schedule, so 0.8 overall; Grostl has no key schedule,
+ * clean 0.75). */
+static void
+cost_cmac_aes_128_norm(uint32_t param, size_t *blocks, size_t *invs)
+{
+    size_t n_aes = aes_cmac_norm_gf8_n_aes_calls(param);
+
+    *blocks = n_aes;
+    *invs = 160 * n_aes;
+}
+
+static void
+cost_cmac_aes_256_norm(uint32_t param, size_t *blocks, size_t *invs)
+{
+    size_t n_aes = aes_cmac_norm_gf8_n_aes_calls(param);
+
+    *blocks = n_aes;
+    *invs = 220 * n_aes;
+}
+
+static void
+cost_grostl_256_norm(uint32_t param, size_t *blocks, size_t *invs)
+{
+    size_t b = ((size_t)param + 9 + 63) / 64; /* ceil((n + 9) / 64) */
+
+    *blocks = b;
+    *invs = 960 * b + 480;
+}
+
+static void
+cost_grostl_512_norm(uint32_t param, size_t *blocks, size_t *invs)
+{
+    size_t b = ((size_t)param + 9 + 127) / 128; /* ceil((n + 9) / 128) */
+
+    *blocks = b;
+    *invs = 2688 * b + 1344;
 }
 
 /* ================================================================
@@ -285,6 +438,7 @@ typedef struct {
     uint32_t fixed_invs;        /* FIXED: invs; PARAMETRIC: 0 (cost fn) */
     shipshape_reg_cost_fn cost; /* PARAMETRIC only; NULL for FIXED */
     shipshape_reg_inline_fn inl;
+    uint8_t introduced_version; /* min stdlib version (crypto-vN) */
 } shipshape_reg_descriptor_t;
 
 #define GRID(arr) (arr), (sizeof(arr) / sizeof((arr)[0]))
@@ -302,7 +456,8 @@ static const shipshape_reg_descriptor_t DESCRIPTORS[] = {
      0,
      1,
      NULL,
-     inl_aes_sbox},
+     inl_aes_sbox,
+     1},
     {"stdlib/crypto/aes/keyschedule_128",
      VOLEITH_SHIPSHAPE_REG_FIXED,
      "(key : byte[16]) -> (rk : byte[176])",
@@ -315,7 +470,8 @@ static const shipshape_reg_descriptor_t DESCRIPTORS[] = {
      1,
      40,
      NULL,
-     inl_aes_keyschedule_128},
+     inl_aes_keyschedule_128,
+     1},
     {"stdlib/crypto/aes/encrypt_rounds_128",
      VOLEITH_SHIPSHAPE_REG_FIXED,
      "(rk : byte[176], pt : byte[16]) -> (ct : byte[16])",
@@ -328,7 +484,8 @@ static const shipshape_reg_descriptor_t DESCRIPTORS[] = {
      1,
      160,
      NULL,
-     inl_aes_encrypt_rounds_128},
+     inl_aes_encrypt_rounds_128,
+     1},
     {"stdlib/crypto/aes/encrypt_128",
      VOLEITH_SHIPSHAPE_REG_FIXED,
      "(key : byte[16], pt : byte[16]) -> (ct : byte[16])",
@@ -341,7 +498,8 @@ static const shipshape_reg_descriptor_t DESCRIPTORS[] = {
      1,
      200,
      NULL,
-     inl_aes_encrypt_128},
+     inl_aes_encrypt_128,
+     1},
     {"stdlib/crypto/aes/keyschedule_256",
      VOLEITH_SHIPSHAPE_REG_FIXED,
      "(key : byte[32]) -> (rk : byte[240])",
@@ -354,7 +512,8 @@ static const shipshape_reg_descriptor_t DESCRIPTORS[] = {
      1,
      52,
      NULL,
-     inl_aes_keyschedule_256},
+     inl_aes_keyschedule_256,
+     1},
     {"stdlib/crypto/aes/encrypt_rounds_256",
      VOLEITH_SHIPSHAPE_REG_FIXED,
      "(rk : byte[240], pt : byte[16]) -> (ct : byte[16])",
@@ -367,7 +526,8 @@ static const shipshape_reg_descriptor_t DESCRIPTORS[] = {
      1,
      224,
      NULL,
-     inl_aes_encrypt_rounds_256},
+     inl_aes_encrypt_rounds_256,
+     1},
     {"stdlib/crypto/aes/encrypt_256",
      VOLEITH_SHIPSHAPE_REG_FIXED,
      "(key : byte[32], pt : byte[16]) -> (ct : byte[16])",
@@ -380,7 +540,8 @@ static const shipshape_reg_descriptor_t DESCRIPTORS[] = {
      1,
      276,
      NULL,
-     inl_aes_encrypt_256},
+     inl_aes_encrypt_256,
+     1},
     {"stdlib/crypto/cmac/aes_128",
      VOLEITH_SHIPSHAPE_REG_PARAMETRIC,
      "(key : byte[16], msg : byte[n]) -> (tag : byte[16])",
@@ -393,7 +554,8 @@ static const shipshape_reg_descriptor_t DESCRIPTORS[] = {
      1,
      0,
      cost_cmac_aes_128,
-     inl_cmac_aes_128},
+     inl_cmac_aes_128,
+     1},
     {"stdlib/crypto/cmac/aes_256",
      VOLEITH_SHIPSHAPE_REG_PARAMETRIC,
      "(key : byte[32], msg : byte[n]) -> (tag : byte[16])",
@@ -406,7 +568,8 @@ static const shipshape_reg_descriptor_t DESCRIPTORS[] = {
      1,
      0,
      cost_cmac_aes_256,
-     inl_cmac_aes_256},
+     inl_cmac_aes_256,
+     1},
     {"stdlib/crypto/grostl/hash_256",
      VOLEITH_SHIPSHAPE_REG_PARAMETRIC,
      "(msg : byte[n]) -> (out : byte[32])",
@@ -419,7 +582,8 @@ static const shipshape_reg_descriptor_t DESCRIPTORS[] = {
      1,
      0,
      cost_grostl_256,
-     inl_grostl_256},
+     inl_grostl_256,
+     1},
     {"stdlib/crypto/grostl/hash_256_t27",
      VOLEITH_SHIPSHAPE_REG_PARAMETRIC,
      "(msg : byte[n]) -> (out : byte[27])",
@@ -432,7 +596,8 @@ static const shipshape_reg_descriptor_t DESCRIPTORS[] = {
      1,
      0,
      cost_grostl_256,
-     inl_grostl_256_t27},
+     inl_grostl_256_t27,
+     1},
     {"stdlib/crypto/grostl/hash_512",
      VOLEITH_SHIPSHAPE_REG_PARAMETRIC,
      "(msg : byte[n]) -> (out : byte[64])",
@@ -445,7 +610,8 @@ static const shipshape_reg_descriptor_t DESCRIPTORS[] = {
      1,
      0,
      cost_grostl_512,
-     inl_grostl_512},
+     inl_grostl_512,
+     1},
     {"stdlib/crypto/grostl/hash_512_t59",
      VOLEITH_SHIPSHAPE_REG_PARAMETRIC,
      "(msg : byte[n]) -> (out : byte[59])",
@@ -458,7 +624,152 @@ static const shipshape_reg_descriptor_t DESCRIPTORS[] = {
      1,
      0,
      cost_grostl_512,
-     inl_grostl_512_t59},
+     inl_grostl_512_t59,
+     1},
+    /* ============================================================
+     * crypto-v3 norm S-box standalone entries (introduced_version 3).
+     * Same signatures as the frozen twins above; norm data path body.
+     * ============================================================ */
+    {"stdlib/crypto/aes/encrypt_rounds_128_norm",
+     VOLEITH_SHIPSHAPE_REG_FIXED,
+     "(rk : byte[176], pt : byte[16]) -> (ct : byte[16])",
+     0,
+     0,
+     GRID(grid_fixed),
+     2,
+     {176, 16},
+     16,
+     1,
+     120,
+     NULL,
+     inl_aes_encrypt_rounds_128_norm,
+     3},
+    {"stdlib/crypto/aes/encrypt_128_norm",
+     VOLEITH_SHIPSHAPE_REG_FIXED,
+     "(key : byte[16], pt : byte[16]) -> (ct : byte[16])",
+     0,
+     0,
+     GRID(grid_fixed),
+     2,
+     {16, 16},
+     16,
+     1,
+     160,
+     NULL,
+     inl_aes_encrypt_128_norm,
+     3},
+    {"stdlib/crypto/aes/encrypt_rounds_256_norm",
+     VOLEITH_SHIPSHAPE_REG_FIXED,
+     "(rk : byte[240], pt : byte[16]) -> (ct : byte[16])",
+     0,
+     0,
+     GRID(grid_fixed),
+     2,
+     {240, 16},
+     16,
+     1,
+     168,
+     NULL,
+     inl_aes_encrypt_rounds_256_norm,
+     3},
+    {"stdlib/crypto/aes/encrypt_256_norm",
+     VOLEITH_SHIPSHAPE_REG_FIXED,
+     "(key : byte[32], pt : byte[16]) -> (ct : byte[16])",
+     0,
+     0,
+     GRID(grid_fixed),
+     2,
+     {32, 16},
+     16,
+     1,
+     220,
+     NULL,
+     inl_aes_encrypt_256_norm,
+     3},
+    {"stdlib/crypto/cmac/aes_128_norm",
+     VOLEITH_SHIPSHAPE_REG_PARAMETRIC,
+     "(key : byte[16], msg : byte[n]) -> (tag : byte[16])",
+     0,
+     SHIPSHAPE_REG_MAX_VECTOR_LEN,
+     GRID(grid_cmac),
+     2,
+     {16, PARAM_LEN},
+     16,
+     1,
+     0,
+     cost_cmac_aes_128_norm,
+     inl_cmac_aes_128_norm,
+     3},
+    {"stdlib/crypto/cmac/aes_256_norm",
+     VOLEITH_SHIPSHAPE_REG_PARAMETRIC,
+     "(key : byte[32], msg : byte[n]) -> (tag : byte[16])",
+     0,
+     SHIPSHAPE_REG_MAX_VECTOR_LEN,
+     GRID(grid_cmac),
+     2,
+     {32, PARAM_LEN},
+     16,
+     1,
+     0,
+     cost_cmac_aes_256_norm,
+     inl_cmac_aes_256_norm,
+     3},
+    {"stdlib/crypto/grostl/hash_256_norm",
+     VOLEITH_SHIPSHAPE_REG_PARAMETRIC,
+     "(msg : byte[n]) -> (out : byte[32])",
+     0,
+     SHIPSHAPE_REG_MAX_VECTOR_LEN,
+     GRID(grid_grostl_256),
+     1,
+     {PARAM_LEN, 0},
+     32,
+     1,
+     0,
+     cost_grostl_256_norm,
+     inl_grostl_256_norm,
+     3},
+    {"stdlib/crypto/grostl/hash_256_t27_norm",
+     VOLEITH_SHIPSHAPE_REG_PARAMETRIC,
+     "(msg : byte[n]) -> (out : byte[27])",
+     0,
+     SHIPSHAPE_REG_MAX_VECTOR_LEN,
+     GRID(grid_grostl_256),
+     1,
+     {PARAM_LEN, 0},
+     27,
+     1,
+     0,
+     cost_grostl_256_norm,
+     inl_grostl_256_t27_norm,
+     3},
+    {"stdlib/crypto/grostl/hash_512_norm",
+     VOLEITH_SHIPSHAPE_REG_PARAMETRIC,
+     "(msg : byte[n]) -> (out : byte[64])",
+     0,
+     SHIPSHAPE_REG_MAX_VECTOR_LEN,
+     GRID(grid_grostl_512),
+     1,
+     {PARAM_LEN, 0},
+     64,
+     1,
+     0,
+     cost_grostl_512_norm,
+     inl_grostl_512_norm,
+     3},
+    {"stdlib/crypto/grostl/hash_512_t59_norm",
+     VOLEITH_SHIPSHAPE_REG_PARAMETRIC,
+     "(msg : byte[n]) -> (out : byte[59])",
+     0,
+     SHIPSHAPE_REG_MAX_VECTOR_LEN,
+     GRID(grid_grostl_512),
+     1,
+     {PARAM_LEN, 0},
+     59,
+     1,
+     0,
+     cost_grostl_512_norm,
+     inl_grostl_512_t59_norm,
+     3},
 };
 
 #define N_DESCRIPTORS (sizeof(DESCRIPTORS) / sizeof(DESCRIPTORS[0]))
@@ -471,6 +782,14 @@ size_t
 voleith_shipshape_registry_descriptor_count(void)
 {
     return N_DESCRIPTORS;
+}
+
+uint8_t
+voleith_shipshape_registry_introduced_version(size_t idx)
+{
+    if (idx >= N_DESCRIPTORS)
+        return 0;
+    return DESCRIPTORS[idx].introduced_version;
 }
 
 int
@@ -660,6 +979,7 @@ typedef struct {
     size_t grid_len;
     ss_reg_hash_inline_fn inl;
     ss_reg_hash_cost_fn cost;
+    uint8_t introduced_version; /* min stdlib version (crypto-vN) */
 } ss_reg_hash_descriptor_t;
 
 /* ---- param-index constants per entry ---- */
@@ -690,6 +1010,14 @@ static const uint16_t all_type_ids[] = {
     VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32,
     VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED,
     VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED,
+    /* crypto-v3 norm node-hash types (gated at parse time on the file's
+     * declared stdlib version via each type's introduced_version). */
+    VOLEITH_SHIPSHAPE_NHT_AES_DM_NORM,
+    VOLEITH_SHIPSHAPE_NHT_AES_CMAC_128_NORM,
+    VOLEITH_SHIPSHAPE_NHT_HIROSE_NORM,
+    VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32_NORM,
+    VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED_NORM,
+    VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED_NORM,
 };
 
 /* ================================================================
@@ -896,6 +1224,25 @@ static const ss_reg_hash_grid_pt_t grid_merkle_path[] = {
     /* grostl_512_fixed (node=64, fixed_leaf_bytes=64): L must be 64 */
     {VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED, {2, 64}, 2},
     {VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED, {8, 64}, 2},
+    /* crypto-v3 norm twins (same node widths and leaf rules as above). */
+    {VOLEITH_SHIPSHAPE_NHT_AES_DM_NORM, {2, 0}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_AES_DM_NORM, {2, 16}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_AES_DM_NORM, {8, 0}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_AES_DM_NORM, {8, 16}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_AES_CMAC_128_NORM, {2, 0}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_AES_CMAC_128_NORM, {2, 16}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_AES_CMAC_128_NORM, {8, 0}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_AES_CMAC_128_NORM, {8, 16}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_HIROSE_NORM, {2, 0}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_HIROSE_NORM, {2, 32}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_HIROSE_NORM, {8, 0}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_HIROSE_NORM, {8, 32}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32_NORM, {2, 32}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32_NORM, {8, 32}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED_NORM, {2, 32}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED_NORM, {8, 32}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED_NORM, {2, 64}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED_NORM, {8, 64}, 2},
 };
 
 /*
@@ -934,6 +1281,19 @@ static const ss_reg_hash_grid_pt_t grid_indexed_nonmember[] = {
     /* grostl_512_fixed: leaf record 2*28+8=64 = fixed_leaf_bytes */
     {VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED, {28, 8, 2}, 3},
     {VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED, {28, 8, 8}, 3},
+    /* crypto-v3 norm twins (same node widths / leaf-record rules). */
+    {VOLEITH_SHIPSHAPE_NHT_AES_DM_NORM, {8, 8, 2}, 3},
+    {VOLEITH_SHIPSHAPE_NHT_AES_DM_NORM, {8, 8, 8}, 3},
+    {VOLEITH_SHIPSHAPE_NHT_AES_CMAC_128_NORM, {8, 8, 2}, 3},
+    {VOLEITH_SHIPSHAPE_NHT_AES_CMAC_128_NORM, {8, 8, 8}, 3},
+    {VOLEITH_SHIPSHAPE_NHT_HIROSE_NORM, {8, 8, 2}, 3},
+    {VOLEITH_SHIPSHAPE_NHT_HIROSE_NORM, {8, 8, 8}, 3},
+    {VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32_NORM, {12, 8, 2}, 3},
+    {VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32_NORM, {12, 8, 8}, 3},
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED_NORM, {12, 8, 2}, 3},
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED_NORM, {12, 8, 8}, 3},
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED_NORM, {28, 8, 2}, 3},
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED_NORM, {28, 8, 8}, 3},
 };
 
 /*
@@ -971,6 +1331,19 @@ static const ss_reg_hash_grid_pt_t grid_ring_sig[] = {
     /* grostl_512_fixed: skb must equal fixed_leaf_bytes=64 */
     {VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED, {64, 2}, 2},
     {VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED, {64, 8}, 2},
+    /* crypto-v3 norm twins (skb == frozen twin's leaf width). */
+    {VOLEITH_SHIPSHAPE_NHT_AES_DM_NORM, {16, 2}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_AES_DM_NORM, {16, 8}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_AES_CMAC_128_NORM, {16, 2}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_AES_CMAC_128_NORM, {16, 8}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_HIROSE_NORM, {32, 2}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_HIROSE_NORM, {32, 8}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32_NORM, {32, 2}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32_NORM, {32, 8}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED_NORM, {32, 2}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED_NORM, {32, 8}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED_NORM, {64, 2}, 2},
+    {VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED_NORM, {64, 8}, 2},
 };
 
 /* ================================================================
@@ -1005,6 +1378,7 @@ static const ss_reg_hash_descriptor_t HASH_DESCRIPTORS[] = {
         GHASH_GRID(grid_merkle_path),
         inl_merkle_path_secret,
         cost_merkle_path_secret,
+        2,
     },
     /*
      * indexed_merkle/nonmember_secret
@@ -1040,6 +1414,7 @@ static const ss_reg_hash_descriptor_t HASH_DESCRIPTORS[] = {
         GHASH_GRID(grid_indexed_nonmember),
         inl_indexed_nonmember_secret,
         cost_indexed_nonmember_secret,
+        2,
     },
     /*
      * ring_sig/v1
@@ -1069,6 +1444,7 @@ static const ss_reg_hash_descriptor_t HASH_DESCRIPTORS[] = {
         GHASH_GRID(grid_ring_sig),
         inl_ring_sig_v1,
         cost_ring_sig_v1,
+        2,
     },
 };
 
@@ -1083,6 +1459,14 @@ size_t
 voleith_shipshape_reg_hash_descriptor_count(void)
 {
     return N_HASH_DESCRIPTORS;
+}
+
+uint8_t
+voleith_shipshape_reg_hash_introduced_version(size_t idx)
+{
+    if (idx >= N_HASH_DESCRIPTORS)
+        return 0;
+    return HASH_DESCRIPTORS[idx].introduced_version;
 }
 
 int

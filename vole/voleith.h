@@ -28,6 +28,7 @@
 #include <stddef.h>
 #include "vc.h"
 #include "convert.h"
+#include "threadctx.h"
 
 /*
  * Commitment - what the prover sends before seeing the challenge.
@@ -114,9 +115,14 @@ void voleith_decode_challenge(const uint8_t *delta,
  * Returns 0 on success, -1 on allocation failure.
  * Caller must call voleith_commitment_free() and voleith_prover_free().
  */
+/*
+ * tctx carries the prover's worker pool for the tau-rep loops.  Pass NULL
+ * (or a tctx whose pool is NULL) to run the serial path.
+ */
 int voleith_commit(voleith_commitment_t *com, voleith_prover_t *state,
                    const voleith_vc_params_t *params, const uint8_t *root_seed,
-                   const uint8_t iv[16], unsigned int ellhat);
+                   const uint8_t iv[16], unsigned int ellhat,
+                   const voleith_threadctx_t *tctx);
 
 /*
  * Prover open phase.

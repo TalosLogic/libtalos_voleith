@@ -16,6 +16,7 @@
 #include "vc.h"
 #include "prg.h"
 #include "hash.h"
+#include <ichor/pool.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -480,7 +481,7 @@ test_bavc_commit_basic(void)
     voleith_vc_params_init(&p, 128, 16, 8, 2, 112);
 
     voleith_bavc_t result;
-    int rc = voleith_bavc_commit(&result, &p, seed, iv);
+    int rc = voleith_bavc_commit(&result, &p, seed, iv, NULL);
     check("bavc_commit: succeeds", rc == 0);
     check("bavc_commit: com is non-zero", memcmp(result.com, zero, 32) != 0);
     check("bavc_commit: com_bytes = 32", result.com_bytes == 32);
@@ -503,8 +504,8 @@ test_bavc_commit_deterministic(void)
     voleith_vc_params_init(&p, 128, 16, 8, 2, 112);
 
     voleith_bavc_t r1, r2;
-    voleith_bavc_commit(&r1, &p, seed, iv);
-    voleith_bavc_commit(&r2, &p, seed, iv);
+    voleith_bavc_commit(&r1, &p, seed, iv, NULL);
+    voleith_bavc_commit(&r2, &p, seed, iv, NULL);
 
     check("bavc_commit: deterministic (same com)",
           memcmp(r1.com, r2.com, 32) == 0);
@@ -539,8 +540,8 @@ test_bavc_commit_different_seeds(void)
     voleith_vc_params_init(&p, 128, 16, 8, 2, 112);
 
     voleith_bavc_t r1, r2;
-    voleith_bavc_commit(&r1, &p, seed1, iv);
-    voleith_bavc_commit(&r2, &p, seed2, iv);
+    voleith_bavc_commit(&r1, &p, seed1, iv, NULL);
+    voleith_bavc_commit(&r2, &p, seed2, iv, NULL);
 
     check("bavc_commit: different seeds → different com",
           memcmp(r1.com, r2.com, 32) != 0);
@@ -562,7 +563,7 @@ test_bavc_leaf_seeds_match_tree(void)
     voleith_vc_params_init(&p, 128, 16, 8, 2, 112);
 
     voleith_bavc_t result;
-    voleith_bavc_commit(&result, &p, seed, iv);
+    voleith_bavc_commit(&result, &p, seed, iv, NULL);
 
     /* For FAEST-EM, sd_{i,j} should equal k_α (the tree leaf seed) */
     int ok = 1;
@@ -597,7 +598,7 @@ test_bavc_leaf_com_matches_prg(void)
     voleith_vc_params_init(&p, 128, 16, 8, 2, 112);
 
     voleith_bavc_t result;
-    voleith_bavc_commit(&result, &p, seed, iv);
+    voleith_bavc_commit(&result, &p, seed, iv, NULL);
 
     /* Spot-check a few leaf commitments.
      * LeafCommit tweak for vector i is (i + L - 1), per FAEST spec. */
@@ -666,7 +667,7 @@ test_bavc_leaf_coms_distinct(void)
     voleith_vc_params_init(&p, 128, 16, 120, 2, 24);
 
     voleith_bavc_t result;
-    voleith_bavc_commit(&result, &p, seed, iv);
+    voleith_bavc_commit(&result, &p, seed, iv, NULL);
 
     int ok = 1;
     for (size_t a = 0; a < p.L && ok; a++) {
@@ -701,13 +702,91 @@ test_bavc_commit_lambda256(void)
     voleith_vc_params_init(&p, 256, 32, 8, 2, 234);
 
     voleith_bavc_t result;
-    int rc = voleith_bavc_commit(&result, &p, seed, iv);
+    int rc = voleith_bavc_commit(&result, &p, seed, iv, NULL);
     check("bavc_commit_256: succeeds", rc == 0);
     check("bavc_commit_256: com_bytes=64", result.com_bytes == 64);
     check("bavc_commit_256: com is non-zero",
           memcmp(result.com, zero, 64) != 0);
 
     voleith_bavc_free(&result);
+}
+
+/*
+ * Test 24b: BAVC commit threaded output equals serial output (T1.3).
+ *
+ * Runs voleith_bavc_commit serially (tctx == NULL) and again through an ichor
+ * pool of `nthreads` workers, then checks the global commitment, every leaf
+ * commitment, and every leaf seed are byte-identical.  This is the parity
+ * oracle for per-vector threading: the tau jobs write disjoint slices, so any
+ * accidental sharing or ordering dependence would diverge here.  Valid in both
+ * builds: on a serial-fallback ichor (ICHOR_THREADS=OFF) the pool runs jobs
+ * inline, so this still exercises the submit/wait/job-fn path.
+ */
+static void
+check_bavc_threaded_matches_serial(const char *tag, int lambda, int tau,
+                                   int T_open, unsigned nthreads)
+{
+    uint8_t seed[32], iv[16];
+    size_t i;
+    int ok;
+
+    for (i = 0; i < sizeof(seed); i++)
+        seed[i] = (uint8_t)(0xa0 ^ i);
+    for (i = 0; i < sizeof(iv); i++)
+        iv[i] = (uint8_t)(0x5c ^ i);
+
+    voleith_vc_params_t p;
+    voleith_vc_params_init(&p, lambda, tau, 8, 2, T_open);
+
+    voleith_bavc_t rs, rt;
+    int rc_s = voleith_bavc_commit(&rs, &p, seed, iv, NULL);
+
+    ichor_pool_t *pool = NULL;
+    int rc_p = ichor_pool_create(&pool, nthreads);
+    voleith_threadctx_t tctx = {.pool = pool, .owns_pool = 0};
+    int rc_t = voleith_bavc_commit(&rt, &p, seed, iv, &tctx);
+
+    char name[128];
+    snprintf(name, sizeof(name), "%s: serial+threaded commit succeed", tag);
+    check(name, rc_s == 0 && rc_p == 0 && rc_t == 0);
+
+    snprintf(name, sizeof(name), "%s: com matches serial", tag);
+    check(name, rs.com_bytes == rt.com_bytes &&
+                    memcmp(rs.com, rt.com, 2 * (size_t)(lambda / 8)) == 0);
+
+    ok = (rs.com_bytes == rt.com_bytes);
+    for (i = 0; ok && i < p.L; i++) {
+        if (memcmp(rs.leaf_coms + i * rs.com_bytes,
+                   rt.leaf_coms + i * rt.com_bytes, rs.com_bytes) != 0)
+            ok = 0;
+    }
+    snprintf(name, sizeof(name), "%s: leaf_coms match serial", tag);
+    check(name, ok);
+
+    ok = (rs.seed_bytes == rt.seed_bytes);
+    for (i = 0; ok && i < p.L; i++) {
+        if (memcmp(rs.leaf_seeds + i * rs.seed_bytes,
+                   rt.leaf_seeds + i * rt.seed_bytes, rs.seed_bytes) != 0)
+            ok = 0;
+    }
+    snprintf(name, sizeof(name), "%s: leaf_seeds match serial", tag);
+    check(name, ok);
+
+    voleith_bavc_free(&rs);
+    voleith_bavc_free(&rt);
+    ichor_pool_destroy(pool);
+}
+
+static void
+test_bavc_commit_threaded_parity(void)
+{
+    /* 128f (tau=16) and 256f (tau=32), across 2-worker, 4-worker, and
+     * physical-core (nthreads=0) pools. */
+    check_bavc_threaded_matches_serial("bavc_thr_128f_n2", 128, 16, 112, 2);
+    check_bavc_threaded_matches_serial("bavc_thr_128f_n4", 128, 16, 112, 4);
+    check_bavc_threaded_matches_serial("bavc_thr_128f_nphys", 128, 16, 112, 0);
+    check_bavc_threaded_matches_serial("bavc_thr_256f_n2", 256, 32, 234, 2);
+    check_bavc_threaded_matches_serial("bavc_thr_256f_nphys", 256, 32, 234, 0);
 }
 
 /* ================================================================
@@ -730,7 +809,7 @@ setup_small_commit(voleith_vc_params_t *p, voleith_bavc_t *result,
     uint8_t iv[16];
     memset(iv, 0xBB, 16);
 
-    voleith_bavc_commit(result, p, seed, iv);
+    voleith_bavc_commit(result, p, seed, iv, NULL);
 
     for (int i = 0; i < p->tau; i++)
         i_delta[i] = (size_t)i % voleith_vc_N(p, i);
@@ -964,7 +1043,7 @@ test_bavc_open_varied_indices(void)
     memset(iv, 0xDD, 16);
 
     voleith_bavc_t result;
-    voleith_bavc_commit(&result, &p, seed, iv);
+    voleith_bavc_commit(&result, &p, seed, iv, NULL);
 
     /*
      * All-zeros challenge vs a "max index per vector" challenge.  With
@@ -1015,7 +1094,7 @@ setup_small_roundtrip(voleith_vc_params_t *p, voleith_bavc_t *result,
     memset(seed, 0xAA, 16);
     memset(iv, 0xBB, 16);
 
-    voleith_bavc_commit(result, p, seed, iv);
+    voleith_bavc_commit(result, p, seed, iv, NULL);
 
     for (int i = 0; i < p->tau; i++)
         i_delta[i] = (size_t)i % voleith_vc_N(p, i);
@@ -1184,7 +1263,7 @@ test_bavc_reconstruct_different_challenge(void)
     memset(iv, 0xBB, 16);
 
     voleith_bavc_t result;
-    voleith_bavc_commit(&result, &p, seed, iv);
+    voleith_bavc_commit(&result, &p, seed, iv, NULL);
 
     /* Use different challenge: hide last leaf in each vector */
     size_t i_delta[16];
@@ -1223,7 +1302,7 @@ test_bavc_reconstruct_lambda256(void)
     memset(iv, 0x66, 16);
 
     voleith_bavc_t result;
-    voleith_bavc_commit(&result, &p, seed, iv);
+    voleith_bavc_commit(&result, &p, seed, iv, NULL);
 
     size_t i_delta[4] = {0, 1, 0, 1};
 
@@ -1260,7 +1339,7 @@ test_bavc_reconstruct_tampered_fails(void)
     memset(iv, 0xBB, 16);
 
     voleith_bavc_t result;
-    voleith_bavc_commit(&result, &p, seed, iv);
+    voleith_bavc_commit(&result, &p, seed, iv, NULL);
 
     size_t i_delta[16];
     for (int i = 0; i < p.tau; i++)
@@ -1532,7 +1611,7 @@ test_xval_bavc_commit_em128f(void)
     voleith_vc_params_init(&p, 128, 16, 8, 2, 112);
 
     voleith_bavc_t result;
-    voleith_bavc_commit(&result, &p, root_key, iv);
+    voleith_bavc_commit(&result, &p, root_key, iv, NULL);
 
     check("xval_bavc_commit_em128f: h matches faest-ref",
           memcmp(result.com, expected_h, 32) == 0);
@@ -1577,6 +1656,7 @@ main(void)
     test_bavc_leaf_com_matches_prg();
     test_bavc_leaf_coms_distinct();
     test_bavc_commit_lambda256();
+    test_bavc_commit_threaded_parity();
 
     /* BAVC open tests */
     test_bavc_open_basic();

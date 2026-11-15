@@ -109,12 +109,12 @@ test_goal2_rules(void)
               VOLEITH_SHIPSHAPE_ERR_REGISTRY);
 
     /* (iii) An unsupported declared stdlib version is rejected outright at the
-     * header, so the body is never reached.  (crypto-v3 is undefined; only
-     * crypto-v1 and crypto-v2 are accepted.) */
+     * header, so the body is never reached.  (crypto-v4 is undefined; only
+     * crypto-v1, crypto-v2, and crypto-v3 are accepted.) */
     check("goal2: version mismatch => HEADER",
           adv(".shipshape 1\n"
               "field GF(2^8) irreducible 0x11B\n"
-              "stdlib crypto-v3\n"
+              "stdlib crypto-v4\n"
               "WITNESS -> %x : byte\n"
               "stdlib/crypto/aes/sbox(%x) -> %y\n") ==
               VOLEITH_SHIPSHAPE_ERR_HEADER);

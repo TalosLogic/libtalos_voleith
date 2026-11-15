@@ -180,6 +180,66 @@ An AND gate / `assert_product` is a degree-2 constraint: QuickSilver opens three
 
 The only shipped consumer above degree 2 is the designated-opener syndrome gadget: it opens at `idx_bits + 1` (the index-bit width, raised one by the strict-ascending less-than chain), which is 16 to 18 across the four shipped parameter sets (the less-than and syndrome constructions are in [`docs/CIRCUIT_DESIGN.md`](CIRCUIT_DESIGN.md), the V5 protocol in [`docs/RING_SIGNATURES_DESIGN.md`](RING_SIGNATURES_DESIGN.md), and the opener tag and KEM byte contract in the companion libtalos_syndrome, its `docs/DESIGN.md` §6). Soundness degrades only logarithmically in `d`: the opening-check error is `d / 2^lambda` (about 4 bits of the 2^-lambda margin at these degrees), while the batched-constraint term `~C / 2^lambda` dominates (the syndrome relation appends about `p` constraints, `log2(p) ~= 13.7`). The overall QuickSilver soundness error stays in the `~(C + d) / 2^lambda` class the library already accepts for its largest circuits (about 2^-114 at lambda128, 2^-242 at lambda256), so it is the constraint count, not the opening degree, that sets the margin. The shipped opener degrees (16 to 18) sit well below the `VOLEITH_QS_D_MAX` ceiling of 32.
 
+### FAEST norm S-box arithmetization
+
+The GF(2⁸) S-box has an optional second arithmetization, the FAEST v2.0 (spec
+Section 6) *norm* form, that commits roughly 25% fewer VOLE slots than the
+baseline one-inverse-witness S-box while producing byte-identical output. It is
+a proof-layer construction shared by a whole family of Layer 5 `_norm` circuits;
+how each circuit wires it (witness layouts, the reset gadget, the free packing
+gates, per-family cost, what ships) is in
+[`docs/CIRCUIT_DESIGN.md`](CIRCUIT_DESIGN.md). The arithmetization itself is
+here.
+
+**The construction.** For an S-box input `a ∈ GF(2⁸)`, the prover commits the
+4-bit subfield norm `c = N_{F2⁸/F2⁴}(a⁻¹) = a⁻¹⁷ ∈ GF(2⁴)` instead of the full
+8-bit inverse. The inverse is reconstructed as `a⁻¹ = a¹⁶·c` with a free
+Frobenius image, and the soundness relation is `c·a²·a¹⁶ = a`. This is a
+GF(2⁸) *subfield* construction, not a bit-level one: `a²` and `a¹⁶` are free
+Frobenius images of the committed input, so only `c` and `a` are independent
+commitments. Committing one 4-bit norm where the baseline commits one 8-bit
+inverse is the source of the slot saving.
+
+**Relation degree R = 3, opening count d = 2.** To avoid overloading "degree":
+the *relation degree* R is the algebraic degree of the constraint equation, and
+the *opening count* d is the number of transmitted coefficients (the `d` of
+"Degree-d QuickSilver openings" above, which sets `ellhat`, the mask region, and
+the `a_tilde` serialization). The relation `c·a²·a¹⁶ = a` has R = 3, but d stays
+2: the target is parked so the top (Δ³) coefficient is the equality residual
+`c·a²·a¹⁶ − a`, which is zero for an honest prover and still caught for a cheat
+by the Δ-evaluation, so the proof opens only `a₀/a₁/a₂` through the existing
+3-coefficient `zk_hash_3`. A norm circuit therefore reports `qs_degree = 2`
+(`voleith_gf8_circuit_qs_degree`) while using R = 3 gadgets internally, rides the
+degree-generic QS layer with no `VOLEITH_QS_D_MAX` bump, and adds no mask block:
+the ~25% slot saving comes with no widening of the opening.
+
+**`GF8_CONSTRAINT_PRODUCT3`.** The three-way product is a new QuickSilver
+constraint kind (`proof/gf8_circuit.h`), the degree-3 sibling of the degree-2
+`assert_product` above: `a·b·c = d` with a fourth wire operand `d` and target
+parking. The builder emits three folded coefficient streams into `zk_hash_3` and
+parks the top term so the degree-3 coefficient vanishes structurally, keeping
+`qs_degree = 2`. The fourth operand is absorbed into the circuit fingerprint
+**only** for the PRODUCT3 kind, so every frozen ZERO / EQUAL / PRODUCT
+fingerprint is byte-identical to pre-1.12.0. The per-byte isolated relation
+`c·a²·a¹⁶ = a` is emitted through this builder; the same
+`embed(val_d)`-not-`embed(val_a·val_b·val_c)` discipline that anchors
+`assert_product` (above) anchors its soundness.
+
+**Paired-round degree reset, and one divergence from FAEST.** The norm form is
+not a per-call S-box swap: FAEST processes rounds in pairs. The even round of a
+pair commits the packed 4-bit norms; the odd round commits a full intermediate
+state `s_tilde` so the linear layer (ShiftRows/MixColumns, or
+ShiftBytes/MixBytes for Grøstl) can be run backward to reset the degree chain
+for the next pair, keeping every emitted constraint at R = 3 / d = 2. voleith
+makes one deliberate change: FAEST omits the final pair's `s_tilde` because its
+OWF output is a public statement, but voleith's norm AES is a general-purpose
+primitive whose output is *wires* that chain into CMAC blocks, KDF feedback, and
+Merkle composition, so the output must stay degree-1. The norm circuits
+therefore commit **every** pair's intermediate state, including the last. The
+resulting witness lengths are validated against the NIST AES output vectors, not
+against FAEST's (deliberately different) witness length; the concrete layouts
+and the reset gadget are in [`docs/CIRCUIT_DESIGN.md`](CIRCUIT_DESIGN.md).
+
 ---
 
 ## Bristol Fashion Circuit Parser
@@ -301,6 +361,12 @@ The registry exists because of a soundness channel, not convenience. A wrong con
 **Identity, dispatch, and fail-closed authentication.**  The body hash keys on (construction name, node-hash type, inferred integer params), frozen over the full type-x-param grid and CI-checked in the same harness as the crypto-v1 grid.  Witness-backend dispatch keys on the region name `stdlib/crypto/<name>[<type>]` and the registry version.  Authentication is structural: the crypto-v2 backend and the crypto-v2 body ship together, and a mismatch between backend version and parser version yields an invalid proof, never a verifier false-accept.  Dispatch is prover-side and fail-closed: a wrong backend is caught at prove time, not verify time.
 
 For the normative format, grammar, entry table, and conformance requirements, see SHIPSHAPE_SPEC §7.7 ("crypto-v2 registry: hash-parametric crypto extensions (secret-direction)").
+
+### Norm S-box registry (crypto-v3)
+
+crypto-v3 is an additive stdlib-version bump that registers the norm S-box circuits (above): ten standalone entries (the norm twins of the AES / CMAC / Grøstl kernels) and six norm node-hash types (`aes_dm_norm`, `aes_cmac_128_norm`, `hirose_norm`, `hirose_fixed_32_norm`, `grostl_256_fixed_norm`, `grostl_512_fixed_norm`) usable in the §7.7 bracket selector. It is a new registry *version* rather than an in-place edit because the spec requires that of any registry change (every crypto-v1/v2 entry stays callable under crypto-v3, and a crypto-v3 file is rejected by a v1/v2-only parser); the gate is a per-entry and per-type `introduced_version`. No Tier 1 opcode is added, so the `.shipshape` format axis is untouched.
+
+The one substantive change this required outside the registry tables was teaching the generic Tier 1 witness generator to fill the norm commitments: the frozen inverse-fill path resolves only inverse witnesses (committed through a `PRODUCT` constraint), whereas a norm circuit commits packed-norm and reset-state witnesses through `PRODUCT3` and the paired-round gadget. The generator now recovers those from the gadget's already-evaluated inputs (the circuit-layer `aes_norm_gf8_solve_pair` / `grostl_norm_gf8_solve_pair`), so norm circuits are witgen-able generically and the generic-vs-native equivalence oracle still holds. Normative details in SHIPSHAPE_SPEC §7.8.
 
 ### Format versioning: semver on the format axis
 
@@ -671,6 +737,8 @@ All contexts holding key material, VOLE correlations, witness data, or transient
 | Serialised proof data (`proof/proof.c`) | Cleared on `voleith_proof_free` for defense-in-depth, even though the proof itself is public. |
 | Reconstructed verifier-side bitstream context (`proof/verifier.c`) | Cleared after `zk_hash_finalize` to avoid leaving derived state in scope. |
 
+Since 1.12.0 the GF(2⁸) verify path is one deliberate exception to the scrub-on-free rule: the threaded reconstruct and QuickSilver-verify scratch (VOLE rows, verifier keys, the transposed `Q_T`) holds only public data, because the verifier never receives a witness, so those scrubs were dropped for a measurable fixed cost on the fully-threaded verifier (see "Verify-path memory hygiene" under Prover and Verifier Parallelism). Every entry in the table above is unchanged.
+
 All secret-dependent equality checks use `voleith_const_memcmp()` (volatile XOR accumulator), never `memcmp`. This applies to commitment-equality checks in the VOLEitH commitment phase and to `chall_3` comparison in the full proof verification path.
 
 ### No secret-dependent table lookups inside circuits
@@ -819,6 +887,57 @@ unsigned                voleith_cpu_features(void);    /* raw bitmask */
 ```
 
 The first call to any of these triggers `voleith_aes_dispatch_init()` (or the corresponding Grøstl init) if it has not already run. These are intended for diagnostic logging and for verifying the expected backend in a deployment health check; the protocol layer never consults them.
+
+---
+
+## Prover and Verifier Parallelism (Threading)
+
+The prover and the verifier both run their VOLE phase and their QuickSilver phase across multiple worker threads. This is thread-level parallelism (independent of the per-core SIMD dispatch above): it consumes the libtalos_ichor thread pool, parallelizing the tau VOLE repetitions that FAEST-EM runs and the internal sub-phases of QuickSilver, on both the prove and verify sides. The remaining forward-looking targets (grinding and the per-phase SIMD kernels) are tracked in `docs/private/SIMD_THREADING_OPPORTUNITIES.md`; this section records the design of what is built.
+
+### What is parallelized
+
+FAEST-EM runs tau VOLE instances, and the two phases of the commit are independent across tau: the BAVC vector commitment (`voleith_bavc_commit`, `vole/vc.c`) and ConvertToVOLE (`voleith_vole_commit`, `vole/convert.c`). Each is dispatched as a batch of tau jobs onto the pool, submitted and waited to completion in turn (BAVC first, then ConvertToVOLE, since the second consumes the first's output). A null pool, or a null threading context, runs the original serial loop unchanged, so the feature degrades cleanly in constrained contexts.
+
+QuickSilver itself is threaded on both sides (see "QuickSilver parallelism" and "Verifier parallelism" below). The grinding loop and the Fiat-Shamir tail remain serial, so speedup is bounded by `min(tau, cores)` on the VOLE phase and by the residual serial tail (Amdahl). The per-phase SIMD kernels are the remaining future-work target.
+
+### QuickSilver parallelism
+
+QuickSilver is the largest prover phase on heavy circuits (65-71% of prove time), and the same pool threads its three internal sub-phases. Each is reached through the `_ex` prover entry points, which pass the pool down; the non-`_ex` entry points, a null pool, an allocation failure, or a pool refusal run the original serial code, which is the bit-identical reference. All three are gated byte-for-byte by the QS thread-determinism tests (`test_gf8_qs_thread_determinism`, `test_gf16_qs_thread_determinism`), which prove the same circuit at several worker counts and assert the proof bytes match serial.
+
+- **Transpose** (the `V_T` build at QS entry): the source rows are partitioned into byte-aligned column blocks. Each block owns a disjoint set of output columns and writes a disjoint region of `V_T` by pure OR, so the result is independent of block order. Memory-bandwidth-bound, so it scales sublinearly (like ConvertToVOLE), measured roughly 3-4x.
+- **Accumulate** (Steps 4-5): the QuickSilver zk_hash accumulator is a Horner recurrence `h -> h*s + v` applied once per update over a canonical item stream (MUL gates, then the constraint / LT / syndrome / norm segments). It is order-dependent but associative (affine-map composition), so it threads as a segmented reduction: each worker folds a contiguous block into a local context and counts its update calls `L_p`, then the main thread folds the partials in canonical order via `H = H*s^{L_p} + H_p` (with `s^{L_p}` by fast exponentiation). Compute-bound (field multiplies), so it scales on many cores.
+- **Bit-tag propagation** (Step 2): each wire's bit-tags are a function of its DAG predecessors, so wires sharing a topological level are mutually independent. A per-prove pre-pass assigns each wire a level and buckets wire ids by level; each level is then tagged in parallel with a barrier between levels, split into one contiguous chunk per worker (one job per wire would drown the tiny per-wire work in dispatch overhead). Levels too narrow to amortize a dispatch run inline. The benefit is set by the circuit's DAG shape: shallow-wide circuits (Grostl nodes, span about 20) thread well (roughly 6-7x on the phase), deep-narrow ones (Hirose, span about 226) are roughly neutral. An earlier design left this serial on the assumption it was DAG-hostile; a static parallelism measurement (span and per-level widths) showed otherwise, and the wavefront was built.
+
+### Verifier parallelism
+
+Verification threads the same two phases as the prover, against the same pool and under the same determinism discipline. The VOLE reconstruct loop (`voleith_gf8_verify_reconstruct_ex` / `voleith_gf16_verify_reconstruct_ex`, over the internal `voleith_bavc_reconstruct_ex` and `voleith_vole_reconstruct_ex`) runs the tau-rep BAVC leaf-commitment and ConvertToVOLE reconstruction across the pool, mirroring the prover commit; the serial `verify_reconstruct` entry points are unchanged thin wrappers. The QuickSilver verifier (`voleith_gf8_verify_v2_ex` down to `qs_verify_ex`) then threads its transpose and its zk_hash accumulate exactly as the prover does (the same disjoint-column `Q_T` transpose and the same segmented `H = H*s^{L_p} + H_p` fold), plus the per-rep verifier-key reconstruction. As on the prover side, the non-`_ex` entry points and any null-pool, allocation-failure, or pool-refusal case run the bit-identical serial code, and the QS thread-determinism tests gate the verifier's accept/reject and its reconstructed bytes byte-for-byte across worker counts. Only the Fiat-Shamir challenge derivation and the final `chall_3` equality check stay serial.
+
+**Verify-path memory hygiene.** The verifier holds no witness: everything it reconstructs (the VOLE rows, the QuickSilver keys, the transposed `Q_T`) is a function of public inputs and the opened proof, which is itself public. The secure-zero-on-free scrubs that the prover applies to its witness-derived scratch therefore do no security work on the verify path, and fully threaded they measured a large fixed cost (over 400 ms on the i9 benchmark), so the reconstruct and QS-verify scratch is no longer scrubbed on the verify side. Every prover-side scrub is retained unchanged, and the secret-free property of the verifier scratch is a structural fact of the protocol (the verifier never receives a witness), not a per-buffer judgement call.
+
+### The threading context handle
+
+The pool lives on a per-prover-commit threading context (`voleith_threadctx_t`, `vole/threadctx.h`), never a process-wide singleton. The proof layer (4) creates the pool and passes the context as a read-only handle down the commit chain, where the vole layer (2-3) consumes the ichor core (0); this is consistent with the layering rule (an upper layer may hand a lower layer a core-level object, not the reverse).
+
+Per-context ownership is a correctness requirement, not a convenience. voleith is a library with a two-phase Fiat-Shamir API (see "Two-Phase Fiat-Shamir") that a threaded host may drive from inside the host's own pool. ichor pools are independent (disjoint state; a worker of one pool submitting to a different pool is allowed, only re-submitting to its own pool is rejected), so voleith submitting to its own context-owned pool from a host worker is safe, and two concurrent voleith operations in one process do not contend for one pool. The context records whether it owns the pool (destroy at prover free) or borrowed it (the host supplied and scopes it).
+
+### Determinism: parallel compute, ordered absorb
+
+The proof bytes are bit-identical at every thread count, including serial. This holds because the commit's transcript contribution is a gather-then-hash, not an incremental hash across reps. Each tau job writes only its own disjoint output slices: its `u` slot, its precomputed VOLE-row range (the per-vector offset is a prefix sum over the public depths `k_i`, so it is known without a running accumulator), and, in BAVC, its hash slot `h_all + i*hash_bytes` and disjoint leaf-commitment and leaf-seed entries. The GGM tree is expanded once before dispatch and only read by the jobs.
+
+The only order-dependent steps run serially after the join and read those disjoint slots in index order: the BAVC global commitment `com = H_1(h_0 || ... || h_{tau-1})` and the ConvertToVOLE fold `u = ui[0]`, `c[i-1] = ui[0] XOR ui[i]`. Neither is threaded, and both are a pure function of index-ordered buffers, so execution order does not affect the result. This is the repository's standing determinism posture (FS challenge order and transcript contents match the spec exactly); the gate is reproducing the existing serial cross-validation vectors (h, u, c, v) byte for byte, with no KAT regeneration, plus explicit serial-vs-threaded parity and `_ex(nthreads=N)`-vs-default proof-byte invariance tests.
+
+### Per-worker scratch: no per-job allocation
+
+The commit chain does no allocation at job granularity. Scratch is split by how it is used:
+
+- **Transient** scratch (consumed within one job) is per-worker: `nworkers` slots in one contiguous preallocated pool, where `nworkers = ichor_pool_size(pool)`. A worker runs one job to completion before taking the next, so `nworkers` slots always suffice. A job selects its slot by `ichor_job_worker_index(ctx)`, a stable `0..nworkers-1` index ichor exposes for the job's duration (null-safe to 0 on the serial inline path). The transient buffers are the ConvertToVOLE butterfly `r`, the seed-gather `sd_buf`, and the leaf-commitment `concat`.
+- **Retained** outputs are per-tau: the per-vector `u` vectors, the per-vector hashes `h_all`, the VOLE rows, and the public v-row offset table. All are indexed by the tau index and kept.
+
+Resident scratch is therefore `nworkers * footprint`, scaling with the thread count the caller chose, not with tau. On a memory-bandwidth-bound machine a caller who wants a smaller working set passes fewer threads (or runs serial); the library always honors an explicit `nthreads` rather than capping it, because the future tail-threading stages will want more than tau workers. `voleith_convert_to_vole` takes `r` as a caller-owned parameter and neither allocates nor frees it; it still scrubs the portion it used, and the context secure-zeroes every secret transient (`r`, `sd_buf`) and the retained `u` buffer on free. The butterfly `r` is deliberately not zero-filled on allocation: on the prover path every row-0 cell is PRG-written and every later row is computed before it is read, so only the single verifier-path cell that the hidden seed would fill (`R(0,0)` under `sd0_bot`) is zeroed explicitly.
+
+### Constant-time
+
+The parallelism partitions on public structure only (the tau index, tree position, worker index, later the grinding counter range), never on anything secret, so scheduling and work-stealing leak nothing. The data is secret; the shape of the parallelism is public, which is what keeps the threaded path constant-time to the same bar as the serial one.
 
 ---
 

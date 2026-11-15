@@ -88,10 +88,11 @@ cert_compute_fs_seed(voleith_rs_cr_profile_t cr, size_t n_chunks, int secret,
 
 static int
 cert_prove_impl(voleith_proof_t *proof_out, const voleith_params_t *params,
-                voleith_rs_cr_profile_t cr, size_t n_chunks, size_t index,
-                const uint8_t *fwk, const uint8_t *chunk_digest,
-                const uint8_t *merkle_root, const uint8_t *siblings,
-                const voleith_rs_metadata_t *metadata, int secret)
+                voleith_rs_cr_profile_t cr, const voleith_node_hash_vt *node_vt,
+                size_t n_chunks, size_t index, const uint8_t *fwk,
+                const uint8_t *chunk_digest, const uint8_t *merkle_root,
+                const uint8_t *siblings, const voleith_rs_metadata_t *metadata,
+                int secret)
 {
     voleith_gf8_circuit_t *circuit = NULL;
     voleith_rs_chunk_cert_layout_t layout;
@@ -110,7 +111,7 @@ cert_prove_impl(voleith_proof_t *proof_out, const voleith_params_t *params,
     proof_out->data = NULL;
     proof_out->len = 0;
 
-    vt = voleith_rs_chunk_node_vt(cr);
+    vt = voleith_rs_chunk_node_vt_resolve(cr, node_vt);
     if (vt == NULL || metadata->cr_profile != cr)
         return -1;
     W = vt->node_bytes;
@@ -126,11 +127,11 @@ cert_prove_impl(voleith_proof_t *proof_out, const voleith_params_t *params,
         goto out;
     if (secret) {
         if (voleith_rs_chunk_cert_build_circuit_secret_dir(
-                circuit, cr, n_chunks, &layout) != 0)
+                circuit, cr, node_vt, n_chunks, &layout) != 0)
             goto out;
     } else {
-        if (voleith_rs_chunk_cert_build_circuit(circuit, cr, n_chunks, index,
-                                                &layout) != 0)
+        if (voleith_rs_chunk_cert_build_circuit(circuit, cr, node_vt, n_chunks,
+                                                index, &layout) != 0)
             goto out;
     }
 
@@ -141,13 +142,13 @@ cert_prove_impl(voleith_proof_t *proof_out, const voleith_params_t *params,
 
     if (secret) {
         if (voleith_rs_chunk_cert_build_witness_secret_dir(
-                cr, n_chunks, index, fwk, chunk_digest, siblings, &layout,
-                witness) != 0)
+                cr, node_vt, n_chunks, index, fwk, chunk_digest, siblings,
+                &layout, witness) != 0)
             goto out;
     } else {
-        if (voleith_rs_chunk_cert_build_witness(cr, n_chunks, index, fwk,
-                                                chunk_digest, siblings, &layout,
-                                                witness) != 0)
+        if (voleith_rs_chunk_cert_build_witness(cr, node_vt, n_chunks, index,
+                                                fwk, chunk_digest, siblings,
+                                                &layout, witness) != 0)
             goto out;
     }
 
@@ -189,8 +190,10 @@ out:
 
 static int
 cert_verify_impl(const voleith_proof_t *proof, const voleith_params_t *params,
-                 voleith_rs_cr_profile_t cr, size_t n_chunks, size_t index,
-                 const uint8_t *chunk_digest, const uint8_t *merkle_root,
+                 voleith_rs_cr_profile_t cr,
+                 const voleith_node_hash_vt *node_vt, size_t n_chunks,
+                 size_t index, const uint8_t *chunk_digest,
+                 const uint8_t *merkle_root,
                  const voleith_rs_metadata_t *metadata, const uint8_t *R_auth,
                  size_t R_len, int secret)
 {
@@ -208,7 +211,7 @@ cert_verify_impl(const voleith_proof_t *proof, const voleith_params_t *params,
         R_auth == NULL)
         return -1;
 
-    vt = voleith_rs_chunk_node_vt(cr);
+    vt = voleith_rs_chunk_node_vt_resolve(cr, node_vt);
     if (vt == NULL || metadata->cr_profile != cr)
         return -1;
     W = vt->node_bytes;
@@ -230,11 +233,11 @@ cert_verify_impl(const voleith_proof_t *proof, const voleith_params_t *params,
         goto out;
     if (secret) {
         if (voleith_rs_chunk_cert_build_circuit_secret_dir(
-                circuit, cr, n_chunks, &layout) != 0)
+                circuit, cr, node_vt, n_chunks, &layout) != 0)
             goto out;
     } else {
-        if (voleith_rs_chunk_cert_build_circuit(circuit, cr, n_chunks, index,
-                                                &layout) != 0)
+        if (voleith_rs_chunk_cert_build_circuit(circuit, cr, node_vt, n_chunks,
+                                                index, &layout) != 0)
             goto out;
     }
 
@@ -268,48 +271,49 @@ out:
 int
 voleith_rs_chunk_cert_prove(voleith_proof_t *proof_out,
                             const voleith_params_t *params,
-                            voleith_rs_cr_profile_t cr, size_t n_chunks,
-                            size_t index, const uint8_t *fwk,
+                            voleith_rs_cr_profile_t cr,
+                            const voleith_node_hash_vt *node_vt,
+                            size_t n_chunks, size_t index, const uint8_t *fwk,
                             const uint8_t *chunk_digest,
                             const uint8_t *merkle_root, const uint8_t *siblings,
                             const voleith_rs_metadata_t *metadata)
 {
-    return cert_prove_impl(proof_out, params, cr, n_chunks, index, fwk,
+    return cert_prove_impl(proof_out, params, cr, node_vt, n_chunks, index, fwk,
                            chunk_digest, merkle_root, siblings, metadata, 0);
 }
 
 int
-voleith_rs_chunk_cert_verify(const voleith_proof_t *proof,
-                             const voleith_params_t *params,
-                             voleith_rs_cr_profile_t cr, size_t n_chunks,
-                             size_t index, const uint8_t *chunk_digest,
-                             const uint8_t *merkle_root,
-                             const voleith_rs_metadata_t *metadata,
-                             const uint8_t *R, size_t R_len)
+voleith_rs_chunk_cert_verify(
+    const voleith_proof_t *proof, const voleith_params_t *params,
+    voleith_rs_cr_profile_t cr, const voleith_node_hash_vt *node_vt,
+    size_t n_chunks, size_t index, const uint8_t *chunk_digest,
+    const uint8_t *merkle_root, const voleith_rs_metadata_t *metadata,
+    const uint8_t *R, size_t R_len)
 {
-    return cert_verify_impl(proof, params, cr, n_chunks, index, chunk_digest,
-                            merkle_root, metadata, R, R_len, 0);
+    return cert_verify_impl(proof, params, cr, node_vt, n_chunks, index,
+                            chunk_digest, merkle_root, metadata, R, R_len, 0);
 }
 
 int
 voleith_rs_chunk_cert_prove_secret_dir(
     voleith_proof_t *proof_out, const voleith_params_t *params,
-    voleith_rs_cr_profile_t cr, size_t n_chunks, size_t index,
-    const uint8_t *fwk, const uint8_t *chunk_digest, const uint8_t *merkle_root,
+    voleith_rs_cr_profile_t cr, const voleith_node_hash_vt *node_vt,
+    size_t n_chunks, size_t index, const uint8_t *fwk,
+    const uint8_t *chunk_digest, const uint8_t *merkle_root,
     const uint8_t *siblings, const voleith_rs_metadata_t *metadata)
 {
-    return cert_prove_impl(proof_out, params, cr, n_chunks, index, fwk,
+    return cert_prove_impl(proof_out, params, cr, node_vt, n_chunks, index, fwk,
                            chunk_digest, merkle_root, siblings, metadata, 1);
 }
 
 int
 voleith_rs_chunk_cert_verify_secret_dir(
     const voleith_proof_t *proof, const voleith_params_t *params,
-    voleith_rs_cr_profile_t cr, size_t n_chunks, const uint8_t *chunk_digest,
-    const uint8_t *merkle_root, const voleith_rs_metadata_t *metadata,
-    const uint8_t *R, size_t R_len)
+    voleith_rs_cr_profile_t cr, const voleith_node_hash_vt *node_vt,
+    size_t n_chunks, const uint8_t *chunk_digest, const uint8_t *merkle_root,
+    const voleith_rs_metadata_t *metadata, const uint8_t *R, size_t R_len)
 {
     /* index is hidden; 0 is a placeholder (not bound into the seed). */
-    return cert_verify_impl(proof, params, cr, n_chunks, 0, chunk_digest,
-                            merkle_root, metadata, R, R_len, 1);
+    return cert_verify_impl(proof, params, cr, node_vt, n_chunks, 0,
+                            chunk_digest, merkle_root, metadata, R, R_len, 1);
 }

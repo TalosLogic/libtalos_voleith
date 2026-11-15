@@ -6,7 +6,7 @@
  * (the implementation plan W2.1).
  *
  * Tests:
- *   1: table compiles, links, and has the expected entry count (13)
+ *   1: table compiles, links, and has the expected entry count (23)
  *   2: every entry is well-formed (FQN, kind, signature, bodies)
  *   3: FQNs are unique
  *   4: frozen table agrees with the live descriptors (FQN, kind,
@@ -37,7 +37,7 @@ check(const char *name, int cond)
     }
 }
 
-#define EXPECTED_ENTRIES 13
+#define EXPECTED_ENTRIES 23 /* 13 crypto-v1/v2 + 10 crypto-v3 norm */
 #define EXPECTED_MAX_VECTOR_LEN (1u << 20)
 
 /* ================================================================
@@ -46,7 +46,7 @@ check(const char *name, int cond)
 static void
 test_count_matches(void)
 {
-    check("registry count == 13",
+    check("registry count == 23",
           voleith_shipshape_registry_count == EXPECTED_ENTRIES);
     check("descriptor count == registry count",
           voleith_shipshape_registry_descriptor_count() ==
@@ -128,7 +128,9 @@ test_table_matches_descriptors(void)
         const voleith_shipshape_reg_entry_t *e = &voleith_shipshape_registry[i];
         if (strcmp(fqn, e->fqn) != 0 || kind != e->kind ||
             strcmp(sig, e->signature) != 0 || pmin != e->param_min ||
-            pmax != e->param_max) {
+            pmax != e->param_max ||
+            voleith_shipshape_registry_introduced_version(i) !=
+                e->introduced_version) {
             printf("  entry %zu: descriptor/table mismatch (%s)\n", i, e->fqn);
             ok = 0;
         }
@@ -242,6 +244,14 @@ test_grid_coverage(void)
     require_points("stdlib/crypto/grostl/hash_256_t27", g256_pts, 5, &ok);
     require_points("stdlib/crypto/grostl/hash_512", g512_pts, 5, &ok);
     require_points("stdlib/crypto/grostl/hash_512_t59", g512_pts, 5, &ok);
+
+    /* crypto-v3 norm twins share the same parametric grids. */
+    require_points("stdlib/crypto/cmac/aes_128_norm", cmac_pts, 5, &ok);
+    require_points("stdlib/crypto/cmac/aes_256_norm", cmac_pts, 5, &ok);
+    require_points("stdlib/crypto/grostl/hash_256_norm", g256_pts, 5, &ok);
+    require_points("stdlib/crypto/grostl/hash_256_t27_norm", g256_pts, 5, &ok);
+    require_points("stdlib/crypto/grostl/hash_512_norm", g512_pts, 5, &ok);
+    require_points("stdlib/crypto/grostl/hash_512_t59_norm", g512_pts, 5, &ok);
 
     check("parametric grids cover STDLIB §3.4 required points", ok);
 }

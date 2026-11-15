@@ -679,12 +679,12 @@ test_header(void)
                     "field GF(2^8) irreducible 0x11b\n"
                     "stdlib crypto-v1\n") == VOLEITH_SHIPSHAPE_ERR_HEADER);
 
-    /* Wrong stdlib line (crypto-v3 is not a defined version; crypto-v1 and
-     * crypto-v2 are the only accepted spellings). */
+    /* Wrong stdlib line (crypto-v4 is not a defined version; crypto-v1,
+     * crypto-v2, and crypto-v3 are the only accepted spellings). */
     check("hdr: wrong stdlib version",
           parse_str(".shipshape 1\n"
                     "field GF(2^8) irreducible 0x11B\n"
-                    "stdlib crypto-v3\n") == VOLEITH_SHIPSHAPE_ERR_HEADER);
+                    "stdlib crypto-v4\n") == VOLEITH_SHIPSHAPE_ERR_HEADER);
 
     /* Extra token on a header line. */
     check("hdr: extra token on version",
@@ -1539,9 +1539,9 @@ test_registry_table(void)
     size_t n = voleith_shipshape_registry_count;
     int ok;
 
-    /* crypto-v1 is thirteen entries, frozen and live in lockstep
-     * (the Shipshape spec 7.2; canonical order, same FQN / kind / bounds). */
-    ok = (n == 13) && (voleith_shipshape_registry_descriptor_count() == n);
+    /* 23 entries (13 crypto-v1/v2 + 10 crypto-v3 norm), frozen and live in
+     * lockstep (the Shipshape spec 7.2, 7.8; canonical order). */
+    ok = (n == 23) && (voleith_shipshape_registry_descriptor_count() == n);
     for (size_t i = 0; ok && i < n; i++) {
         const char *fqn = NULL;
         voleith_shipshape_reg_kind_t kind;
@@ -1759,11 +1759,11 @@ test_registry_errors(void)
           r == VOLEITH_SHIPSHAPE_ERR_REGISTRY);
 
     /* Goal 2 (ii): an unsupported declared stdlib version is rejected outright
-     * at the header, so the body is never reached.  (crypto-v3 is undefined;
-     * only crypto-v1 and crypto-v2 are accepted.) */
+     * at the header, so the body is never reached.  (crypto-v4 is undefined;
+     * only crypto-v1, crypto-v2, and crypto-v3 are accepted.) */
     r = parse_decls(".shipshape 1\n"
                     "field GF(2^8) irreducible 0x11B\n"
-                    "stdlib crypto-v3\n"
+                    "stdlib crypto-v4\n"
                     "WITNESS -> %x : byte\n"
                     "stdlib/crypto/aes/sbox(%x) -> %y\n",
                     &p);

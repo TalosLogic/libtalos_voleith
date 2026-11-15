@@ -161,7 +161,7 @@ test_roundtrip_commit_check(void)
 
     voleith_commitment_t com = {0};
     voleith_prover_t state = {0};
-    int ret = voleith_commit(&com, &state, &p, root_seed, iv, ellhat);
+    int ret = voleith_commit(&com, &state, &p, root_seed, iv, ellhat, NULL);
     check("roundtrip: commit succeeds", ret == 0);
 
     /* All-bits-set delta */
@@ -208,7 +208,7 @@ test_roundtrip_vole_equation(void)
 
     voleith_commitment_t com = {0};
     voleith_prover_t state = {0};
-    voleith_commit(&com, &state, &p, root_seed, iv, ellhat);
+    voleith_commit(&com, &state, &p, root_seed, iv, ellhat, NULL);
 
     /* Use alternating challenge bits */
     uint8_t delta[16];
@@ -273,7 +273,7 @@ test_roundtrip_two_challenges(void)
 
     voleith_commitment_t com = {0};
     voleith_prover_t state = {0};
-    voleith_commit(&com, &state, &p, root_seed, iv, ellhat);
+    voleith_commit(&com, &state, &p, root_seed, iv, ellhat, NULL);
 
     uint8_t delta_a[16] = {0};
     uint8_t delta_b[16];
@@ -333,7 +333,7 @@ test_tampered_opening(void)
 
     voleith_commitment_t com = {0};
     voleith_prover_t state = {0};
-    voleith_commit(&com, &state, &p, root_seed, iv, ellhat);
+    voleith_commit(&com, &state, &p, root_seed, iv, ellhat, NULL);
 
     size_t i_delta[16];
     uint8_t delta[16] = {0};
@@ -379,7 +379,7 @@ test_tampered_hcom(void)
 
     voleith_commitment_t com = {0};
     voleith_prover_t state = {0};
-    voleith_commit(&com, &state, &p, root_seed, iv, ellhat);
+    voleith_commit(&com, &state, &p, root_seed, iv, ellhat, NULL);
 
     size_t i_delta[16];
     uint8_t delta[16] = {0};
@@ -428,7 +428,7 @@ test_noninteractive_roundtrip(void)
 
     voleith_commitment_t com = {0};
     voleith_prover_t state = {0};
-    voleith_commit(&com, &state, &p, root_seed, iv, ellhat);
+    voleith_commit(&com, &state, &p, root_seed, iv, ellhat, NULL);
 
     /* Derive challenge from commitment (Fiat-Shamir) */
     uint8_t delta[16];

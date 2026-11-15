@@ -5,6 +5,56 @@ All notable changes to libtalos_voleith are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] [2026-11-14]
+
+FAEST norm S-box circuit family, the Shipshape crypto-v3 registry, and
+verifier-side threading. Measured speedups (prove ~2x, verify up to ~3.3x on a
+24-core i9) and norm proof-size savings (up to ~24%) are in
+`docs/BENCHMARKS.md`.
+
+### Added
+
+- Verifier-side VOLE-reconstruct threading: `voleith_gf8_verify_reconstruct_ex`
+  and `voleith_gf16_verify_reconstruct_ex` take `voleith_threading_opts_t` and run
+  the tau-rep reconstruct loop (BAVC leaf commitment + ConvertToVOLE) across a
+  worker pool, mirroring the prover's commit threading. Internal
+  `voleith_vole_reconstruct_ex` / `voleith_bavc_reconstruct_ex` added; the serial
+  entry points are unchanged thin wrappers. Partitions on the public tau index
+  only; reconstructed commitment blob is bit-identical to the serial path at any
+  thread count. New examples
+  `example_threading_verify_{aes,membership_vt}_gf8` measure it.
+- Verifier-side QuickSilver threading: `voleith_gf8_verify_v2_ex` /
+  `qs_verify_ex` thread the verify transpose, the segmented zk_hash accumulate,
+  and the per-rep key reconstruction across the pool, mirroring the prover QS.
+  Bit-identical accept/reject and reconstructed bytes at any worker count
+  (`test_gf8_qs_thread_determinism`); the non-`_ex` paths and the Fiat-Shamir
+  tail stay serial.
+- Norm (FAEST paired-round) S-box variants of the AES-128/256, Grøstl-256/512,
+  AES-CMAC, and KDF-CTR circuits, plus `_norm` twins of the node-hash vts
+  (`aes_dm`, `aes_cmac128`, `hirose`/`_fixed32`/`_fixed96`,
+  `grostl{256,512}_fixed`/`_fixed128`/`_fixed256`). Byte-identical output to the
+  frozen circuits, ~25% fewer VOLE slots (0.75 for Grøstl, ~0.8 for the keyed
+  primitives whose key schedule stays frozen), and lower verify-side constraint
+  count. Strictly additive: frozen circuits, fingerprints, and KATs unchanged.
+- `GF8_CONSTRAINT_PRODUCT3`: a QuickSilver three-way-product constraint
+  (`a·b·c = d`, relation degree 3 folded to opening count 2). The fourth operand
+  enters the circuit fingerprint only for this kind, so existing
+  ZERO/EQUAL/PRODUCT fingerprints are byte-identical.
+- Erasure chunk certificate node hash parameterized on a caller-supplied
+  `voleith_node_hash_vt` (norm hashes now selectable there); the erasure module
+  is promoted to the public API via `include/voleith_gf8.h`.
+- Shipshape `stdlib crypto-v3` registry (SHIPSHAPE_SPEC r5 §7.8): ten norm
+  standalone entries and six norm node-hash types, gated per-entry/per-type by
+  introduced version. The generic Tier 1 witness generator now fills
+  norm-gadget commitments, so norm circuits are witgen-able without a backend.
+
+### Changed
+
+- Verify path no longer scrubs its reconstruct / QuickSilver-verify scratch
+  (VOLE rows, verifier keys, `Q_T`): the verifier holds no witness, so that
+  memory is all public and the scrubs did no security work while costing 400+ms
+  fully threaded on the i9. All prover-side and secret-bearing scrubs unchanged.
+
 ## [1.11.0] [2026-08-04]
 
 V5 designated-opener signing and degree-d QuickSilver openings.
@@ -399,7 +449,7 @@ docs/DESIGN.md.
   node-hash-type selector and the node-hash-type registry
   (`parsers/shipshape_node_hash_types.{c,h}`), supporting `aes_dm`,
   `aes_cmac_128`, four Grostl variants, and Hirose as selector values.
-- Three hash-parametric secret-direction crypto extensions (phase 1):
+- Three hash-parametric secret-direction crypto extensions:
   `stdlib/crypto/merkle/path_secret[H]`,
   `stdlib/crypto/indexed_merkle/nonmember_secret[H]`, and
   `stdlib/crypto/ring_sig/v1[H]`; each inlines the existing C vt builders

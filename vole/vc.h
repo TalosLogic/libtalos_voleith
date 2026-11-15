@@ -27,6 +27,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "threadctx.h"
 
 /*
  * Upper bound on the per-vector depth k = (lambda - w_grind) / tau + 1.
@@ -195,9 +196,34 @@ typedef struct {
  * Returns 0 on success, -1 on error.
  * Caller must call voleith_bavc_free() to release allocated memory.
  */
+/*
+ * tctx carries the prover's worker pool for the per-vector leaf-commit loop.
+ * Pass NULL (or a tctx whose pool is NULL) to run the serial path.
+ */
 int voleith_bavc_commit(voleith_bavc_t *result,
                         const voleith_vc_params_t *params,
-                        const uint8_t *root_seed, const uint8_t iv[16]);
+                        const uint8_t *root_seed, const uint8_t iv[16],
+                        const voleith_threadctx_t *tctx);
+
+/*
+ * Preallocate the commit chain's per-proof scratch (job descriptors + the
+ * bavc / vole working buffers) on tctx, sized to params and ellhat_bytes, so
+ * voleith_bavc_commit / voleith_vole_commit allocate nothing per proof (T1.5).
+ * Call once at prover init, after the pool is set.  Returns 0, or -1 on OOM
+ * (leaving tctx safe to pass to voleith_threadctx_scratch_free).  A tctx that
+ * never gets this (e.g. a bare one in a vole-layer test) makes those commits
+ * fall back to local per-call allocation.
+ */
+int voleith_threadctx_scratch_init(voleith_threadctx_t *tctx,
+                                   const voleith_vc_params_t *params,
+                                   size_t ellhat_bytes);
+
+/*
+ * Securely zero the secret scratch (leaf seeds, u vectors) and free every
+ * preallocated buffer, resetting the scratch fields.  Does NOT touch the pool.
+ * NULL-safe and safe on a tctx whose scratch was never initialized.
+ */
+void voleith_threadctx_scratch_free(voleith_threadctx_t *tctx);
 
 /*
  * Free all memory in a BAVC commit result.
@@ -313,6 +339,19 @@ int voleith_bavc_reconstruct(voleith_bavc_reconstruct_t *rec,
                              const voleith_bavc_opening_t *opening,
                              const voleith_vc_params_t *params,
                              const size_t *i_delta, const uint8_t iv[16]);
+
+/*
+ * As voleith_bavc_reconstruct, with a threading context (T3.4a).  tctx carries
+ * the verifier's worker pool; the tau-vector leaf-commitment loop runs across
+ * it.  Pass NULL (or a tctx whose pool is NULL) for the serial path;
+ * voleith_bavc_reconstruct is exactly that case.  Output is bit-identical
+ * regardless of the thread count.
+ */
+int voleith_bavc_reconstruct_ex(voleith_bavc_reconstruct_t *rec,
+                                const voleith_bavc_opening_t *opening,
+                                const voleith_vc_params_t *params,
+                                const size_t *i_delta, const uint8_t iv[16],
+                                const voleith_threadctx_t *tctx);
 
 /*
  * Free all memory in a BAVC reconstruct result.

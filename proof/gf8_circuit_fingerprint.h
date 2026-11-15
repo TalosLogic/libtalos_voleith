@@ -26,17 +26,40 @@
  *       u8     const_val    (0 unless kind == CONST or XOR_CONST)
  *       u8[8]  matrix       (zero-filled unless kind == LINEAR_MAP)
  *   for each constraint in declaration order:
- *       u8     kind         (GF8_CONSTRAINT_ZERO=0, EQUAL=1, PRODUCT=2)
+ *       u8     kind         (GF8_CONSTRAINT_ZERO=0, EQUAL=1, PRODUCT=2,
+ *                            PRODUCT3=3)
  *       u32_le a
  *       u32_le b            (0 if the kind has no second operand)
- *       u32_le c            (0 unless kind == PRODUCT)
+ *       u32_le c            (0 unless kind == PRODUCT or PRODUCT3)
+ *       u32_le d            (ONLY when kind == PRODUCT3; absent otherwise)
+ *   AES norm round-pair appendix (ONLY when the circuit has >= 1 norm entry;
+ *   entirely absent otherwise, so norm-free circuits are byte-identical):
+ *       u32_le n_norm
+ *       for each norm entry in declaration order:
+ *           u32_le nst
+ *           u8     last_pair       (0 or 1)
+ *           u32_le wire[4*nst]     (state_in, norm, s_tilde, k0 wire ids)
+ *   Grostl norm round-pair appendix (ONLY when the circuit has >= 1 Grostl
+ *   norm entry; entirely absent otherwise, so circuits without them are
+ *   byte-identical, exactly like the AES norm appendix):
+ *       u32_le n_grostl_norm
+ *       for each Grostl norm entry in declaration order:
+ *           u32_le nst
+ *           u32_le cols
+ *           u8     is_q            (0 or 1)
+ *           u8     odd_round
+ *           u8     shift[8]        (ShiftBytes row shifts)
+ *           u32_le wire[3*nst]     (state_in, norm, s_tilde wire ids)
  *
  * GF8_WIRE_ID_INVALID (= UINT32_MAX) in unused operand positions is
  * normalized to 0 on the wire so the fingerprint is stable regardless of
  * which sentinel a producer uses internally.
  *
- * The "-v1" suffix in the domain tag pins this layout.  Any future change
- * to the canonical encoding MUST come with a new tag.
+ * The "-v1" suffix in the domain tag pins this layout.  The PRODUCT3 fourth
+ * operand and the AES/Grostl norm appendices are appended only for features
+ * absent from the original v1 circuits, so no v1 fingerprint changes and the
+ * tag still identifies the layout.  Any change that alters an existing encoding
+ * MUST come with a new tag.
  */
 
 #ifndef VOLEITH_GF8_CIRCUIT_FINGERPRINT_H

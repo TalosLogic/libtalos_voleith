@@ -13,12 +13,32 @@
  */
 
 #include "kdf_ctr_cmac_gf8_circuit.h"
+#include "kdf_ctr_cmac_norm_gf8_circuit.h"
 #include "gf8_circuit.h"
+#include "gf8_circuit_fingerprint.h"
 #include "aes.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
+
+/*
+ * Golden fingerprints of the norm S-box KDF circuits (new twins).  Capture once
+ * from a build of this commit: run the test, copy the bytes printed under the
+ * matching "... norm circuit fingerprint:" line, and replace the placeholder.
+ * Pinned circuits: AES-128 / 60-byte fixed input / 16-byte output, and AES-256
+ * / 60-byte fixed input / 32-byte output.
+ */
+#ifndef KDF_AES128_NORM_GF8_FP_GOLDEN_BYTES
+#define KDF_AES128_NORM_GF8_FP_GOLDEN_BYTES                                    \
+    0xec, 0x9d, 0x3f, 0xcf, 0x09, 0xc1, 0x52, 0xee, 0xb3, 0xf9, 0x2c, 0x7b,    \
+        0x99, 0x68, 0x66, 0xc8
+#endif
+#ifndef KDF_AES256_NORM_GF8_FP_GOLDEN_BYTES
+#define KDF_AES256_NORM_GF8_FP_GOLDEN_BYTES                                    \
+    0xc1, 0x80, 0xce, 0x7a, 0xf6, 0x66, 0x3e, 0x1e, 0x99, 0x41, 0x62, 0xd8,    \
+        0x29, 0xa6, 0xef, 0x27
+#endif
 
 static int test_count = 0;
 static int pass_count = 0;
@@ -428,6 +448,206 @@ test_software_reference(void)
     }
 }
 
+/* ================================================================
+ * Norm S-box KDF twin: same derived key material (NIST CAVS), smaller witness.
+ * ================================================================ */
+
+static int
+eval_kdf_norm_gf8_circuit(const uint8_t *key, size_t key_bytes,
+                          const uint8_t *fixed_input, size_t fixed_input_bytes,
+                          uint8_t *output, size_t output_bytes)
+{
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    gf8_wire_id key_wires[32];
+    for (size_t i = 0; i < key_bytes; i++)
+        key_wires[i] = voleith_gf8_add_witness(c);
+
+    gf8_wire_id *fi_wires = NULL;
+    if (fixed_input_bytes > 0) {
+        fi_wires = calloc(fixed_input_bytes, sizeof(gf8_wire_id));
+        for (size_t i = 0; i < fixed_input_bytes; i++)
+            fi_wires[i] = voleith_gf8_add_instance(c);
+    }
+
+    gf8_wire_id *out_wires = calloc(output_bytes, sizeof(gf8_wire_id));
+    int rc = kdf_ctr_cmac_norm_gf8_circuit(c, key_wires, key_bytes, fi_wires,
+                                           fixed_input_bytes, out_wires,
+                                           output_bytes);
+
+    size_t n_wires = voleith_gf8_circuit_wire_count(c);
+    uint8_t *vals = calloc(n_wires, 1);
+    size_t w_bytes = kdf_ctr_cmac_norm_gf8_witness_bytes(
+        key_bytes, output_bytes, fixed_input_bytes);
+    uint8_t *witness = calloc(w_bytes, 1);
+    kdf_ctr_cmac_norm_gf8_build_witness(key, key_bytes, fixed_input,
+                                        fixed_input_bytes, output_bytes,
+                                        witness, NULL);
+
+    int ev = voleith_gf8_circuit_eval(
+        c, witness, fixed_input_bytes > 0 ? fixed_input : NULL, vals);
+    for (size_t b = 0; b < output_bytes; b++)
+        output[b] = vals[out_wires[b]];
+
+    free(witness);
+    free(vals);
+    free(out_wires);
+    free(fi_wires);
+    voleith_gf8_circuit_free(c);
+    return (rc == 0 && ev == 1);
+}
+
+static void
+check_norm_fp(const char *name, const uint8_t *key, size_t key_bytes,
+              const uint8_t *fi, size_t fi_bytes, size_t output_bytes,
+              const uint8_t golden[16])
+{
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    gf8_wire_id key_wires[32];
+    for (size_t i = 0; i < key_bytes; i++)
+        key_wires[i] = voleith_gf8_add_witness(c);
+    gf8_wire_id *fi_wires = NULL;
+    if (fi_bytes > 0) {
+        fi_wires = calloc(fi_bytes, sizeof(gf8_wire_id));
+        for (size_t i = 0; i < fi_bytes; i++)
+            fi_wires[i] = voleith_gf8_add_instance(c);
+    }
+    gf8_wire_id *out_wires = calloc(output_bytes, sizeof(gf8_wire_id));
+    kdf_ctr_cmac_norm_gf8_circuit(c, key_wires, key_bytes, fi_wires, fi_bytes,
+                                  out_wires, output_bytes);
+
+    uint8_t fp[VOLEITH_GF8_CIRCUIT_FINGERPRINT_BYTES];
+    uint8_t zero[16] = {0};
+    if (voleith_gf8_circuit_fingerprint(c, fp) != 0) {
+        check(name, 0);
+    } else {
+        printf("  %s:", name);
+        for (int i = 0; i < 16; i++)
+            printf(" %02x", fp[i]);
+        printf("\n");
+        if (memcmp(golden, zero, 16) == 0)
+            printf("    NOTE: golden unset; pin the bytes above.\n");
+        else
+            check(name, memcmp(fp, golden, 16) == 0);
+    }
+    free(out_wires);
+    free(fi_wires);
+    voleith_gf8_circuit_free(c);
+}
+
+static void
+test_kdf_norm(void)
+{
+    /* Output parity vs published NIST CAVS KO (norm derives the identical
+     * keying material).  Reuse the vectors from test_cavs_*. */
+    {
+        static const uint8_t KI[16] = {0xc1, 0x0b, 0x15, 0x2e, 0x8c, 0x97,
+                                       0xb7, 0x7e, 0x18, 0x70, 0x4e, 0x0f,
+                                       0x0b, 0xd3, 0x83, 0x05};
+        static const uint8_t FI[60] = {
+            0x98, 0xcd, 0x4c, 0xbb, 0xbe, 0xbe, 0x15, 0xd1, 0x7d, 0xc8,
+            0x6e, 0x6d, 0xba, 0xd8, 0x00, 0xa2, 0xdc, 0xbd, 0x64, 0xf7,
+            0xc7, 0xad, 0x0e, 0x78, 0xe9, 0xcf, 0x94, 0xff, 0xdb, 0xa8,
+            0x9d, 0x03, 0xe9, 0x7e, 0xad, 0xf6, 0xc4, 0xf7, 0xb8, 0x06,
+            0xca, 0xf5, 0x2a, 0xa3, 0x8f, 0x09, 0xd0, 0xeb, 0x71, 0xd7,
+            0x1f, 0x49, 0x7b, 0xcc, 0x69, 0x06, 0xb4, 0x8d, 0x36, 0xc4};
+        static const uint8_t KO[16] = {0x26, 0xfa, 0xf6, 0x19, 0x08, 0xad,
+                                       0x9e, 0xe8, 0x81, 0xb8, 0x30, 0x5c,
+                                       0x22, 0x1d, 0xb5, 0x3f};
+        uint8_t r[16];
+        int ok = eval_kdf_norm_gf8_circuit(KI, 16, FI, 60, r, 16);
+        check("KDF norm AES-128 == CAVS KO (L=128, n=1)",
+              ok && memcmp(r, KO, 16) == 0);
+    }
+    {
+        static const uint8_t KI[32] = {
+            0xd0, 0xb1, 0xb3, 0xb7, 0x0b, 0x23, 0x93, 0xc4, 0x8c, 0xa0, 0x51,
+            0x59, 0xe7, 0xe2, 0x8c, 0xbe, 0xad, 0xea, 0x93, 0xf2, 0x8a, 0x7c,
+            0xda, 0xe9, 0x64, 0xe5, 0x13, 0x60, 0x70, 0xc4, 0x5d, 0x5c};
+        static const uint8_t FI[60] = {
+            0xdd, 0x2f, 0x15, 0x1a, 0x3f, 0x17, 0x34, 0x92, 0xa6, 0xfb,
+            0xbb, 0x60, 0x21, 0x89, 0xd5, 0x1d, 0xdf, 0x8e, 0xf7, 0x9f,
+            0xc8, 0xe9, 0x6b, 0x8f, 0xcb, 0xe6, 0xda, 0xbe, 0x73, 0xa3,
+            0x5b, 0x48, 0x10, 0x4f, 0x9d, 0xff, 0x2d, 0x63, 0xd4, 0x87,
+            0x86, 0xd2, 0xb3, 0xaf, 0x17, 0x70, 0x91, 0xd6, 0x46, 0xa9,
+            0xef, 0xae, 0x00, 0x5b, 0xdf, 0xac, 0xb6, 0x1a, 0x12, 0x14};
+        static const uint8_t KO[16] = {0x8c, 0x44, 0x9f, 0xb4, 0x74, 0xd1,
+                                       0xc1, 0xd4, 0xd2, 0xa3, 0x38, 0x27,
+                                       0x10, 0x3b, 0x65, 0x6a};
+        uint8_t r[16];
+        int ok = eval_kdf_norm_gf8_circuit(KI, 32, FI, 60, r, 16);
+        check("KDF norm AES-256 == CAVS KO (L=128, n=1)",
+              ok && memcmp(r, KO, 16) == 0);
+    }
+
+    /* Parity vs software reference and the frozen circuit for a multi-block
+     * output (n=2) and an empty fixed input. */
+    {
+        static const uint8_t key[16] = {0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae,
+                                        0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88,
+                                        0x09, 0xcf, 0x4f, 0x3c};
+        static const uint8_t fi[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+        uint8_t ref[32], frozen[32], norm[32];
+        kdf_ref(key, 128, fi, 8, ref, 32);
+        eval_kdf_gf8_circuit(key, 16, fi, 8, frozen, 32);
+        eval_kdf_norm_gf8_circuit(key, 16, fi, 8, norm, 32);
+        check("KDF norm AES-128 8B fi 32B out == software ref",
+              memcmp(norm, ref, 32) == 0);
+        check("KDF norm AES-128 8B fi 32B out == frozen circuit",
+              memcmp(norm, frozen, 32) == 0);
+    }
+
+    /* Witness sizes: exact formula, matches qs_ell, smaller than frozen, zero
+     * mul gates, qs_degree 2. */
+    {
+        int fail = 0;
+        struct {
+            size_t kb, fib, ob;
+        } cases[] = {{16, 0, 16}, {16, 0, 32}, {16, 28, 16}, {32, 60, 32}};
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            size_t kb = cases[i].kb, fib = cases[i].fib, ob = cases[i].ob;
+            size_t wn = kdf_ctr_cmac_norm_gf8_witness_bytes(kb, ob, fib);
+            size_t wf = kdf_ctr_cmac_gf8_witness_bytes(kb, ob, fib);
+
+            voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+            gf8_wire_id kw[32];
+            for (size_t j = 0; j < kb; j++)
+                kw[j] = voleith_gf8_add_witness(c);
+            gf8_wire_id *fw = fib ? calloc(fib, sizeof(gf8_wire_id)) : NULL;
+            for (size_t j = 0; j < fib; j++)
+                fw[j] = voleith_gf8_add_instance(c);
+            gf8_wire_id *ow = calloc(ob, sizeof(gf8_wire_id));
+            kdf_ctr_cmac_norm_gf8_circuit(c, kw, kb, fw, fib, ow, ob);
+
+            if (wn != voleith_gf8_qs_ell(c) || wn >= wf ||
+                voleith_gf8_circuit_witness_count(c) != wn ||
+                voleith_gf8_circuit_mul_count(c) != 0 ||
+                voleith_gf8_circuit_qs_degree(c) != 2)
+                fail = 1;
+            free(ow);
+            free(fw);
+            voleith_gf8_circuit_free(c);
+        }
+        check("KDF norm: witness == qs_ell, < frozen, 0 mul, deg 2", !fail);
+    }
+
+    static const uint8_t K128[16] = {0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae,
+                                     0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88,
+                                     0x09, 0xcf, 0x4f, 0x3c};
+    static const uint8_t K256[32] = {
+        0x60, 0x3d, 0xeb, 0x10, 0x15, 0xca, 0x71, 0xbe, 0x2b, 0x73, 0xae,
+        0xf0, 0x85, 0x7d, 0x77, 0x81, 0x1f, 0x35, 0x2c, 0x07, 0x3b, 0x61,
+        0x08, 0xd7, 0x2d, 0x98, 0x10, 0xa3, 0x09, 0x14, 0xdf, 0xf4};
+    uint8_t FI60[60];
+    for (int i = 0; i < 60; i++)
+        FI60[i] = (uint8_t)i;
+    static const uint8_t G128[16] = {KDF_AES128_NORM_GF8_FP_GOLDEN_BYTES};
+    static const uint8_t G256[16] = {KDF_AES256_NORM_GF8_FP_GOLDEN_BYTES};
+    check_norm_fp("KDF AES-128 norm circuit fingerprint", K128, 16, FI60, 60,
+                  16, G128);
+    check_norm_fp("KDF AES-256 norm circuit fingerprint", K256, 32, FI60, 60,
+                  32, G256);
+}
+
 int
 main(void)
 {
@@ -445,6 +665,9 @@ main(void)
 
     printf("\n[CIR-2 stack-VLA bound signaling]\n");
     test_cir2_stack_bound_signaled();
+
+    printf("\n[KDF norm S-box twin]\n");
+    test_kdf_norm();
 
     printf("\n  %d / %d passed\n", pass_count, test_count);
     return (pass_count == test_count) ? 0 : 1;

@@ -6,6 +6,8 @@
  */
 
 #include "gf8_circuit.h"
+#include "gf8_grostl_norm_const.h"
+#include "gf8_norm_const.h"
 #include "../core/field.h"
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +46,29 @@ struct voleith_gf8_circuit {
     size_t n_syndrome_bits;
     size_t cap_syndrome_bits;
     unsigned int max_syndrome_degree; /* max idx_bits over entries; 0 if none */
+
+    /* AES norm round-pair constraints (Option 3: separate table, fixed-degree
+     * path stays byte-identical).  norm_wires is the shared pool of wire ids
+     * each entry indexes into (4*nst ids per entry: state_in, nib, s_tilde,
+     * k0).  Norm pairs ride the existing d=2 opening, so there is no
+     * max-degree field: qs_degree is unaffected. */
+    gf8_norm_entry_t *norm_constraints;
+    size_t n_norm;
+    size_t cap_norm;
+    gf8_wire_id *norm_wires;
+    size_t n_norm_wires;
+    size_t cap_norm_wires;
+
+    /* Grostl norm round-pair constraints (sibling table of the AES norm one;
+     * Grostl's linear layer differs, so the AES norm path stays byte-identical).
+     * grostl_norm_wires is the shared pool each entry indexes into (3*nst ids
+     * per entry: state_in, norm, s_tilde; no secret round key). */
+    gf8_grostl_norm_entry_t *grostl_norm_constraints;
+    size_t n_grostl_norm;
+    size_t cap_grostl_norm;
+    gf8_wire_id *grostl_norm_wires;
+    size_t n_grostl_norm_wires;
+    size_t cap_grostl_norm_wires;
 
     size_t n_witness;
     size_t n_instance;
@@ -382,6 +407,10 @@ voleith_gf8_circuit_free(voleith_gf8_circuit_t *c)
         free((void *)c->syndrome_constraints[i].M);
     free(c->syndrome_constraints);
     free(c->syndrome_bits);
+    free(c->norm_constraints);
+    free(c->norm_wires);
+    free(c->grostl_norm_constraints);
+    free(c->grostl_norm_wires);
     free(c);
 }
 
@@ -498,6 +527,50 @@ voleith_gf8_add_square(voleith_gf8_circuit_t *c, gf8_wire_id a)
         .matrix = {0},
     };
     return append_wire(c, e);
+}
+
+/*
+ * FAEST GF(2⁴) norm-nibble basis as GF(2⁸) bytes (AES field).  The four fixed
+ * subfield basis elements that the committed 4 norm bits are coordinates in:
+ * c = b₀·basis[0] + b₁·basis[1] + b₂·basis[2] + b₃·basis[3].  Derived from
+ * faest-ref's bfSSS_beta_squares / bfSSS_beta_cubes (oracle only) via
+ * tools/faest-ref-diagnostics/diag_norm_basis.c, agrees across λ=128/192/256,
+ * and verified to be the fixed field of Frobenius⁴ (x¹⁶ = x) in which the
+ * subfield norm a⁻¹⁷ always lies.
+ */
+static const uint8_t gf8_norm_nibble_basis[4] = {0x01, 0x50, 0xb0, 0x0c};
+
+gf8_wire_id
+voleith_gf8_add_nibble(voleith_gf8_circuit_t *c, gf8_wire_id packed,
+                       unsigned int which)
+{
+    /*
+     * Select the low (which == 0) or high (which == 1) 4-bit nibble as a byte
+     * with the top 4 bits zeroed.  out bit i = packed bit (i + shift) for
+     * i < 4, else 0.  Pure GF(2)-linear mask/shift, so free.
+     */
+    unsigned int shift = (which ? 4u : 0u);
+    uint8_t M[8] = {0};
+    for (unsigned int i = 0; i < 4; i++)
+        M[i] = (uint8_t)(1u << (i + shift));
+    return voleith_gf8_add_linear_map(c, packed, M);
+}
+
+gf8_wire_id
+voleith_gf8_add_norm_embed(voleith_gf8_circuit_t *c, gf8_wire_id nib)
+{
+    /*
+     * Embed the low nibble of `nib` into its GF(2⁸) byte via the basis map
+     * c = Σₖ nibₖ · basis[k].  Column k of the 8×8 GF(2) matrix is basis[k]
+     * (k < 4; high nibble bits unused), so out[i] bit k = bit i of basis[k].
+     * Pure GF(2)-linear map, so free.
+     */
+    uint8_t M[8] = {0};
+    for (unsigned int i = 0; i < 8; i++)
+        for (unsigned int k = 0; k < 4; k++)
+            if ((gf8_norm_nibble_basis[k] >> i) & 1u)
+                M[i] |= (uint8_t)(1u << k);
+    return voleith_gf8_add_linear_map(c, nib, M);
 }
 
 gf8_wire_id
@@ -645,6 +718,21 @@ voleith_gf8_assert_product(voleith_gf8_circuit_t *c, gf8_wire_id a,
 }
 
 void
+voleith_gf8_assert_product3(voleith_gf8_circuit_t *c, gf8_wire_id a,
+                            gf8_wire_id b, gf8_wire_id cc,
+                            gf8_wire_id d_expected)
+{
+    gf8_constraint_entry_t e = {
+        .kind = GF8_CONSTRAINT_PRODUCT3,
+        .a = a,
+        .b = b,
+        .c = cc,
+        .d = d_expected,
+    };
+    append_constraint(c, e);
+}
+
+void
 voleith_gf8_assert_lt(voleith_gf8_circuit_t *c, const gf8_wire_id *a_bits,
                       const gf8_wire_id *b_bits, unsigned int width)
 {
@@ -713,6 +801,164 @@ const gf8_wire_id *
 voleith_gf8_circuit_lt_bits(const voleith_gf8_circuit_t *c)
 {
     return c->lt_bits;
+}
+
+void
+voleith_gf8_assert_aes_norm_roundpair(voleith_gf8_circuit_t *c,
+                                      const gf8_wire_id *state_in,
+                                      const gf8_wire_id *norm,
+                                      const gf8_wire_id *s_tilde,
+                                      const gf8_wire_id *k0, unsigned int nst,
+                                      int last_pair)
+{
+    if (!c || !state_in || !norm || !s_tilde || !k0 || nst == 0) {
+        if (c)
+            c->alloc_ok = 0;
+        return;
+    }
+
+    /* Grow the wire pool by 4*nst ids (state_in, nib, s_tilde, k0). */
+    size_t need = c->n_norm_wires + (size_t)4 * nst;
+    if (need > c->cap_norm_wires) {
+        size_t new_cap = c->cap_norm_wires ? c->cap_norm_wires : 64;
+        while (new_cap < need)
+            new_cap *= 2;
+        gf8_wire_id *p = realloc(c->norm_wires, new_cap * sizeof(gf8_wire_id));
+        if (!p) {
+            c->alloc_ok = 0;
+            return;
+        }
+        c->norm_wires = p;
+        c->cap_norm_wires = new_cap;
+    }
+
+    /* Grow the norm entry table. */
+    if (c->n_norm == c->cap_norm) {
+        size_t new_cap = c->cap_norm ? c->cap_norm * 2 : 8;
+        gf8_norm_entry_t *p =
+            realloc(c->norm_constraints, new_cap * sizeof(gf8_norm_entry_t));
+        if (!p) {
+            c->alloc_ok = 0;
+            return;
+        }
+        c->norm_constraints = p;
+        c->cap_norm = new_cap;
+    }
+
+    size_t off = c->n_norm_wires;
+    for (unsigned int i = 0; i < nst; i++)
+        c->norm_wires[off + 0 * nst + i] = state_in[i];
+    for (unsigned int i = 0; i < nst; i++)
+        c->norm_wires[off + 1 * nst + i] = norm[i];
+    for (unsigned int i = 0; i < nst; i++)
+        c->norm_wires[off + 2 * nst + i] = s_tilde[i];
+    for (unsigned int i = 0; i < nst; i++)
+        c->norm_wires[off + 3 * nst + i] = k0[i];
+    c->n_norm_wires += (size_t)4 * nst;
+
+    c->norm_constraints[c->n_norm].wires_off = off;
+    c->norm_constraints[c->n_norm].nst = nst;
+    c->norm_constraints[c->n_norm].last_pair = last_pair ? 1 : 0;
+    c->n_norm++;
+}
+
+size_t
+voleith_gf8_circuit_norm_count(const voleith_gf8_circuit_t *c)
+{
+    return c->n_norm;
+}
+
+const gf8_norm_entry_t *
+voleith_gf8_circuit_norm_constraints(const voleith_gf8_circuit_t *c)
+{
+    return c->norm_constraints;
+}
+
+const gf8_wire_id *
+voleith_gf8_circuit_norm_wires(const voleith_gf8_circuit_t *c)
+{
+    return c->norm_wires;
+}
+
+void
+voleith_gf8_assert_grostl_norm_roundpair(
+    voleith_gf8_circuit_t *c, const gf8_wire_id *state_in,
+    const gf8_wire_id *norm, const gf8_wire_id *s_tilde, unsigned int nst,
+    unsigned int cols, const uint8_t shift[8], int is_q, unsigned int odd_round)
+{
+    if (!c || !state_in || !norm || !s_tilde || !shift || nst == 0 ||
+        cols == 0 || (unsigned int)(GROSTL_NORM_ROWS * cols) != nst) {
+        if (c)
+            c->alloc_ok = 0;
+        return;
+    }
+
+    /* Grow the wire pool by 3*nst ids (state_in, norm, s_tilde). */
+    size_t need = c->n_grostl_norm_wires + (size_t)3 * nst;
+    if (need > c->cap_grostl_norm_wires) {
+        size_t new_cap =
+            c->cap_grostl_norm_wires ? c->cap_grostl_norm_wires : 256;
+        while (new_cap < need)
+            new_cap *= 2;
+        gf8_wire_id *p =
+            realloc(c->grostl_norm_wires, new_cap * sizeof(gf8_wire_id));
+        if (!p) {
+            c->alloc_ok = 0;
+            return;
+        }
+        c->grostl_norm_wires = p;
+        c->cap_grostl_norm_wires = new_cap;
+    }
+
+    /* Grow the Grostl norm entry table. */
+    if (c->n_grostl_norm == c->cap_grostl_norm) {
+        size_t new_cap = c->cap_grostl_norm ? c->cap_grostl_norm * 2 : 8;
+        gf8_grostl_norm_entry_t *p =
+            realloc(c->grostl_norm_constraints, new_cap * sizeof(*p));
+        if (!p) {
+            c->alloc_ok = 0;
+            return;
+        }
+        c->grostl_norm_constraints = p;
+        c->cap_grostl_norm = new_cap;
+    }
+
+    size_t off = c->n_grostl_norm_wires;
+    for (unsigned int i = 0; i < nst; i++)
+        c->grostl_norm_wires[off + 0 * nst + i] = state_in[i];
+    for (unsigned int i = 0; i < nst; i++)
+        c->grostl_norm_wires[off + 1 * nst + i] = norm[i];
+    for (unsigned int i = 0; i < nst; i++)
+        c->grostl_norm_wires[off + 2 * nst + i] = s_tilde[i];
+    c->n_grostl_norm_wires += (size_t)3 * nst;
+
+    gf8_grostl_norm_entry_t *e = &c->grostl_norm_constraints[c->n_grostl_norm];
+    e->wires_off = off;
+    e->nst = nst;
+    e->cols = cols;
+    for (int r = 0; r < 8; r++)
+        e->shift[r] = shift[r];
+    e->odd_round = (uint8_t)odd_round;
+    e->is_q = is_q ? 1u : 0u;
+    c->n_grostl_norm++;
+}
+
+size_t
+voleith_gf8_circuit_grostl_norm_count(const voleith_gf8_circuit_t *c)
+{
+    return c->n_grostl_norm;
+}
+
+const gf8_grostl_norm_entry_t *
+voleith_gf8_circuit_grostl_norm_constraints(const voleith_gf8_circuit_t *c)
+{
+    return c->grostl_norm_constraints;
+}
+
+const gf8_wire_id *
+voleith_gf8_circuit_grostl_norm_wires(const voleith_gf8_circuit_t *c)
+{
+    return c->grostl_norm_wires;
 }
 
 void
@@ -939,6 +1185,10 @@ voleith_gf8_circuit_validate(const voleith_gf8_circuit_t *c)
             if (con->a >= n || con->b >= n || con->c >= n)
                 return -1;
             break;
+        case GF8_CONSTRAINT_PRODUCT3:
+            if (con->a >= n || con->b >= n || con->c >= n || con->d >= n)
+                return -1;
+            break;
         }
     }
     for (size_t i = 0; i < c->n_lt; i++) {
@@ -963,6 +1213,28 @@ voleith_gf8_circuit_validate(const voleith_gf8_circuit_t *c)
             return -1;
         for (size_t j = 0; j < cnt; j++)
             if (c->syndrome_bits[sy->idx_off + j] >= n)
+                return -1;
+    }
+    for (size_t i = 0; i < c->n_norm; i++) {
+        const gf8_norm_entry_t *nm = &c->norm_constraints[i];
+        size_t cnt = (size_t)4 * nm->nst;
+        if (nm->nst == 0 || nm->nst > 16u ||
+            nm->wires_off + cnt > c->n_norm_wires)
+            return -1;
+        for (size_t j = 0; j < cnt; j++)
+            if (c->norm_wires[nm->wires_off + j] >= n)
+                return -1;
+    }
+    for (size_t i = 0; i < c->n_grostl_norm; i++) {
+        const gf8_grostl_norm_entry_t *nm = &c->grostl_norm_constraints[i];
+        size_t cnt = (size_t)3 * nm->nst;
+        if (nm->nst == 0 || nm->nst > GROSTL_NORM_MAX_STATE || nm->cols == 0 ||
+            nm->cols > GROSTL_NORM_MAX_COLS ||
+            (size_t)(GROSTL_NORM_ROWS * nm->cols) != nm->nst ||
+            nm->wires_off + cnt > c->n_grostl_norm_wires)
+            return -1;
+        for (size_t j = 0; j < cnt; j++)
+            if (c->grostl_norm_wires[nm->wires_off + j] >= n)
                 return -1;
     }
     return 0;
@@ -1060,6 +1332,14 @@ voleith_gf8_circuit_check_constraints(const voleith_gf8_circuit_t *c,
                 return 0;
             break;
         }
+        case GF8_CONSTRAINT_PRODUCT3: {
+            uint8_t prod = voleith_gf8_mul(
+                voleith_gf8_mul(wire_vals[con->a], wire_vals[con->b]),
+                wire_vals[con->c]);
+            if (prod != wire_vals[con->d])
+                return 0;
+            break;
+        }
         }
     }
     /* Less-than: value(A) < value(B), MSB-first bit wires (each 0x00/0x01). */
@@ -1112,6 +1392,173 @@ voleith_gf8_circuit_check_constraints(const voleith_gf8_circuit_t *c,
                 }
             }
             if ((wire_vals[s_wires[j]] & 1u) != acc)
+                return 0;
+        }
+    }
+    /*
+     * AES norm round-pairs: cleartext check of the two folded relations.  Mirror
+     * of the prover/verifier accumulate at byte level (all Delta-coefficients
+     * collapse to the plain value).  For each state byte: reconstruct the even
+     * round S-box output st_b (b=0,1) via the conjugate-domain affine, forward
+     * ShiftRows/MixColumns/AddRoundKey, recover the odd round S-box input s from
+     * the committed reset state, and require s_sq*st0 == s and s*st1 == st0.
+     */
+    for (size_t e = 0; e < c->n_norm; e++) {
+        const gf8_norm_entry_t *nm = &c->norm_constraints[e];
+        unsigned int nst = nm->nst;
+        if (nst == 0 || nst > 16u)
+            return 0;
+        const gf8_wire_id *state_in = c->norm_wires + nm->wires_off + 0 * nst;
+        const gf8_wire_id *norm_c = c->norm_wires + nm->wires_off + 1 * nst;
+        const gf8_wire_id *s_tilde = c->norm_wires + nm->wires_off + 2 * nst;
+        const gf8_wire_id *k0 = c->norm_wires + nm->wires_off + 3 * nst;
+
+        uint8_t Csq[9];
+        for (int k = 0; k < 9; k++)
+            Csq[k] = apply_linear_map(GF8_NORM_SQ, GF8_NORM_AFFINE_C[k]);
+
+        uint8_t stpre[2][16], sr[2][16], st[2][16];
+        for (unsigned int i = 0; i < nst; i++) {
+            uint8_t conj[8], y[4];
+            conj[0] = wire_vals[state_in[i]];
+            for (int j = 1; j < 8; j++)
+                conj[j] = apply_linear_map(GF8_NORM_SQ, conj[j - 1]);
+            y[0] = wire_vals[norm_c[i]];
+            for (int k = 1; k < 4; k++)
+                y[k] = apply_linear_map(GF8_NORM_SQ, y[k - 1]);
+            for (int b = 0; b < 2; b++) {
+                unsigned int t = (unsigned int)b;
+                const uint8_t *Cb = b ? Csq : GF8_NORM_AFFINE_C;
+                uint8_t acc = 0;
+                for (unsigned int cidx = 0; cidx < 8; cidx++) {
+                    unsigned int comp = (cidx + t) % 8u;
+                    uint8_t sd =
+                        voleith_gf8_mul(conj[(comp + 4u) % 8u], y[comp % 4u]);
+                    acc ^= voleith_gf8_mul(Cb[cidx], sd);
+                }
+                stpre[b][i] = (uint8_t)(acc ^ Cb[8]);
+            }
+        }
+        for (int b = 0; b < 2; b++)
+            for (unsigned int i = 0; i < nst; i++)
+                sr[b][i] = stpre[b][GF8_NORM_SHIFTROWS[i]];
+        for (int b = 0; b < 2; b++) {
+            uint8_t v2 = b ? 0x04 : 0x02, v3 = b ? 0x05 : 0x03;
+            for (unsigned int col = 0; col * 4u < nst; col++) {
+                unsigned int i0 = 4 * col, i1 = i0 + 1, i2 = i0 + 2,
+                             i3 = i0 + 3;
+                uint8_t a0 = sr[b][i0], a1 = sr[b][i1], a2 = sr[b][i2],
+                        a3 = sr[b][i3];
+                st[b][i0] = (uint8_t)(voleith_gf8_mul(v2, a0) ^
+                                      voleith_gf8_mul(v3, a1) ^ a2 ^ a3);
+                st[b][i1] = (uint8_t)(a0 ^ voleith_gf8_mul(v2, a1) ^
+                                      voleith_gf8_mul(v3, a2) ^ a3);
+                st[b][i2] = (uint8_t)(a0 ^ a1 ^ voleith_gf8_mul(v2, a2) ^
+                                      voleith_gf8_mul(v3, a3));
+                st[b][i3] = (uint8_t)(voleith_gf8_mul(v3, a0) ^ a1 ^ a2 ^
+                                      voleith_gf8_mul(v2, a3));
+            }
+        }
+        for (unsigned int i = 0; i < nst; i++) {
+            uint8_t kk = wire_vals[k0[i]];
+            st[0][i] ^= kk;
+            st[1][i] ^= voleith_gf8_mul(kk, kk);
+        }
+        for (unsigned int i = 0; i < nst; i++) {
+            gf8_wire_id sw = s_tilde[GF8_NORM_INV_SHIFTROWS[i]];
+            uint8_t sv = apply_linear_map(GF8_NORM_INV_AFFINE,
+                                          (uint8_t)(wire_vals[sw] ^ 0x63));
+            uint8_t ssq = voleith_gf8_mul(sv, sv);
+            if (voleith_gf8_mul(ssq, st[0][i]) != sv)
+                return 0;
+            if (voleith_gf8_mul(sv, st[1][i]) != st[0][i])
+                return 0;
+        }
+    }
+    /*
+     * Grostl norm round-pairs: cleartext check (byte-level mirror of the
+     * prover/verifier accumulate, same two folded relations as the AES norm
+     * path).  Differs only in the linear layer: ShiftBytes + MixBytes and a
+     * public odd-round AddRoundConstant in place of the secret round key.
+     */
+    for (size_t e = 0; e < c->n_grostl_norm; e++) {
+        const gf8_grostl_norm_entry_t *nm = &c->grostl_norm_constraints[e];
+        unsigned int nst = nm->nst, cols = nm->cols;
+        if (nst == 0 || nst > GROSTL_NORM_MAX_STATE)
+            return 0;
+        const gf8_wire_id *state_in =
+            c->grostl_norm_wires + nm->wires_off + 0 * nst;
+        const gf8_wire_id *norm_c =
+            c->grostl_norm_wires + nm->wires_off + 1 * nst;
+        const gf8_wire_id *s_tilde =
+            c->grostl_norm_wires + nm->wires_off + 2 * nst;
+
+        uint8_t fwd[GROSTL_NORM_MAX_STATE], inv[GROSTL_NORM_MAX_STATE];
+        uint8_t rc[GROSTL_NORM_MAX_STATE];
+        grostl_norm_build_shift(cols, nm->shift, fwd, inv);
+        grostl_norm_round_const(nm->is_q, cols, nm->odd_round, rc);
+
+        uint8_t Csq[9];
+        for (int k = 0; k < 9; k++)
+            Csq[k] = apply_linear_map(GF8_NORM_SQ, GF8_NORM_AFFINE_C[k]);
+
+        uint8_t stpre[2][GROSTL_NORM_MAX_STATE], sr[2][GROSTL_NORM_MAX_STATE];
+        uint8_t st[2][GROSTL_NORM_MAX_STATE];
+        for (unsigned int i = 0; i < nst; i++) {
+            uint8_t conj[8], y[4];
+            conj[0] = wire_vals[state_in[i]];
+            for (int j = 1; j < 8; j++)
+                conj[j] = apply_linear_map(GF8_NORM_SQ, conj[j - 1]);
+            y[0] = wire_vals[norm_c[i]];
+            for (int k = 1; k < 4; k++)
+                y[k] = apply_linear_map(GF8_NORM_SQ, y[k - 1]);
+            for (int b = 0; b < 2; b++) {
+                unsigned int t = (unsigned int)b;
+                const uint8_t *Cb = b ? Csq : GF8_NORM_AFFINE_C;
+                uint8_t acc = 0;
+                for (unsigned int cidx = 0; cidx < 8; cidx++) {
+                    unsigned int comp = (cidx + t) % 8u;
+                    uint8_t sd =
+                        voleith_gf8_mul(conj[(comp + 4u) % 8u], y[comp % 4u]);
+                    acc ^= voleith_gf8_mul(Cb[cidx], sd);
+                }
+                stpre[b][i] = (uint8_t)(acc ^ Cb[8]);
+            }
+        }
+        /* ShiftBytes. */
+        for (int b = 0; b < 2; b++)
+            for (unsigned int i = 0; i < nst; i++)
+                sr[b][i] = stpre[b][fwd[i]];
+        /* MixBytes: per 8-byte column, out row r = sum_j MIX[r][j]*in[j];
+         * b=1 squares each multiplier. */
+        for (int b = 0; b < 2; b++) {
+            for (unsigned int col = 0; col < cols; col++) {
+                for (unsigned int r = 0; r < GROSTL_NORM_ROWS; r++) {
+                    uint8_t acc = 0;
+                    for (unsigned int j = 0; j < GROSTL_NORM_ROWS; j++) {
+                        uint8_t mul = GROSTL_NORM_MIX[r][j];
+                        if (b)
+                            mul = apply_linear_map(GF8_NORM_SQ, mul);
+                        acc ^= voleith_gf8_mul(
+                            mul, sr[b][j + GROSTL_NORM_ROWS * col]);
+                    }
+                    st[b][r + GROSTL_NORM_ROWS * col] = acc;
+                }
+            }
+        }
+        /* Odd-round public AddRoundConstant (b=1 squares it). */
+        for (unsigned int i = 0; i < nst; i++) {
+            st[0][i] ^= rc[i];
+            st[1][i] ^= apply_linear_map(GF8_NORM_SQ, rc[i]);
+        }
+        for (unsigned int i = 0; i < nst; i++) {
+            gf8_wire_id sw = s_tilde[inv[i]];
+            uint8_t sv = apply_linear_map(GF8_NORM_INV_AFFINE,
+                                          (uint8_t)(wire_vals[sw] ^ 0x63));
+            uint8_t ssq = voleith_gf8_mul(sv, sv);
+            if (voleith_gf8_mul(ssq, st[0][i]) != sv)
+                return 0;
+            if (voleith_gf8_mul(sv, st[1][i]) != st[0][i])
                 return 0;
         }
     }

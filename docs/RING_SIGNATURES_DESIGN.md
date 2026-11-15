@@ -373,7 +373,6 @@ To open, the opener runs its companion code-based KEM decapsulation on `s`, reco
 
 ### Security separation: what the opener cannot do
 
-- **No forgery.** The opener key is a tracing key, not a signing key. It grants no ability to produce a signature for any member.
 - **No framing.** Unique decoding forbids a second valid weight-`t` preimage of `s`, and constructing two colliding weight-`t` errors would be a low-weight codeword of the opener code, i.e. key recovery. So the identity a tag traces to is the one the signer committed, and the opener cannot make a signature open to a member who did not make it.
 - **No spillover.** Confidentiality of non-traced signatures and unforgeability of all signatures do not depend on the opener key at all; they hold even against an opener-key holder.
 - **Honest-error assumption.** A proof certifies `wt(e) = t` and `s = M * e^T`, but it cannot certify that a signer sampled `e` honestly. The only thing a malicious signer buys by choosing `e` adversarially is self-denial of tracing (deliberately picking a decode-failure syndrome so its own signature is unopenable); it cannot frame anyone or touch confidentiality. This residual is bounded by the code's decoding-failure rate (`<= 2^-lambda`) and by key-recovery hardness (the failure-inducing errors are functions of the secret opener key), so an opener-key-blind signer cannot construct one except at negligible rate. The library takes this honest-error posture deliberately rather than pay the extra gates to derive `e` from a bound seed in circuit.

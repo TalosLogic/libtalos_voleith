@@ -57,7 +57,8 @@ emit_header(void)
            "\\\n");
     printf(" *       > parsers/shipshape_registry_table.c\n");
     printf(" *\n");
-    printf(" * crypto-v1 (the Shipshape spec §7.2).\n");
+    printf(" * crypto-v1/v2/v3 (the Shipshape spec §7.2, §7.7, §7.8); each\n");
+    printf(" * entry's introduced_version is the minimum stdlib version.\n");
     printf(" */\n\n");
     printf("#include \"shipshape_registry.h\"\n\n");
     /* This is generated output, not hand-written source: keep clang-format
@@ -171,8 +172,8 @@ main(void)
         }
         size_t nbod = voleith_shipshape_registry_grid(i, NULL, 0);
         printf("    {\"%s\", %s,\n", fqn, kind_token(kind));
-        printf("     \"%s\", %uu, %uu, bodies_%zu, %zu},\n", sig, pmin, pmax, i,
-               nbod);
+        printf("     \"%s\", %uu, %uu, bodies_%zu, %zu, %u},\n", sig, pmin,
+               pmax, i, nbod, voleith_shipshape_registry_introduced_version(i));
     }
     printf("};\n\n");
 
@@ -231,7 +232,8 @@ main(void)
         }
         printf("},\n");
         printf("     %u,\n", out_is_node_vec);
-        printf("     hash_bodies_%zu, %zu},\n", i, nbod);
+        printf("     hash_bodies_%zu, %zu, %u},\n", i, nbod,
+               voleith_shipshape_reg_hash_introduced_version(i));
     }
     printf("};\n\n");
 

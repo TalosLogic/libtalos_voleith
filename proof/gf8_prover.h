@@ -29,6 +29,10 @@
 #include <stddef.h>
 #include "gf8_circuit.h"
 
+/* Opaque ichor worker pool (see voleith_gf8_qs_prove_ex); only ever used by
+ * pointer here, so a forward declaration suffices. */
+struct ichor_pool;
+
 /*
  * Compute ellhat_bytes = ell + ceil((3*lambda + 16) / 8).
  *
@@ -64,6 +68,21 @@ int voleith_gf8_qs_prove(const voleith_gf8_circuit_t *circuit,
                          unsigned int lambda, const uint8_t *u,
                          const uint8_t **V, const uint8_t *chall_2,
                          uint8_t *d_out, uint8_t *const *a_out);
+
+/*
+ * As voleith_gf8_qs_prove, but threads the QuickSilver accumulate (Steps 4-5)
+ * across `pool`'s workers (T3.1).  A NULL pool, or a pool of size <= 1, runs the
+ * serial path and is bit-identical to voleith_gf8_qs_prove; a larger pool splits
+ * the ordered update stream into contiguous blocks hashed in parallel and folded
+ * back in order, producing the same proof bytes.  The pool must not be one whose
+ * worker is the calling thread.
+ */
+int voleith_gf8_qs_prove_ex(const voleith_gf8_circuit_t *circuit,
+                            const uint8_t *witness, const uint8_t *instance,
+                            unsigned int lambda, const uint8_t *u,
+                            const uint8_t **V, const uint8_t *chall_2,
+                            uint8_t *d_out, uint8_t *const *a_out,
+                            struct ichor_pool *pool);
 
 /*
  * Compute only the VOLE correction d, without the full QuickSilver hash.

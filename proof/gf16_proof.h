@@ -84,6 +84,19 @@ int voleith_gf16_prove(voleith_proof_t *proof, const voleith_params_t *params,
                        size_t fs_seed_len);
 
 /*
+ * As voleith_gf16_prove, with threading options.  opts == NULL defaults to
+ * the physical-core count; see voleith_threading_opts_t.  voleith_gf16_prove
+ * is the special case opts = { .nthreads = 1 } (single-threaded).
+ */
+int voleith_gf16_prove_ex(voleith_proof_t *proof,
+                          const voleith_params_t *params,
+                          const voleith_gf16_circuit_t *circuit,
+                          const voleith_gf16_t *witness,
+                          const voleith_gf16_t *instance,
+                          const uint8_t *fs_seed, size_t fs_seed_len,
+                          const voleith_threading_opts_t *opts);
+
+/*
  * Expected length (in GF(2^16) elements) of the witness / instance buffer for
  * the GF(2^16) prove/verify API.  GF(2^16) circuits use one element per wire,
  * so the buffer length is the wire count directly.  Returns 0 if circuit is
@@ -105,6 +118,20 @@ int voleith_gf16_prove_v2(voleith_proof_t *proof,
                           const voleith_gf16_t *witness, size_t witness_len,
                           const voleith_gf16_t *instance, size_t instance_len,
                           const uint8_t *fs_seed, size_t fs_seed_len);
+
+/*
+ * As voleith_gf16_prove_v2, with threading options.  See
+ * voleith_threading_opts_t.  voleith_gf16_prove_v2 is the special case
+ * opts = { .nthreads = 1 }.
+ */
+int voleith_gf16_prove_v2_ex(voleith_proof_t *proof,
+                             const voleith_params_t *params,
+                             const voleith_gf16_circuit_t *circuit,
+                             const voleith_gf16_t *witness, size_t witness_len,
+                             const voleith_gf16_t *instance,
+                             size_t instance_len, const uint8_t *fs_seed,
+                             size_t fs_seed_len,
+                             const voleith_threading_opts_t *opts);
 
 /*
  * Verify a non-interactive proof for a GF(2^16) element-level circuit.
@@ -156,6 +183,17 @@ int voleith_gf16_prove_commit(voleith_gf16_prover_commit_t **ctx_out,
                               uint8_t *commitment_out);
 
 /*
+ * As voleith_gf16_prove_commit, with threading options for the commit
+ * context's worker pool.  See voleith_threading_opts_t.
+ * voleith_gf16_prove_commit is the special case opts = { .nthreads = 1 }.
+ */
+int voleith_gf16_prove_commit_ex(
+    voleith_gf16_prover_commit_t **ctx_out, const voleith_params_t *params,
+    const voleith_gf16_circuit_t *circuit, const voleith_gf16_t *witness,
+    const voleith_gf16_t *instance, const uint8_t *fs_seed, size_t fs_seed_len,
+    uint8_t *commitment_out, const voleith_threading_opts_t *opts);
+
+/*
  * Phase 2 (Prove): complete the proof given the external chall_1
  * (voleith_chall1_bytes(params->lambda) bytes; read without a length check).
  * witness and instance must match voleith_gf16_prove_commit().  On success
@@ -179,6 +217,18 @@ int voleith_gf16_verify_reconstruct(
     voleith_gf16_verifier_reconstruct_t **ctx_out, const voleith_proof_t *proof,
     const voleith_params_t *params, const voleith_gf16_circuit_t *circuit,
     uint8_t *commitment_out);
+
+/*
+ * As voleith_gf16_verify_reconstruct, with threading options for the tau-rep
+ * reconstruct loop (T3.4a).  opts carries the worker-thread count / a borrowed
+ * pool; see voleith_threading_opts_t.  voleith_gf16_verify_reconstruct is the
+ * special case opts = { .nthreads = 1 }.  The commitment blob is bit-identical
+ * regardless of thread count.
+ */
+int voleith_gf16_verify_reconstruct_ex(
+    voleith_gf16_verifier_reconstruct_t **ctx_out, const voleith_proof_t *proof,
+    const voleith_params_t *params, const voleith_gf16_circuit_t *circuit,
+    uint8_t *commitment_out, const voleith_threading_opts_t *opts);
 
 /*
  * Phase 2 (Verify): complete verification given the external chall_1.

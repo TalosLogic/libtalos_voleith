@@ -77,6 +77,32 @@ voleith_rs_chunk_node_vt(voleith_rs_cr_profile_t cr)
     }
 }
 
+/* Profile strength in bits: 128 (CR_128) or 256 (CR_256). */
+static size_t
+profile_strength_bits(voleith_rs_cr_profile_t cr)
+{
+    return (cr == VOLEITH_RS_CR_256) ? 256u : 128u;
+}
+
+const voleith_node_hash_vt *
+voleith_rs_chunk_node_vt_resolve(voleith_rs_cr_profile_t cr,
+                                 const voleith_node_hash_vt *node_vt)
+{
+    size_t w;
+
+    if (node_vt == NULL)
+        return voleith_rs_chunk_node_vt(cr);
+
+    /* Conformance: the node width must equal the profile's node/digest width,
+     * and the vt's collision resistance must meet the profile strength. */
+    w = voleith_rs_cr_digest_bytes(cr);
+    if (w == 0 || node_vt->node_bytes != w)
+        return NULL;
+    if (node_vt->cr_bits < profile_strength_bits(cr))
+        return NULL;
+    return node_vt;
+}
+
 /* ========================================================================
  * Chunk digest and leaf hash
  * ======================================================================== */
@@ -91,12 +117,13 @@ voleith_rs_chunk_digest(voleith_rs_cr_profile_t cr, const uint8_t *chunk,
     return profile_hash(cr, chunk, chunk_len, out, out_cap);
 }
 
-int
-voleith_rs_leaf_hash(voleith_rs_cr_profile_t cr, const uint8_t *fwk,
-                     const uint8_t *chunk_digest, size_t index,
-                     size_t index_bytes, uint8_t *out, size_t out_cap)
+/* Leaf hash with an already-resolved node-hash vt (shared by the public
+ * entry point and the tree builders, which resolve once). */
+static int
+leaf_hash_with_vt(voleith_rs_cr_profile_t cr, const voleith_node_hash_vt *vt,
+                  const uint8_t *fwk, const uint8_t *chunk_digest, size_t index,
+                  size_t index_bytes, uint8_t *out, size_t out_cap)
 {
-    const voleith_node_hash_vt *vt;
     uint8_t pre[VOLEITH_RS_LEAF_PREIMAGE_MAX_BYTES];
     size_t fwkb, digb, prelen;
     int rc;
@@ -108,10 +135,6 @@ voleith_rs_leaf_hash(voleith_rs_cr_profile_t cr, const uint8_t *fwk,
     /* index must fit in index_bytes (8 * index_bytes < 64, so no UB). */
     if (index >> (8u * index_bytes) != 0)
         return VOLEITH_EC_ERR_PARAM;
-
-    vt = voleith_rs_chunk_node_vt(cr);
-    if (vt == NULL)
-        return VOLEITH_EC_ERR_FIELD;
 
     fwkb = voleith_rs_fwk_bytes(cr);
     digb = voleith_rs_cr_digest_bytes(cr);
@@ -132,6 +155,21 @@ voleith_rs_leaf_hash(voleith_rs_cr_profile_t cr, const uint8_t *fwk,
     voleith_secure_zero(pre, sizeof(pre));
 
     return (rc == 0) ? VOLEITH_EC_OK : VOLEITH_EC_ERR_NOMEM;
+}
+
+int
+voleith_rs_leaf_hash(voleith_rs_cr_profile_t cr,
+                     const voleith_node_hash_vt *node_vt, const uint8_t *fwk,
+                     const uint8_t *chunk_digest, size_t index,
+                     size_t index_bytes, uint8_t *out, size_t out_cap)
+{
+    const voleith_node_hash_vt *vt =
+        voleith_rs_chunk_node_vt_resolve(cr, node_vt);
+
+    if (vt == NULL)
+        return VOLEITH_EC_ERR_FIELD;
+    return leaf_hash_with_vt(cr, vt, fwk, chunk_digest, index, index_bytes, out,
+                             out_cap);
 }
 
 /* ========================================================================
@@ -155,8 +193,8 @@ build_leaf_nodes(voleith_rs_cr_profile_t cr, const voleith_node_hash_vt *vt,
     int rc;
 
     for (size_t i = 0; i < n_chunks; i++) {
-        rc = voleith_rs_leaf_hash(cr, fwk, chunk_digests + i * digb, i,
-                                  index_bytes, leaf_nodes + i * W, W);
+        rc = leaf_hash_with_vt(cr, vt, fwk, chunk_digests + i * digb, i,
+                               index_bytes, leaf_nodes + i * W, W);
         if (rc != VOLEITH_EC_OK)
             return rc;
     }
@@ -164,7 +202,8 @@ build_leaf_nodes(voleith_rs_cr_profile_t cr, const voleith_node_hash_vt *vt,
 }
 
 int
-voleith_rs_tree_root(voleith_rs_cr_profile_t cr, const uint8_t *fwk,
+voleith_rs_tree_root(voleith_rs_cr_profile_t cr,
+                     const voleith_node_hash_vt *node_vt, const uint8_t *fwk,
                      const uint8_t *chunk_digests, size_t n_chunks,
                      uint8_t *root_out, size_t root_cap)
 {
@@ -178,7 +217,7 @@ voleith_rs_tree_root(voleith_rs_cr_profile_t cr, const uint8_t *fwk,
     if (n_chunks == 0 || n_chunks > VOLEITH_RS_TREE_MAX_CAPACITY)
         return VOLEITH_EC_ERR_PARAM;
 
-    vt = voleith_rs_chunk_node_vt(cr);
+    vt = voleith_rs_chunk_node_vt_resolve(cr, node_vt);
     if (vt == NULL)
         return VOLEITH_EC_ERR_FIELD;
     W = vt->node_bytes;
@@ -211,10 +250,11 @@ out:
 }
 
 int
-voleith_rs_tree_sibling_path(voleith_rs_cr_profile_t cr, const uint8_t *fwk,
-                             const uint8_t *chunk_digests, size_t n_chunks,
-                             size_t index, uint8_t *siblings_out,
-                             size_t siblings_cap)
+voleith_rs_tree_sibling_path(voleith_rs_cr_profile_t cr,
+                             const voleith_node_hash_vt *node_vt,
+                             const uint8_t *fwk, const uint8_t *chunk_digests,
+                             size_t n_chunks, size_t index,
+                             uint8_t *siblings_out, size_t siblings_cap)
 {
     const voleith_node_hash_vt *vt;
     uint8_t *leaf_nodes;
@@ -228,7 +268,7 @@ voleith_rs_tree_sibling_path(voleith_rs_cr_profile_t cr, const uint8_t *fwk,
     if (index >= n_chunks)
         return VOLEITH_EC_ERR_PARAM;
 
-    vt = voleith_rs_chunk_node_vt(cr);
+    vt = voleith_rs_chunk_node_vt_resolve(cr, node_vt);
     if (vt == NULL)
         return VOLEITH_EC_ERR_FIELD;
     W = vt->node_bytes;

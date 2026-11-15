@@ -38,8 +38,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "proof.h"      /* voleith_params_t, voleith_proof_t */
-#include "rs_dataset.h" /* voleith_rs_cr_profile_t, voleith_rs_metadata_t */
+#include "node_hash_vt.h" /* voleith_node_hash_vt */
+#include "proof.h"        /* voleith_params_t, voleith_proof_t */
+#include "rs_dataset.h"   /* voleith_rs_cr_profile_t, voleith_rs_metadata_t */
 
 /* Fiat-Shamir seed width for the certificate (matches the RSv1 seed width). */
 #define VOLEITH_RS_CHUNK_CERT_FS_SEED_BYTES 16
@@ -67,8 +68,9 @@
  */
 int voleith_rs_chunk_cert_prove(
     voleith_proof_t *proof_out, const voleith_params_t *params,
-    voleith_rs_cr_profile_t cr, size_t n_chunks, size_t index,
-    const uint8_t *fwk, const uint8_t *chunk_digest, const uint8_t *merkle_root,
+    voleith_rs_cr_profile_t cr, const voleith_node_hash_vt *node_vt,
+    size_t n_chunks, size_t index, const uint8_t *fwk,
+    const uint8_t *chunk_digest, const uint8_t *merkle_root,
     const uint8_t *siblings, const voleith_rs_metadata_t *metadata);
 
 /*
@@ -83,13 +85,12 @@ int voleith_rs_chunk_cert_prove(
  * Returns 0 if the certificate is valid for this dataset, -1 otherwise (bad
  * argument, R mismatch, or invalid proof).
  */
-int voleith_rs_chunk_cert_verify(const voleith_proof_t *proof,
-                                 const voleith_params_t *params,
-                                 voleith_rs_cr_profile_t cr, size_t n_chunks,
-                                 size_t index, const uint8_t *chunk_digest,
-                                 const uint8_t *merkle_root,
-                                 const voleith_rs_metadata_t *metadata,
-                                 const uint8_t *R, size_t R_len);
+int voleith_rs_chunk_cert_verify(
+    const voleith_proof_t *proof, const voleith_params_t *params,
+    voleith_rs_cr_profile_t cr, const voleith_node_hash_vt *node_vt,
+    size_t n_chunks, size_t index, const uint8_t *chunk_digest,
+    const uint8_t *merkle_root, const voleith_rs_metadata_t *metadata,
+    const uint8_t *R, size_t R_len);
 
 /*
  * voleith_rs_chunk_cert_prove_secret_dir - produce a SECRET-index certificate.
@@ -101,8 +102,9 @@ int voleith_rs_chunk_cert_verify(const voleith_proof_t *proof,
  */
 int voleith_rs_chunk_cert_prove_secret_dir(
     voleith_proof_t *proof_out, const voleith_params_t *params,
-    voleith_rs_cr_profile_t cr, size_t n_chunks, size_t index,
-    const uint8_t *fwk, const uint8_t *chunk_digest, const uint8_t *merkle_root,
+    voleith_rs_cr_profile_t cr, const voleith_node_hash_vt *node_vt,
+    size_t n_chunks, size_t index, const uint8_t *fwk,
+    const uint8_t *chunk_digest, const uint8_t *merkle_root,
     const uint8_t *siblings, const voleith_rs_metadata_t *metadata);
 
 /*
@@ -114,8 +116,8 @@ int voleith_rs_chunk_cert_prove_secret_dir(
  */
 int voleith_rs_chunk_cert_verify_secret_dir(
     const voleith_proof_t *proof, const voleith_params_t *params,
-    voleith_rs_cr_profile_t cr, size_t n_chunks, const uint8_t *chunk_digest,
-    const uint8_t *merkle_root, const voleith_rs_metadata_t *metadata,
-    const uint8_t *R, size_t R_len);
+    voleith_rs_cr_profile_t cr, const voleith_node_hash_vt *node_vt,
+    size_t n_chunks, const uint8_t *chunk_digest, const uint8_t *merkle_root,
+    const voleith_rs_metadata_t *metadata, const uint8_t *R, size_t R_len);
 
 #endif /* VOLEITH_RS_CHUNK_CERT_PROOF_H */

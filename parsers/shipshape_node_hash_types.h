@@ -32,11 +32,19 @@
 #define VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32 7
 #define VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED 8
 #define VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED 9
+/* crypto-v3 norm S-box twins (FAEST paired-round arithmetization). */
+#define VOLEITH_SHIPSHAPE_NHT_AES_DM_NORM 10
+#define VOLEITH_SHIPSHAPE_NHT_AES_CMAC_128_NORM 11
+#define VOLEITH_SHIPSHAPE_NHT_HIROSE_NORM 12
+#define VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32_NORM 13
+#define VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED_NORM 14
+#define VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED_NORM 15
 
 typedef struct {
     const char *name; /* surface name, snake_case */
     uint16_t type_id;
     const voleith_node_hash_vt *vt;
+    uint8_t introduced_version; /* min stdlib version (crypto-vN) */
 } voleith_shipshape_node_hash_type_t;
 
 extern const voleith_shipshape_node_hash_type_t

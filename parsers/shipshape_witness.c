@@ -15,10 +15,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "aes_norm_gf8_circuit.h"
 #include "field.h"
 #include "gf8_circuit.h"
+#include "grostl_norm_gf8_circuit.h"
 #include "shipshape_witgen_dispatch.h"
 #include "util.h"
+
+/* Max norm state bytes: ROWS * MAX_COLS = 8 * 16 (Grostl-512). */
+#define NORM_SOLVE_MAX_NST 128u
 
 /* GF(2)-linear 8x8 map: output bit i is the parity of (matrix[i] & x). */
 static voleith_gf8_t
@@ -74,9 +79,203 @@ self_check(const voleith_gf8_circuit_t *circuit, const voleith_gf8_t *value)
                 value[cs[i].c])
                 return VOLEITH_SHIPSHAPE_WITGEN_CONSTRAINT;
             break;
+        case GF8_CONSTRAINT_PRODUCT3:
+            if (voleith_gf8_mul(voleith_gf8_mul(value[cs[i].a], value[cs[i].b]),
+                                value[cs[i].c]) != value[cs[i].d])
+                return VOLEITH_SHIPSHAPE_WITGEN_CONSTRAINT;
+            break;
         }
     }
     return 0;
+}
+
+/* ================================================================
+ * Norm-gadget witness solving (crypto-v3).
+ *
+ * The frozen inverse-fill path (inv_src, above) resolves only inverse
+ * witnesses committed through a PRODUCT constraint.  A norm circuit instead
+ * commits packed subfield-norm bytes and s_tilde reset states through the
+ * paired-round norm gadget (proof/gf8_circuit.h), which the inv_src path
+ * cannot derive.  These are deterministic functions of the round-pair's
+ * input state (state_in) and odd-round key (k0), computed by the circuit
+ * layer's aes_norm_gf8_solve_pair / grostl_norm_gf8_solve_pair.
+ *
+ * This map records, per internal witness wire, which norm entry / role
+ * (packed or s_tilde) / index it fills.  The packed wires are not stored in
+ * the gadget pool, so they are recovered by walking cw[i] (the embedded norm
+ * wire, pool slot 1) back through its two LINEAR_MAP producers
+ * (add_norm_embed then add_nibble) to the committed packed witness.  Each
+ * entry is solved once, lazily, when the forward pass first reaches one of
+ * its witnesses (state_in / k0 are already evaluated by then).
+ * ================================================================ */
+
+typedef struct {
+    int kind;                    /* 0 = AES, 1 = Grostl */
+    unsigned int nst;            /* state bytes (16 AES; 64/128 Grostl) */
+    const gf8_wire_id *state_in; /* nst pool ids */
+    const gf8_wire_id *k0;       /* 16 pool ids (AES only) */
+    const gf8_wire_id *s_tilde;  /* nst pool ids */
+    unsigned int cols;           /* Grostl */
+    const uint8_t *shift;        /* Grostl (8 entries) */
+    int is_q;                    /* Grostl */
+    unsigned int odd_round;      /* Grostl */
+    int solved;
+    uint8_t packed_val[NORM_SOLVE_MAX_NST / 2];
+    uint8_t stilde_val[NORM_SOLVE_MAX_NST];
+} norm_solve_entry_t;
+
+typedef struct {
+    size_t n; /* number of norm entries */
+    norm_solve_entry_t *ents;
+    uint8_t *role;    /* n_wires: 0 none, 1 packed, 2 s_tilde */
+    int *ent_of;      /* n_wires: entry index, or -1 */
+    uint16_t *idx_of; /* n_wires: index within packed[]/s_tilde[] */
+} norm_map_t;
+
+static void
+free_norm_map(norm_map_t *m)
+{
+    if (m == NULL)
+        return;
+    if (m->ents != NULL && m->n > 0)
+        voleith_secure_zero(m->ents, m->n * sizeof(*m->ents));
+    free(m->ents);
+    free(m->role);
+    free(m->ent_of);
+    free(m->idx_of);
+    memset(m, 0, sizeof(*m));
+}
+
+/*
+ * Mark one norm entry's committed witnesses in the map.  pool is the entry's
+ * wire pool (stride nst), stride_groups is 4 (AES: state/norm/s_tilde/k0) or
+ * 3 (Grostl: state/norm/s_tilde).  Returns 0 on success.
+ */
+static void
+map_norm_entry(norm_map_t *m, const gf8_wire_entry_t *wires, size_t ent_index,
+               const gf8_wire_id *pool, size_t off, unsigned int nst)
+{
+    unsigned int i;
+
+    for (i = 0; i < nst; i++) {
+        gf8_wire_id cw = pool[off + 1u * nst + i];
+        gf8_wire_id nib = wires[cw].a; /* add_norm_embed input */
+        gf8_wire_id pk = wires[nib].a; /* add_nibble input = packed wire */
+        gf8_wire_id st = pool[off + 2u * nst + i];
+
+        if (i % 2u == 0u) {
+            m->role[pk] = 1;
+            m->ent_of[pk] = (int)ent_index;
+            m->idx_of[pk] = (uint16_t)(i / 2u);
+        }
+        m->role[st] = 2;
+        m->ent_of[st] = (int)ent_index;
+        m->idx_of[st] = (uint16_t)i;
+    }
+}
+
+static int
+build_norm_map(const voleith_gf8_circuit_t *circuit,
+               const gf8_wire_entry_t *wires, size_t n_wires, norm_map_t *m)
+{
+    size_t n_aes = voleith_gf8_circuit_norm_count(circuit);
+    size_t n_gro = voleith_gf8_circuit_grostl_norm_count(circuit);
+    const gf8_norm_entry_t *ae = voleith_gf8_circuit_norm_constraints(circuit);
+    const gf8_wire_id *ap = voleith_gf8_circuit_norm_wires(circuit);
+    const gf8_grostl_norm_entry_t *ge =
+        voleith_gf8_circuit_grostl_norm_constraints(circuit);
+    const gf8_wire_id *gp = voleith_gf8_circuit_grostl_norm_wires(circuit);
+    size_t total = n_aes + n_gro;
+    size_t e, i;
+
+    memset(m, 0, sizeof(*m));
+    if (total == 0)
+        return 0; /* no norm gadgets: map stays empty, forward pass unchanged */
+
+    m->n = total;
+    m->ents = calloc(total, sizeof(*m->ents));
+    m->role = calloc(n_wires ? n_wires : 1, sizeof(*m->role));
+    m->ent_of = calloc(n_wires ? n_wires : 1, sizeof(*m->ent_of));
+    m->idx_of = calloc(n_wires ? n_wires : 1, sizeof(*m->idx_of));
+    if (m->ents == NULL || m->role == NULL || m->ent_of == NULL ||
+        m->idx_of == NULL) {
+        free_norm_map(m);
+        return -1;
+    }
+    for (i = 0; i < n_wires; i++)
+        m->ent_of[i] = -1;
+
+    for (e = 0; e < n_aes; e++) {
+        norm_solve_entry_t *s = &m->ents[e];
+        size_t off = ae[e].wires_off;
+        unsigned int nst = ae[e].nst;
+
+        if (nst > NORM_SOLVE_MAX_NST) {
+            free_norm_map(m);
+            return -1;
+        }
+        s->kind = 0;
+        s->nst = nst;
+        s->state_in = &ap[off + 0u * nst];
+        s->s_tilde = &ap[off + 2u * nst];
+        s->k0 = &ap[off + 3u * nst];
+        map_norm_entry(m, wires, e, ap, off, nst);
+    }
+    for (e = 0; e < n_gro; e++) {
+        norm_solve_entry_t *s = &m->ents[n_aes + e];
+        size_t off = ge[e].wires_off;
+        unsigned int nst = ge[e].nst;
+
+        if (nst > NORM_SOLVE_MAX_NST) {
+            free_norm_map(m);
+            return -1;
+        }
+        s->kind = 1;
+        s->nst = nst;
+        s->cols = ge[e].cols;
+        s->shift = ge[e].shift;
+        s->is_q = ge[e].is_q;
+        s->odd_round = ge[e].odd_round;
+        s->state_in = &gp[off + 0u * nst];
+        s->s_tilde = &gp[off + 2u * nst];
+        map_norm_entry(m, wires, n_aes + e, gp, off, nst);
+    }
+    return 0;
+}
+
+/*
+ * Fill one norm witness wire `wid` (with wit_pos `wp`) from its solved entry,
+ * solving the entry lazily from already-evaluated input wire values.
+ */
+static void
+norm_fill_wire(norm_map_t *m, gf8_wire_id wid, size_t wp,
+               const voleith_gf8_t *value, voleith_gf8_t *out_value,
+               uint8_t *full)
+{
+    norm_solve_entry_t *s = &m->ents[m->ent_of[wid]];
+
+    if (!s->solved) {
+        uint8_t st_in[NORM_SOLVE_MAX_NST];
+        uint8_t k0[16];
+        unsigned int q;
+
+        for (q = 0; q < s->nst; q++)
+            st_in[q] = value[s->state_in[q]];
+        if (s->kind == 0) {
+            for (q = 0; q < 16; q++)
+                k0[q] = value[s->k0[q]];
+            aes_norm_gf8_solve_pair(st_in, k0, s->packed_val, s->stilde_val);
+        } else {
+            grostl_norm_gf8_solve_pair(st_in, s->nst, s->cols, s->shift,
+                                       s->is_q, s->odd_round, s->packed_val,
+                                       s->stilde_val);
+        }
+        s->solved = 1;
+    }
+
+    *out_value = (m->role[wid] == 1) ? s->packed_val[m->idx_of[wid]]
+                                     : s->stilde_val[m->idx_of[wid]];
+    full[wp] = *out_value;
 }
 
 int
@@ -97,6 +296,7 @@ voleith_shipshape_witness_gen(const voleith_shipshape_parsed_t *parsed,
     voleith_shipshape_witgen_backend_fn *disp_fn = NULL;
     voleith_shipshape_witgen_backend_fn *fn_cache = NULL;
     const voleith_shipshape_region_t **disp_region = NULL;
+    norm_map_t norm;
     size_t n_wires, n_witness, n_instance, n_constraints, ext_count;
     size_t ext_pos = 0, inst_pos = 0, wit_pos = 0;
     int r;
@@ -127,6 +327,7 @@ voleith_shipshape_witness_gen(const voleith_shipshape_parsed_t *parsed,
 
     wires = voleith_gf8_circuit_wires(circuit);
     cs = voleith_gf8_circuit_constraints(circuit);
+    memset(&norm, 0, sizeof(norm));
 
     value = calloc(n_wires ? n_wires : 1, sizeof(*value));
     is_external = calloc(n_wires ? n_wires : 1, sizeof(*is_external));
@@ -235,6 +436,17 @@ voleith_shipshape_witness_gen(const voleith_shipshape_parsed_t *parsed,
             skip_inv[w] = 1;
     }
 
+    /*
+     * Norm-gadget map (crypto-v3): record which internal witnesses are norm
+     * packed / s_tilde commitments so the forward pass can solve them (the
+     * inv_src path cannot).  Empty when the circuit has no norm gadgets, in
+     * which case the forward pass is byte-for-byte the frozen behaviour.
+     */
+    if (build_norm_map(circuit, wires, n_wires, &norm) != 0) {
+        r = VOLEITH_SHIPSHAPE_WITGEN_ALLOC;
+        goto fail;
+    }
+
     /* Forward pass: evaluate every wire, collect the full witness array. */
     for (size_t i = 0; i < n_wires; i++) {
         const gf8_wire_entry_t *w = &wires[i];
@@ -264,6 +476,11 @@ voleith_shipshape_witness_gen(const voleith_shipshape_parsed_t *parsed,
                 if (skip_inv[wit_pos]) {
                     /* Backend already wrote this slot; skip the inverse. */
                     value[i] = full[wit_pos];
+                } else if (norm.role != NULL && norm.role[i] != 0) {
+                    /* Norm packed / s_tilde commitment: solve from the
+                     * round-pair's already-evaluated inputs (crypto-v3). */
+                    norm_fill_wire(&norm, (gf8_wire_id)i, wit_pos, value,
+                                   &value[i], full);
                 } else {
                     if (inv_src[i] == GF8_WIRE_ID_INVALID) {
                         r = VOLEITH_SHIPSHAPE_WITGEN_UNRESOLVED;
@@ -320,6 +537,7 @@ voleith_shipshape_witness_gen(const voleith_shipshape_parsed_t *parsed,
     free(disp_fn);
     free(disp_region);
     free(fn_cache);
+    free_norm_map(&norm);
     *out = full;
     if (out_len != NULL)
         *out_len = n_witness;
@@ -338,5 +556,6 @@ fail:
     free(disp_fn);
     free(disp_region);
     free(fn_cache);
+    free_norm_map(&norm);
     return r;
 }

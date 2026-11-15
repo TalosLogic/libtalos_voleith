@@ -27,6 +27,8 @@
 #include <stddef.h>
 #include "gf8_circuit.h"
 
+struct ichor_pool;
+
 /*
  * Element-level QuickSilver verifier.
  *
@@ -54,5 +56,18 @@ int voleith_gf8_qs_verify(const voleith_gf8_circuit_t *circuit,
                           const uint8_t **Q, const uint8_t *d,
                           const uint8_t *delta, const uint8_t *chall_2,
                           const uint8_t *const *a_in, uint8_t *a0_tilde_out);
+
+/*
+ * Threaded twin (T3.4b): same contract, plus `pool`.  With pool != NULL and
+ * size > 1, the Q transpose and the Step-2 zk_hash accumulate run across the
+ * pool; the result is bit-identical to the serial path.  pool == NULL is
+ * exactly voleith_gf8_qs_verify.
+ */
+int voleith_gf8_qs_verify_ex(const voleith_gf8_circuit_t *circuit,
+                             const uint8_t *instance, unsigned int lambda,
+                             const uint8_t **Q, const uint8_t *d,
+                             const uint8_t *delta, const uint8_t *chall_2,
+                             const uint8_t *const *a_in, uint8_t *a0_tilde_out,
+                             struct ichor_pool *pool);
 
 #endif /* VOLEITH_GF8_VERIFIER_H */

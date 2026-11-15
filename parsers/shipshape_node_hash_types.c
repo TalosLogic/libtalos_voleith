@@ -18,30 +18,43 @@
 #include <string.h>
 
 /*
- * Frozen table.  Entries are in strict type_id order (0..9).
+ * Frozen table.  Entries are in strict type_id order (0..15).
  * The .name field is the surface name used in .ship bracket selectors,
  * e.g. merkle/path_secret[aes_dm].  The .vt pointer references the
  * extern vt declared in node_hash_vt.h.
  */
 const voleith_shipshape_node_hash_type_t voleith_shipshape_node_hash_types[] = {
-    {"aes_dm", VOLEITH_SHIPSHAPE_NHT_AES_DM, &voleith_node_hash_aes_dm},
+    {"aes_dm", VOLEITH_SHIPSHAPE_NHT_AES_DM, &voleith_node_hash_aes_dm, 2},
     {"aes_cmac_128", VOLEITH_SHIPSHAPE_NHT_AES_CMAC_128,
-     &voleith_node_hash_aes_cmac128},
+     &voleith_node_hash_aes_cmac128, 2},
     {"grostl_256", VOLEITH_SHIPSHAPE_NHT_GROSTL_256,
-     &voleith_node_hash_grostl256},
+     &voleith_node_hash_grostl256, 2},
     {"grostl_256_t27", VOLEITH_SHIPSHAPE_NHT_GROSTL_256_T27,
-     &voleith_node_hash_grostl256_t27},
+     &voleith_node_hash_grostl256_t27, 2},
     {"grostl_512", VOLEITH_SHIPSHAPE_NHT_GROSTL_512,
-     &voleith_node_hash_grostl512},
+     &voleith_node_hash_grostl512, 2},
     {"grostl_512_t59", VOLEITH_SHIPSHAPE_NHT_GROSTL_512_T59,
-     &voleith_node_hash_grostl512_t59},
-    {"hirose", VOLEITH_SHIPSHAPE_NHT_HIROSE, &voleith_node_hash_hirose},
+     &voleith_node_hash_grostl512_t59, 2},
+    {"hirose", VOLEITH_SHIPSHAPE_NHT_HIROSE, &voleith_node_hash_hirose, 2},
     {"hirose_fixed_32", VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32,
-     &voleith_node_hash_hirose_fixed32},
+     &voleith_node_hash_hirose_fixed32, 2},
     {"grostl_256_fixed", VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED,
-     &voleith_node_hash_grostl256_fixed},
+     &voleith_node_hash_grostl256_fixed, 2},
     {"grostl_512_fixed", VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED,
-     &voleith_node_hash_grostl512_fixed},
+     &voleith_node_hash_grostl512_fixed, 2},
+    /* crypto-v3 norm S-box twins. */
+    {"aes_dm_norm", VOLEITH_SHIPSHAPE_NHT_AES_DM_NORM,
+     &voleith_node_hash_aes_dm_norm, 3},
+    {"aes_cmac_128_norm", VOLEITH_SHIPSHAPE_NHT_AES_CMAC_128_NORM,
+     &voleith_node_hash_aes_cmac128_norm, 3},
+    {"hirose_norm", VOLEITH_SHIPSHAPE_NHT_HIROSE_NORM,
+     &voleith_node_hash_hirose_norm, 3},
+    {"hirose_fixed_32_norm", VOLEITH_SHIPSHAPE_NHT_HIROSE_FIXED_32_NORM,
+     &voleith_node_hash_hirose_fixed32_norm, 3},
+    {"grostl_256_fixed_norm", VOLEITH_SHIPSHAPE_NHT_GROSTL_256_FIXED_NORM,
+     &voleith_node_hash_grostl256_fixed_norm, 3},
+    {"grostl_512_fixed_norm", VOLEITH_SHIPSHAPE_NHT_GROSTL_512_FIXED_NORM,
+     &voleith_node_hash_grostl512_fixed_norm, 3},
 };
 
 const size_t voleith_shipshape_node_hash_types_count =

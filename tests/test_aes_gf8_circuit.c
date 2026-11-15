@@ -34,6 +34,7 @@
  */
 
 #include "../circuits/aes_gf8_circuit.h"
+#include "../circuits/aes_norm_gf8_circuit.h"
 #include "../proof/gf8_circuit.h"
 #include "../proof/gf8_circuit_fingerprint.h"
 #include "../core/field.h"
@@ -54,6 +55,24 @@
 #define AES128_GF8_FP_GOLDEN_BYTES                                             \
     0x0c, 0x81, 0x5c, 0x89, 0x7e, 0x6f, 0x88, 0xe5, 0xe0, 0xed, 0xa5, 0x56,    \
         0xb8, 0xb2, 0x21, 0xad
+#endif
+
+/*
+ * Golden fingerprints of the norm S-box AES circuits (new twins).  Capture
+ * once from a build of this commit: run the test, copy the bytes printed under
+ * the matching "... norm circuit fingerprint:" line, and replace the
+ * placeholder.  Until pinned, the all-zero placeholder prints a NOTE and the
+ * golden assert is skipped.
+ */
+#ifndef AES128_NORM_GF8_FP_GOLDEN_BYTES
+#define AES128_NORM_GF8_FP_GOLDEN_BYTES                                        \
+    0x1d, 0x6a, 0x69, 0xf8, 0xde, 0x07, 0x16, 0xd2, 0x91, 0x22, 0x4b, 0x87,    \
+        0x9f, 0xcb, 0x5c, 0xb3
+#endif
+#ifndef AES256_NORM_GF8_FP_GOLDEN_BYTES
+#define AES256_NORM_GF8_FP_GOLDEN_BYTES                                        \
+    0x6a, 0x07, 0xea, 0x52, 0x69, 0xe1, 0xc6, 0xc8, 0x35, 0xd8, 0xec, 0xbb,    \
+        0xe2, 0x04, 0x0e, 0xfc
 #endif
 
 static int test_count = 0;
@@ -861,6 +880,134 @@ test_aes128_fingerprint_pin(void)
 }
 
 /* ================================================================
+ * Norm S-box AES: output parity (FIPS 197), witness size, fingerprint pin.
+ * ================================================================ */
+
+static void
+check_norm_fp(const char *name, voleith_gf8_circuit_t *c,
+              const uint8_t golden[16])
+{
+    uint8_t fp[VOLEITH_GF8_CIRCUIT_FINGERPRINT_BYTES];
+    uint8_t zero[16] = {0};
+    if (voleith_gf8_circuit_fingerprint(c, fp) != 0) {
+        check(name, 0);
+        return;
+    }
+    printf("  %s:", name);
+    for (int i = 0; i < 16; i++)
+        printf(" %02x", fp[i]);
+    printf("\n");
+    if (memcmp(golden, zero, 16) == 0) {
+        printf("    NOTE: golden unset; pin the bytes printed above.\n");
+        return;
+    }
+    check(name, memcmp(fp, golden, 16) == 0);
+}
+
+static void
+test_aes128_norm(void)
+{
+    static const uint8_t KEY[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+                                    0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+                                    0x0c, 0x0d, 0x0e, 0x0f};
+    static const uint8_t PT[16] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+                                   0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb,
+                                   0xcc, 0xdd, 0xee, 0xff};
+    static const uint8_t EXPECTED[16] = {0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b,
+                                         0x04, 0x30, 0xd8, 0xcd, 0xb7, 0x80,
+                                         0x70, 0xb4, 0xc5, 0x5a};
+    static const uint8_t GOLDEN[16] = {AES128_NORM_GF8_FP_GOLDEN_BYTES};
+
+    uint8_t witness[AES128_NORM_GF8_WITNESS_BYTES], ct[16];
+    aes128_norm_gf8_build_witness(KEY, PT, witness, ct);
+    check("AES-128 norm: build_witness ciphertext matches FIPS 197 C.1",
+          memcmp(ct, EXPECTED, 16) == 0);
+
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    gf8_wire_id key[16], pt[16], out[16];
+    for (int i = 0; i < 16; i++)
+        key[i] = voleith_gf8_add_witness(c);
+    for (int i = 0; i < 16; i++)
+        pt[i] = voleith_gf8_add_instance(c);
+    aes128_norm_gf8_circuit(c, key, pt, out);
+    check("AES-128 norm: builder ok", voleith_gf8_circuit_ok(c));
+    check("AES-128 norm: witness size 176 (vs frozen 216)",
+          voleith_gf8_circuit_witness_count(c) ==
+              AES128_NORM_GF8_WITNESS_BYTES);
+    check("AES-128 norm: zero mul gates (all data-path S-boxes free)",
+          voleith_gf8_circuit_mul_count(c) == 0);
+    check("AES-128 norm: qs_degree == 2",
+          voleith_gf8_circuit_qs_degree(c) == 2);
+
+    size_t nwires = voleith_gf8_circuit_wire_count(c);
+    uint8_t *vals = calloc(nwires, 1);
+    int ok = vals && voleith_gf8_circuit_eval(c, witness, PT, vals) == 1;
+    check("AES-128 norm: eval satisfied", ok);
+    if (ok) {
+        uint8_t got[16];
+        for (int i = 0; i < 16; i++)
+            got[i] = vals[out[i]];
+        check("AES-128 norm: circuit output matches FIPS 197 C.1",
+              memcmp(got, EXPECTED, 16) == 0);
+    }
+    free(vals);
+
+    check_norm_fp("AES-128 norm circuit fingerprint", c, GOLDEN);
+    voleith_gf8_circuit_free(c);
+}
+
+static void
+test_aes256_norm(void)
+{
+    static const uint8_t KEY[32] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+        0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
+        0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f};
+    static const uint8_t PT[16] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+                                   0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb,
+                                   0xcc, 0xdd, 0xee, 0xff};
+    static const uint8_t EXPECTED[16] = {0x8e, 0xa2, 0xb7, 0xca, 0x51, 0x67,
+                                         0x45, 0xbf, 0xea, 0xfc, 0x49, 0x90,
+                                         0x4b, 0x49, 0x60, 0x89};
+    static const uint8_t GOLDEN[16] = {AES256_NORM_GF8_FP_GOLDEN_BYTES};
+
+    uint8_t witness[AES256_NORM_GF8_WITNESS_BYTES], ct[16];
+    aes256_norm_gf8_build_witness(KEY, PT, witness, ct);
+    check("AES-256 norm: build_witness ciphertext matches FIPS 197 C.3",
+          memcmp(ct, EXPECTED, 16) == 0);
+
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    gf8_wire_id key[32], pt[16], out[16];
+    for (int i = 0; i < 32; i++)
+        key[i] = voleith_gf8_add_witness(c);
+    for (int i = 0; i < 16; i++)
+        pt[i] = voleith_gf8_add_instance(c);
+    aes256_norm_gf8_circuit(c, key, pt, out);
+    check("AES-256 norm: builder ok", voleith_gf8_circuit_ok(c));
+    check("AES-256 norm: witness size 252 (vs frozen 308)",
+          voleith_gf8_circuit_witness_count(c) ==
+              AES256_NORM_GF8_WITNESS_BYTES);
+    check("AES-256 norm: zero mul gates",
+          voleith_gf8_circuit_mul_count(c) == 0);
+
+    size_t nwires = voleith_gf8_circuit_wire_count(c);
+    uint8_t *vals = calloc(nwires, 1);
+    int ok = vals && voleith_gf8_circuit_eval(c, witness, PT, vals) == 1;
+    check("AES-256 norm: eval satisfied", ok);
+    if (ok) {
+        uint8_t got[16];
+        for (int i = 0; i < 16; i++)
+            got[i] = vals[out[i]];
+        check("AES-256 norm: circuit output matches FIPS 197 C.3",
+              memcmp(got, EXPECTED, 16) == 0);
+    }
+    free(vals);
+
+    check_norm_fp("AES-256 norm circuit fingerprint", c, GOLDEN);
+    voleith_gf8_circuit_free(c);
+}
+
+/* ================================================================
  * main
  * ================================================================ */
 int
@@ -886,6 +1033,8 @@ main(void)
     test_aes128_expand_key_fips197();
     test_aes128_encrypt_rk_fips197();
     test_aes128_fingerprint_pin();
+    test_aes128_norm();
+    test_aes256_norm();
 
     printf("  %d / %d passed\n", pass_count, test_count);
     return (pass_count == test_count) ? 0 : 1;

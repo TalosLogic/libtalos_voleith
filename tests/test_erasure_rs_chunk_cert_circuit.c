@@ -82,7 +82,7 @@ run_case(voleith_rs_cr_profile_t cr, size_t n, size_t index)
             goto done;
     }
 
-    if (voleith_rs_tree_root(cr, fwk, digests, n, root, sizeof(root)) !=
+    if (voleith_rs_tree_root(cr, NULL, fwk, digests, n, root, sizeof(root)) !=
         VOLEITH_EC_OK)
         goto done;
 
@@ -90,15 +90,16 @@ run_case(voleith_rs_cr_profile_t cr, size_t n, size_t index)
         siblings = calloc(depth, W);
         if (siblings == NULL)
             goto done;
-        if (voleith_rs_tree_sibling_path(cr, fwk, digests, n, index, siblings,
-                                         depth * W) != VOLEITH_EC_OK)
+        if (voleith_rs_tree_sibling_path(cr, NULL, fwk, digests, n, index,
+                                         siblings, depth * W) != VOLEITH_EC_OK)
             goto done;
     }
 
     c = voleith_gf8_circuit_new();
     if (c == NULL)
         goto done;
-    if (voleith_rs_chunk_cert_build_circuit(c, cr, n, index, &layout) != 0)
+    if (voleith_rs_chunk_cert_build_circuit(c, cr, NULL, n, index, &layout) !=
+        0)
         goto done;
     if (!voleith_gf8_circuit_ok(c) || voleith_gf8_circuit_validate(c) != 0)
         goto done;
@@ -119,7 +120,7 @@ run_case(voleith_rs_cr_profile_t cr, size_t n, size_t index)
     witness = calloc(layout.witness_bytes, 1);
     if (witness == NULL)
         goto done;
-    if (voleith_rs_chunk_cert_build_witness(cr, n, index, fwk,
+    if (voleith_rs_chunk_cert_build_witness(cr, NULL, n, index, fwk,
                                             digests + index * digb, siblings,
                                             &layout, witness) != 0)
         goto done;
@@ -217,7 +218,7 @@ run_case_secret(voleith_rs_cr_profile_t cr, size_t n, size_t index)
             goto done;
     }
 
-    if (voleith_rs_tree_root(cr, fwk, digests, n, root, sizeof(root)) !=
+    if (voleith_rs_tree_root(cr, NULL, fwk, digests, n, root, sizeof(root)) !=
         VOLEITH_EC_OK)
         goto done;
 
@@ -225,15 +226,16 @@ run_case_secret(voleith_rs_cr_profile_t cr, size_t n, size_t index)
         siblings = calloc(depth, W);
         if (siblings == NULL)
             goto done;
-        if (voleith_rs_tree_sibling_path(cr, fwk, digests, n, index, siblings,
-                                         depth * W) != VOLEITH_EC_OK)
+        if (voleith_rs_tree_sibling_path(cr, NULL, fwk, digests, n, index,
+                                         siblings, depth * W) != VOLEITH_EC_OK)
             goto done;
     }
 
     c = voleith_gf8_circuit_new();
     if (c == NULL)
         goto done;
-    if (voleith_rs_chunk_cert_build_circuit_secret_dir(c, cr, n, &layout) != 0)
+    if (voleith_rs_chunk_cert_build_circuit_secret_dir(c, cr, NULL, n,
+                                                       &layout) != 0)
         goto done;
     if (!voleith_gf8_circuit_ok(c) || voleith_gf8_circuit_validate(c) != 0)
         goto done;
@@ -252,7 +254,7 @@ run_case_secret(voleith_rs_cr_profile_t cr, size_t n, size_t index)
     if (witness == NULL)
         goto done;
     if (voleith_rs_chunk_cert_build_witness_secret_dir(
-            cr, n, index, fwk, digests + index * digb, siblings, &layout,
+            cr, NULL, n, index, fwk, digests + index * digb, siblings, &layout,
             witness) != 0)
         goto done;
 

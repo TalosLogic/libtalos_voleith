@@ -41,6 +41,8 @@
 #include "../core/field16.h"
 #include "../core/util.h"
 
+#include <ichor/pool.h>
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -52,16 +54,19 @@
  * Internal GF(2^lambda) helpers (field-agnostic; mirror gf8_prover.c)
  * ===================================================================== */
 
-static uint8_t *
-gf16p_transpose_matrix(const uint8_t **V, unsigned int lambda, unsigned int nb,
-                       size_t n_cols)
+/*
+ * Transpose a contiguous byte range [bz_lo, bz_hi) of every input row into V_T
+ * (T3.2; GF(2^16) mirror of gf8p_transpose_byte_range).  A byte-aligned range
+ * owns a disjoint set of output columns and writes a disjoint V_T region, so the
+ * result is bit-identical to the serial transpose.
+ */
+static void
+gf16p_transpose_byte_range(const uint8_t **V, uint8_t *V_T, unsigned int lambda,
+                           unsigned int nb, size_t n_cols, size_t bz_lo,
+                           size_t bz_hi)
 {
-    uint8_t *V_T = calloc(n_cols, nb);
-    if (!V_T)
-        return NULL;
-    size_t row_bytes = (n_cols + 7) / 8;
     for (unsigned int j = 0; j < lambda; j++) {
-        for (size_t byte_idx = 0; byte_idx < row_bytes; byte_idx++) {
+        for (size_t byte_idx = bz_lo; byte_idx < bz_hi; byte_idx++) {
             uint8_t byte = V[j][byte_idx];
             for (int b = 0; b < 8; b++) {
                 size_t col = byte_idx * 8 + (size_t)b;
@@ -72,6 +77,60 @@ gf16p_transpose_matrix(const uint8_t **V, unsigned int lambda, unsigned int nb,
             }
         }
     }
+}
+
+typedef struct {
+    const uint8_t **V;
+    uint8_t *V_T;
+    const size_t *offs;
+    unsigned int lambda, nb;
+    size_t n_cols;
+} gf16p_transpose_shared_t;
+
+static int
+gf16p_transpose_job(size_t blk, void *ud)
+{
+    const gf16p_transpose_shared_t *sh = (const gf16p_transpose_shared_t *)ud;
+    gf16p_transpose_byte_range(sh->V, sh->V_T, sh->lambda, sh->nb, sh->n_cols,
+                               sh->offs[blk], sh->offs[blk + 1]);
+    return 0;
+}
+
+/* Build V_T = transpose(V), threaded over disjoint byte-aligned column blocks
+ * (T3.2).  Bit-identical to serial; null/size<=1 pool runs serially. */
+static uint8_t *
+gf16p_transpose_matrix(const uint8_t **V, unsigned int lambda, unsigned int nb,
+                       size_t n_cols, struct ichor_pool *pool)
+{
+    uint8_t *V_T = calloc(n_cols, nb);
+    if (!V_T)
+        return NULL;
+    size_t row_bytes = (n_cols + 7) / 8;
+
+    size_t W = 1;
+    if (pool != NULL) {
+        unsigned ps = ichor_pool_size(pool);
+        if (ps > 1u)
+            W = (size_t)ps;
+    }
+    if (W > row_bytes)
+        W = (row_bytes > 0) ? row_bytes : 1;
+
+    if (W > 1) {
+        size_t *offs = calloc(W + 1, sizeof(*offs));
+        if (offs != NULL) {
+            for (size_t b = 0; b <= W; b++)
+                offs[b] = (row_bytes * b) / W;
+            gf16p_transpose_shared_t sh = {V, V_T, offs, lambda, nb, n_cols};
+            int rc = ichor_pool_parallel_for(pool, W, gf16p_transpose_job, &sh);
+            free(offs);
+            if (rc == 0)
+                return V_T;
+            memset(V_T, 0, n_cols * nb);
+        }
+    }
+
+    gf16p_transpose_byte_range(V, V_T, lambda, nb, n_cols, 0, row_bytes);
     return V_T;
 }
 
@@ -219,6 +278,183 @@ gf16p_apply_linear_map(uint8_t *out_tabs, const uint8_t *in_tabs,
 }
 
 /* =====================================================================
+ * Step 2 bit-tag wavefront threading (T3.3), mirroring gf8_prover.c.
+ *
+ * Wires sharing a topological level are mutually independent (each reads only
+ * strictly-earlier levels and writes its own disjoint bit_tag region), so a
+ * level can be tagged in any order with bit-identical output.  The threaded
+ * path precomputes each wire's level and V_T slot, buckets wire ids by level
+ * (CSR), then dispatches one ichor_pool_parallel_for per level, running levels
+ * narrower than 4*W inline.  A null / size<=1 pool, an allocation failure, or a
+ * pool refusal returns -1 and the caller runs the serial reference walk.  gf16
+ * has no SCALE_INSTANCE gate, so the tag step needs no wire values.
+ * ===================================================================== */
+
+typedef struct {
+    uint8_t *bit_tags;
+    const uint8_t *V_T;
+    const gf16_wire_entry_t *wires;
+    const uint16_t *sq_matrix; /* GF16_ELEM_BITS entries */
+    const size_t *slot; /* V_T column-group index for WITNESS / MUL wires */
+    const gf16_wire_id *lvl; /* current level's wire-id slice */
+    size_t width;            /* wires in the current level */
+    unsigned int W_eff;      /* contiguous chunks the level is split into */
+    unsigned int nb;
+} gf16p_tag_shared_t;
+
+static void
+gf16p_tag_wire(const gf16p_tag_shared_t *sh, size_t w)
+{
+    const gf16_wire_entry_t *e = &sh->wires[w];
+    unsigned int nb = sh->nb;
+    uint8_t *bt_w = sh->bit_tags + w * GF16_ELEM_BITS * nb;
+
+    switch (e->kind) {
+    case GF16_WIRE_WITNESS:
+    case GF16_WIRE_MUL: {
+        size_t slot = sh->slot[w];
+        for (unsigned int i = 0; i < GF16_ELEM_BITS; i++)
+            memcpy(bt_w + i * nb, sh->V_T + (slot * GF16_ELEM_BITS + i) * nb,
+                   nb);
+        break;
+    }
+    case GF16_WIRE_INSTANCE:
+    case GF16_WIRE_CONST:
+        memset(bt_w, 0, GF16_ELEM_BITS * nb);
+        break;
+    case GF16_WIRE_XOR: {
+        const uint8_t *bt_a = sh->bit_tags + e->a * GF16_ELEM_BITS * nb;
+        const uint8_t *bt_b = sh->bit_tags + e->b * GF16_ELEM_BITS * nb;
+        for (unsigned int i = 0; i < GF16_ELEM_BITS * nb; i++)
+            bt_w[i] = bt_a[i] ^ bt_b[i];
+        break;
+    }
+    case GF16_WIRE_XOR_CONST:
+        memcpy(bt_w, sh->bit_tags + e->a * GF16_ELEM_BITS * nb,
+               GF16_ELEM_BITS * nb);
+        break;
+    case GF16_WIRE_LINEAR_MAP:
+        gf16p_apply_linear_map(bt_w, sh->bit_tags + e->a * GF16_ELEM_BITS * nb,
+                               e->matrix, nb);
+        break;
+    case GF16_WIRE_SQUARE:
+        gf16p_apply_linear_map(bt_w, sh->bit_tags + e->a * GF16_ELEM_BITS * nb,
+                               sh->sq_matrix, nb);
+        break;
+    }
+}
+
+/* One job tags one contiguous chunk of the current level (W_eff chunks), not
+ * one wire: per-wire dispatch would swamp the tiny per-wire work. */
+static int
+gf16p_tag_job(size_t blk, void *ud)
+{
+    const gf16p_tag_shared_t *sh = (const gf16p_tag_shared_t *)ud;
+    size_t lo = sh->width * blk / sh->W_eff;
+    size_t hi = sh->width * (blk + 1) / sh->W_eff;
+    for (size_t i = lo; i < hi; i++)
+        gf16p_tag_wire(sh, sh->lvl[i]);
+    return 0;
+}
+
+static int
+gf16p_tag_wavefront(uint8_t *bit_tags, const uint8_t *V_T,
+                    const gf16_wire_entry_t *wires, const uint16_t *sq_matrix,
+                    size_t n_wires, size_t n_witness, unsigned int nb,
+                    struct ichor_pool *pool, unsigned int W)
+{
+    size_t *level = calloc(n_wires, sizeof(*level));
+    size_t *slot = calloc(n_wires, sizeof(*slot));
+    gf16_wire_id *order = calloc(n_wires, sizeof(*order));
+    size_t *offs = NULL;
+    size_t *cur = NULL;
+    size_t span = 0, witness_idx = 0, mul_idx = 0;
+    int rc = -1;
+
+    if (!level || !slot || !order)
+        goto done;
+
+    for (size_t w = 0; w < n_wires; w++) {
+        const gf16_wire_entry_t *e = &wires[w];
+        size_t lv;
+        switch (e->kind) {
+        case GF16_WIRE_WITNESS:
+            slot[w] = witness_idx++;
+            lv = 0;
+            break;
+        case GF16_WIRE_MUL:
+            slot[w] = n_witness + mul_idx++;
+            lv = 0;
+            break;
+        case GF16_WIRE_XOR:
+            lv = 1 + (level[e->a] > level[e->b] ? level[e->a] : level[e->b]);
+            break;
+        case GF16_WIRE_XOR_CONST:
+        case GF16_WIRE_LINEAR_MAP:
+        case GF16_WIRE_SQUARE:
+            lv = 1 + level[e->a];
+            break;
+        case GF16_WIRE_INSTANCE:
+        case GF16_WIRE_CONST:
+        default:
+            lv = 0;
+            break;
+        }
+        level[w] = lv;
+        if (lv + 1 > span)
+            span = lv + 1;
+    }
+
+    offs = calloc(span + 1, sizeof(*offs));
+    cur = calloc(span, sizeof(*cur));
+    if (!offs || !cur)
+        goto done;
+    for (size_t w = 0; w < n_wires; w++)
+        offs[level[w] + 1]++;
+    for (size_t l = 0; l < span; l++)
+        offs[l + 1] += offs[l];
+    for (size_t w = 0; w < n_wires; w++) {
+        size_t l = level[w];
+        order[offs[l] + cur[l]++] = (gf16_wire_id)w;
+    }
+
+    gf16p_tag_shared_t sh;
+    sh.bit_tags = bit_tags;
+    sh.V_T = V_T;
+    sh.wires = wires;
+    sh.sq_matrix = sq_matrix;
+    sh.slot = slot;
+    sh.nb = nb;
+    rc = 0;
+    for (size_t l = 0; l < span; l++) {
+        size_t base = offs[l];
+        size_t width = offs[l + 1] - base;
+        if (width == 0)
+            continue;
+        sh.lvl = order + base;
+        if (width >= (size_t)4 * W) {
+            sh.width = width;
+            sh.W_eff = W;
+            if (ichor_pool_parallel_for(pool, W, gf16p_tag_job, &sh) != 0) {
+                rc = -1;
+                break;
+            }
+        } else {
+            for (size_t i = 0; i < width; i++)
+                gf16p_tag_wire(&sh, sh.lvl[i]);
+        }
+    }
+
+done:
+    free(level);
+    free(slot);
+    free(order);
+    free(offs);
+    free(cur);
+    return rc;
+}
+
+/* =====================================================================
  * zk_hash context: d+1 accumulators, one per opened coefficient of a degree-d
  * constraint (ctx->d; QS_DEGREE_D_DESIGN section 11).  Field-agnostic, mirrors
  * gf8/base; "_3" is historical (the d=2 case has 3 streams).
@@ -231,6 +467,10 @@ typedef struct {
     uint8_t t[32];
     unsigned int lambda;
     unsigned int d; /* constraint degree; streams 0..d are live */
+    /* Update count folded into this context: the exponent L in the segmented
+     * accumulate combine H = H*s^L + H_seg (T3.1; see gf8_prover.c).  Ignored by
+     * the serial single-context path. */
+    uint64_t n_upd;
 } gf16p_zk_hash_3_ctx;
 
 static void
@@ -240,6 +480,7 @@ gf16p_zk_hash_3_init(gf16p_zk_hash_3_ctx *ctx, const uint8_t *chall_2,
     unsigned int nb = lambda / 8;
     ctx->lambda = lambda;
     ctx->d = d;
+    ctx->n_upd = 0;
     memset(ctx->h0, 0, sizeof(ctx->h0));
     memset(ctx->h1, 0, sizeof(ctx->h1));
     memcpy(ctx->s, chall_2 + 2 * nb, nb);
@@ -259,6 +500,7 @@ gf16p_zk_hash_3_update(gf16p_zk_hash_3_ctx *ctx, const uint8_t *const *v,
 {
     static const uint8_t zero[32] = {0};
     unsigned int nb = ctx->lambda / 8;
+    ctx->n_upd++;
     for (unsigned int i = 0; i <= ctx->d; i++) {
         const uint8_t *vi = (i < nv) ? v[i] : zero;
         gf16p_gf_mul(tmp1, ctx->h0[i], ctx->s, ctx->lambda);
@@ -649,6 +891,223 @@ gf16p_accumulate_syndrome_ref(gf16p_zk_hash_3_ctx *hasher,
 }
 
 /* =====================================================================
+ * QuickSilver accumulate threading (T3.1, GF(2^16) mirror of gf8_prover.c).
+ *
+ * The ordered zk_hash update stream [MUL | PRODUCT/ZERO/EQUAL | LT | syndrome]
+ * (GF(2^16) has no norm / PRODUCT3 segments) is a Horner recurrence: order
+ * dependent but associative.  It is cut into W contiguous blocks hashed from
+ * zero into their own local contexts, then folded back in order via
+ * H = H*s^{L_b} + H_b, bit-identical to the serial fold.
+ * ===================================================================== */
+
+/* Per-block transient scratch, hoisted like the serial loop.  Secret per-wire
+ * tags pass through; secure-zeroed once when the block finishes. */
+typedef struct {
+    uint8_t tag_a[32], tag_b[32], tag_c[32];
+    uint8_t emb_a[32], emb_b[32], emb_c[32];
+    uint8_t v0[32], v1[32], v2[32];
+    uint8_t prod[32];
+    uint8_t tmp1[32], tmp2[32];
+} gf16p_accum_scratch_t;
+
+/* One MUL gate check (output wire w).  Byte-identical to the inline Step-4. */
+static void
+gf16p_accumulate_mul(gf16p_zk_hash_3_ctx *hasher, const gf16_wire_entry_t *e,
+                     gf16_wire_id w, const uint8_t *bit_tags,
+                     const voleith_gf16_t *wire_vals, unsigned int lambda,
+                     unsigned int nb, const uint8_t *beta,
+                     gf16p_accum_scratch_t *sc)
+{
+    gf16_wire_id wa = e->a, wb = e->b;
+    uint16_t val_a = wire_vals[wa];
+    uint16_t val_b = wire_vals[wb];
+    uint16_t val_c = wire_vals[w];
+
+    gf16p_word_combine(sc->tag_a, bit_tags + (size_t)wa * GF16_ELEM_BITS * nb,
+                       nb, lambda, beta);
+    gf16p_word_combine(sc->tag_b, bit_tags + (size_t)wb * GF16_ELEM_BITS * nb,
+                       nb, lambda, beta);
+    gf16p_word_combine(sc->tag_c, bit_tags + (size_t)w * GF16_ELEM_BITS * nb,
+                       nb, lambda, beta);
+    gf16p_embed(sc->emb_a, val_a, lambda);
+    gf16p_embed(sc->emb_b, val_b, lambda);
+    gf16p_embed(sc->emb_c, val_c, lambda);
+
+    gf16p_gf_mul(sc->prod, sc->tag_a, sc->tag_b, lambda);
+    for (unsigned int k = 0; k < nb; k++)
+        sc->v0[k] = sc->prod[k] ^ sc->tag_c[k];
+
+    gf16p_gf_mul(sc->v1, sc->tag_a, sc->emb_b, lambda);
+    gf16p_gf_mul(sc->prod, sc->tag_b, sc->emb_a, lambda);
+    for (unsigned int k = 0; k < nb; k++)
+        sc->v1[k] ^= sc->prod[k] ^ sc->emb_c[k];
+
+    gf16p_embed(sc->v2, voleith_gf16_mul(val_a, val_b), lambda);
+
+    const uint8_t *vv[3] = {sc->v0, sc->v1, sc->v2};
+    gf16p_zk_hash_3_update(hasher, vv, 3, sc->tmp1, sc->tmp2);
+}
+
+/* One PRODUCT / ZERO / EQUAL constraint.  Byte-identical to the inline Step-5. */
+static void
+gf16p_accumulate_constraint(gf16p_zk_hash_3_ctx *hasher,
+                            const gf16_constraint_entry_t *c,
+                            const uint8_t *bit_tags,
+                            const voleith_gf16_t *wire_vals,
+                            unsigned int lambda, unsigned int nb,
+                            const uint8_t *beta, gf16p_accum_scratch_t *sc)
+{
+    switch (c->kind) {
+    case GF16_CONSTRAINT_PRODUCT: {
+        uint16_t val_a = wire_vals[c->a];
+        uint16_t val_b = wire_vals[c->b];
+        uint16_t val_c = wire_vals[c->c];
+
+        gf16p_word_combine(sc->tag_a,
+                           bit_tags + (size_t)c->a * GF16_ELEM_BITS * nb, nb,
+                           lambda, beta);
+        gf16p_word_combine(sc->tag_b,
+                           bit_tags + (size_t)c->b * GF16_ELEM_BITS * nb, nb,
+                           lambda, beta);
+        gf16p_word_combine(sc->tag_c,
+                           bit_tags + (size_t)c->c * GF16_ELEM_BITS * nb, nb,
+                           lambda, beta);
+        gf16p_embed(sc->emb_a, val_a, lambda);
+        gf16p_embed(sc->emb_b, val_b, lambda);
+        gf16p_embed(sc->emb_c, val_c, lambda);
+
+        gf16p_gf_mul(sc->prod, sc->tag_a, sc->tag_b, lambda);
+        for (unsigned int k = 0; k < nb; k++)
+            sc->v0[k] = sc->prod[k] ^ sc->tag_c[k];
+
+        gf16p_gf_mul(sc->v1, sc->tag_a, sc->emb_b, lambda);
+        gf16p_gf_mul(sc->prod, sc->tag_b, sc->emb_a, lambda);
+        for (unsigned int k = 0; k < nb; k++)
+            sc->v1[k] ^= sc->prod[k] ^ sc->emb_c[k];
+
+        /* v2 = embed(val_c): the claimed product value (soundness). */
+        gf16p_embed(sc->v2, val_c, lambda);
+
+        const uint8_t *vv[3] = {sc->v0, sc->v1, sc->v2};
+        gf16p_zk_hash_3_update(hasher, vv, 3, sc->tmp1, sc->tmp2);
+        break;
+    }
+    case GF16_CONSTRAINT_ZERO: {
+        gf16p_word_combine(sc->tag_a,
+                           bit_tags + (size_t)c->a * GF16_ELEM_BITS * nb, nb,
+                           lambda, beta);
+        const uint8_t *vv[1] = {sc->tag_a};
+        gf16p_zk_hash_3_update(hasher, vv, 1, sc->tmp1, sc->tmp2);
+        break;
+    }
+    case GF16_CONSTRAINT_EQUAL: {
+        gf16p_word_combine(sc->tag_a,
+                           bit_tags + (size_t)c->a * GF16_ELEM_BITS * nb, nb,
+                           lambda, beta);
+        gf16p_word_combine(sc->tag_b,
+                           bit_tags + (size_t)c->b * GF16_ELEM_BITS * nb, nb,
+                           lambda, beta);
+        for (unsigned int k = 0; k < nb; k++)
+            sc->tag_a[k] ^= sc->tag_b[k];
+        const uint8_t *vv[1] = {sc->tag_a};
+        gf16p_zk_hash_3_update(hasher, vv, 1, sc->tmp1, sc->tmp2);
+        break;
+    }
+    }
+}
+
+/* out = base^e in GF(2^lambda), square-and-multiply (serial combine only). */
+static void
+gf16p_gf_pow(uint8_t *out, const uint8_t *base, uint64_t e, unsigned int lambda,
+             unsigned int nb)
+{
+    uint8_t result[32], b[32], tmp[32];
+    gf16p_embed(result, 1, lambda); /* GF(2^lambda) one */
+    memcpy(b, base, nb);
+    while (e != 0) {
+        if (e & 1u) {
+            gf16p_gf_mul(tmp, result, b, lambda);
+            memcpy(result, tmp, nb);
+        }
+        e >>= 1;
+        if (e != 0) {
+            gf16p_gf_mul(tmp, b, b, lambda);
+            memcpy(b, tmp, nb);
+        }
+    }
+    memcpy(out, result, nb);
+}
+
+/* Read-only descriptor of the accumulate work, shared by every block job. */
+typedef struct {
+    const gf16_wire_entry_t *wires;
+    const gf16_constraint_entry_t *constraints;
+    const gf16_wire_id *mul_ids; /* ascending-wire-id MUL list, c0 long */
+    const uint8_t *bit_tags;
+    const voleith_gf16_t *wire_vals;
+    const uint8_t *beta;
+    const gf16_lt_entry_t *lts;
+    const gf16_wire_id *lt_bits;
+    const gf16_syndrome_entry_t *syn;
+    const gf16_wire_id *syn_bits;
+    const size_t *offs;           /* W+1 partition offsets into [0, n_items) */
+    gf16p_zk_hash_3_ctx *hashers; /* W per-block local contexts              */
+    gf16p_accum_scratch_t *scr;   /* W per-block scratch                     */
+    size_t c0, c1, c2;            /* cumulative segment bounds               */
+    unsigned int lambda, nb;
+    int syn_ref_mode;
+} gf16p_accum_shared_t;
+
+/* Hash one contiguous [g0, g1) sub-range of the canonical item stream. */
+static int
+gf16p_qs_accum_range(const gf16p_accum_shared_t *sh, size_t blk, size_t g0,
+                     size_t g1)
+{
+    gf16p_zk_hash_3_ctx *h = &sh->hashers[blk];
+    gf16p_accum_scratch_t *sc = &sh->scr[blk];
+    uint8_t *t1 = sc->tmp1, *t2 = sc->tmp2;
+    unsigned int lambda = sh->lambda, nb = sh->nb;
+
+    for (size_t g = g0; g < g1; g++) {
+        if (g < sh->c0) {
+            gf16_wire_id w = sh->mul_ids[g];
+            gf16p_accumulate_mul(h, &sh->wires[w], w, sh->bit_tags,
+                                 sh->wire_vals, lambda, nb, sh->beta, sc);
+        } else if (g < sh->c1) {
+            gf16p_accumulate_constraint(h, &sh->constraints[g - sh->c0],
+                                        sh->bit_tags, sh->wire_vals, lambda, nb,
+                                        sh->beta, sc);
+        } else if (g < sh->c2) {
+            const gf16_lt_entry_t *lt = &sh->lts[g - sh->c1];
+            if (gf16p_accumulate_lt(h, lt, sh->lt_bits + lt->bits_off,
+                                    sh->bit_tags, sh->wire_vals, lambda, nb,
+                                    sh->beta, t1, t2) != 0)
+                return -1;
+        } else {
+            const gf16_syndrome_entry_t *sy = &sh->syn[g - sh->c2];
+            int rc = sh->syn_ref_mode
+                         ? gf16p_accumulate_syndrome_ref(
+                               h, sy, sh->syn_bits, sh->bit_tags, sh->wire_vals,
+                               lambda, nb, sh->beta, t1, t2)
+                         : gf16p_accumulate_syndrome(
+                               h, sy, sh->syn_bits, sh->bit_tags, sh->wire_vals,
+                               lambda, nb, sh->beta, t1, t2);
+            if (rc != 0)
+                return -1;
+        }
+    }
+    return 0;
+}
+
+/* ichor indexed-job trampoline: block index -> its partition range. */
+static int
+gf16p_qs_accum_job(size_t blk, void *ud)
+{
+    const gf16p_accum_shared_t *sh = (const gf16p_accum_shared_t *)ud;
+    return gf16p_qs_accum_range(sh, blk, sh->offs[blk], sh->offs[blk + 1]);
+}
+
+/* =====================================================================
  * Main prover
  * ===================================================================== */
 
@@ -666,7 +1125,8 @@ gf16_qs_prove_impl(const voleith_gf16_circuit_t *circuit,
                    const voleith_gf16_t *witness,
                    const voleith_gf16_t *instance, unsigned int lambda,
                    const uint8_t *u, const uint8_t **V, const uint8_t *chall_2,
-                   uint8_t *d_out, uint8_t *const *a_out, int reject_invalid)
+                   uint8_t *d_out, uint8_t *const *a_out, int reject_invalid,
+                   struct ichor_pool *pool)
 {
     if (!circuit || !witness || !u || !V || !chall_2 || !d_out || !a_out)
         return -1;
@@ -715,7 +1175,7 @@ gf16_qs_prove_impl(const voleith_gf16_circuit_t *circuit,
     if (!bit_tags)
         goto oom;
 
-    V_T = gf16p_transpose_matrix(V, lambda, nb, n_bit_cols);
+    V_T = gf16p_transpose_matrix(V, lambda, nb, n_bit_cols, pool);
     if (!V_T)
         goto oom;
 
@@ -736,55 +1196,72 @@ gf16_qs_prove_impl(const voleith_gf16_circuit_t *circuit,
 
     /* Step 2: propagate bit-tags in topological order. */
     {
-        size_t witness_idx = 0;
-        size_t mul_idx = 0;
+        unsigned int W = 1;
+        if (pool != NULL) {
+            unsigned ps = ichor_pool_size(pool);
+            if (ps > 1u)
+                W = ps;
+        }
+        int threaded = -1;
+        if (W > 1)
+            threaded = gf16p_tag_wavefront(bit_tags, V_T, wires, sq_matrix,
+                                           n_wires, n_witness, nb, pool, W);
 
-        for (size_t w = 0; w < n_wires; w++) {
-            const gf16_wire_entry_t *e = &wires[w];
-            uint8_t *bt_w = bit_tags + w * GF16_ELEM_BITS * nb;
+        /* Serial reference walk: W<=1, no pool, alloc failure, or pool refusal.
+         * The threaded path above is bit-identical to this. */
+        if (threaded != 0) {
+            size_t witness_idx = 0;
+            size_t mul_idx = 0;
 
-            switch (e->kind) {
-            case GF16_WIRE_WITNESS: {
-                size_t slot = witness_idx++;
-                for (unsigned int i = 0; i < GF16_ELEM_BITS; i++)
-                    memcpy(bt_w + i * nb,
-                           V_T + (slot * GF16_ELEM_BITS + i) * nb, nb);
-                break;
-            }
-            case GF16_WIRE_INSTANCE:
-            case GF16_WIRE_CONST:
-                memset(bt_w, 0, GF16_ELEM_BITS * nb);
-                break;
+            for (size_t w = 0; w < n_wires; w++) {
+                const gf16_wire_entry_t *e = &wires[w];
+                uint8_t *bt_w = bit_tags + w * GF16_ELEM_BITS * nb;
 
-            case GF16_WIRE_XOR: {
-                const uint8_t *bt_a = bit_tags + e->a * GF16_ELEM_BITS * nb;
-                const uint8_t *bt_b = bit_tags + e->b * GF16_ELEM_BITS * nb;
-                for (unsigned int i = 0; i < GF16_ELEM_BITS * nb; i++)
-                    bt_w[i] = bt_a[i] ^ bt_b[i];
-                break;
-            }
-            case GF16_WIRE_XOR_CONST:
-                memcpy(bt_w, bit_tags + e->a * GF16_ELEM_BITS * nb,
-                       GF16_ELEM_BITS * nb);
-                break;
+                switch (e->kind) {
+                case GF16_WIRE_WITNESS: {
+                    size_t slot = witness_idx++;
+                    for (unsigned int i = 0; i < GF16_ELEM_BITS; i++)
+                        memcpy(bt_w + i * nb,
+                               V_T + (slot * GF16_ELEM_BITS + i) * nb, nb);
+                    break;
+                }
+                case GF16_WIRE_INSTANCE:
+                case GF16_WIRE_CONST:
+                    memset(bt_w, 0, GF16_ELEM_BITS * nb);
+                    break;
 
-            case GF16_WIRE_LINEAR_MAP:
-                gf16p_apply_linear_map(
-                    bt_w, bit_tags + e->a * GF16_ELEM_BITS * nb, e->matrix, nb);
-                break;
+                case GF16_WIRE_XOR: {
+                    const uint8_t *bt_a = bit_tags + e->a * GF16_ELEM_BITS * nb;
+                    const uint8_t *bt_b = bit_tags + e->b * GF16_ELEM_BITS * nb;
+                    for (unsigned int i = 0; i < GF16_ELEM_BITS * nb; i++)
+                        bt_w[i] = bt_a[i] ^ bt_b[i];
+                    break;
+                }
+                case GF16_WIRE_XOR_CONST:
+                    memcpy(bt_w, bit_tags + e->a * GF16_ELEM_BITS * nb,
+                           GF16_ELEM_BITS * nb);
+                    break;
 
-            case GF16_WIRE_SQUARE:
-                gf16p_apply_linear_map(
-                    bt_w, bit_tags + e->a * GF16_ELEM_BITS * nb, sq_matrix, nb);
-                break;
+                case GF16_WIRE_LINEAR_MAP:
+                    gf16p_apply_linear_map(
+                        bt_w, bit_tags + e->a * GF16_ELEM_BITS * nb, e->matrix,
+                        nb);
+                    break;
 
-            case GF16_WIRE_MUL: {
-                size_t slot = n_witness + mul_idx++;
-                for (unsigned int i = 0; i < GF16_ELEM_BITS; i++)
-                    memcpy(bt_w + i * nb,
-                           V_T + (slot * GF16_ELEM_BITS + i) * nb, nb);
-                break;
-            }
+                case GF16_WIRE_SQUARE:
+                    gf16p_apply_linear_map(
+                        bt_w, bit_tags + e->a * GF16_ELEM_BITS * nb, sq_matrix,
+                        nb);
+                    break;
+
+                case GF16_WIRE_MUL: {
+                    size_t slot = n_witness + mul_idx++;
+                    for (unsigned int i = 0; i < GF16_ELEM_BITS; i++)
+                        memcpy(bt_w + i * nb,
+                               V_T + (slot * GF16_ELEM_BITS + i) * nb, nb);
+                    break;
+                }
+                }
             }
         }
     }
@@ -808,161 +1285,155 @@ gf16_qs_prove_impl(const voleith_gf16_circuit_t *circuit,
         }
     }
 
-    /* Step 4 + 5: accumulate MUL gate checks and constraints. */
-    gf16p_zk_hash_3_ctx hasher;
-    /* d (opening count) was derived from qs_degree at entry; zk_hash is
+    /* Step 4 + 5: accumulate MUL gate checks and constraints (threaded, T3.1).
+     * d (opening count) was derived from qs_degree at entry; zk_hash is
      * degree-parameterized. */
+    gf16p_zk_hash_3_ctx hasher;
     gf16p_zk_hash_3_init(&hasher, chall_2, lambda, d);
 
     {
-        uint8_t tag_a[32], tag_b[32], tag_c[32];
-        uint8_t emb_a[32], emb_b[32], emb_c[32];
-        uint8_t v0[32], v1[32], v2[32];
-        uint8_t prod[32];
+        /*
+         * Segmented reduction over the canonical update stream
+         * [MUL | PRODUCT/ZERO/EQUAL | LT | syndrome], cut into W contiguous
+         * blocks hashed in parallel and folded back in order; bit-identical to
+         * the serial fold (see the T3.1 banner).
+         */
+        size_t n_lt = voleith_gf16_circuit_lt_count(circuit);
+        const gf16_lt_entry_t *lts =
+            voleith_gf16_circuit_lt_constraints(circuit);
+        const gf16_wire_id *lt_bits = voleith_gf16_circuit_lt_bits(circuit);
+        size_t n_syn = voleith_gf16_circuit_syndrome_count(circuit);
+        const gf16_syndrome_entry_t *syn =
+            voleith_gf16_circuit_syndrome_constraints(circuit);
+        const gf16_wire_id *syn_bits =
+            voleith_gf16_circuit_syndrome_bits(circuit);
 
-        for (size_t w = 0; w < n_wires; w++) {
-            const gf16_wire_entry_t *e = &wires[w];
-            if (e->kind != GF16_WIRE_MUL)
-                continue;
-
-            gf16_wire_id wa = e->a, wb = e->b;
-            uint16_t val_a = wire_vals[wa];
-            uint16_t val_b = wire_vals[wb];
-            uint16_t val_c = wire_vals[w];
-
-            gf16p_word_combine(tag_a, bit_tags + wa * GF16_ELEM_BITS * nb, nb,
-                               lambda, beta);
-            gf16p_word_combine(tag_b, bit_tags + wb * GF16_ELEM_BITS * nb, nb,
-                               lambda, beta);
-            gf16p_word_combine(tag_c, bit_tags + w * GF16_ELEM_BITS * nb, nb,
-                               lambda, beta);
-            gf16p_embed(emb_a, val_a, lambda);
-            gf16p_embed(emb_b, val_b, lambda);
-            gf16p_embed(emb_c, val_c, lambda);
-
-            /* v0 = tag_a*tag_b + tag_c */
-            gf16p_gf_mul(prod, tag_a, tag_b, lambda);
-            for (unsigned int k = 0; k < nb; k++)
-                v0[k] = prod[k] ^ tag_c[k];
-
-            /* v1 = tag_a*emb_b + tag_b*emb_a + emb_c */
-            gf16p_gf_mul(v1, tag_a, emb_b, lambda);
-            gf16p_gf_mul(prod, tag_b, emb_a, lambda);
-            for (unsigned int k = 0; k < nb; k++)
-                v1[k] ^= prod[k] ^ emb_c[k];
-
-            /* v2 = embed(gf16_mul(val_a, val_b)) */
-            gf16p_embed(v2, voleith_gf16_mul(val_a, val_b), lambda);
-
-            const uint8_t *vv[3] = {v0, v1, v2};
-            gf16p_zk_hash_3_update(&hasher, vv, 3, tmp1, tmp2);
+        /* MUL item list in ascending wire id (the serial MUL order). */
+        gf16_wire_id *mul_ids = NULL;
+        if (n_mul > 0) {
+            mul_ids = calloc(n_mul, sizeof(*mul_ids));
+            if (!mul_ids)
+                goto err;
+            size_t mi = 0;
+            for (size_t w = 0; w < n_wires; w++)
+                if (wires[w].kind == GF16_WIRE_MUL)
+                    mul_ids[mi++] = (gf16_wire_id)w;
         }
 
-        for (size_t ci = 0; ci < n_constraints; ci++) {
-            const gf16_constraint_entry_t *c = &constraints[ci];
+        size_t c0 = n_mul;
+        size_t c1 = c0 + n_constraints;
+        size_t c2 = c1 + n_lt;
+        size_t n_items = c2 + n_syn;
 
-            switch (c->kind) {
-            case GF16_CONSTRAINT_PRODUCT: {
-                uint16_t val_a = wire_vals[c->a];
-                uint16_t val_b = wire_vals[c->b];
-                uint16_t val_c = wire_vals[c->c];
+        /* One block per worker, capped at the item count; a null or size<=1
+         * pool runs a single serial block (bit-identical reference). */
+        size_t W = 1;
+        if (pool != NULL) {
+            unsigned ps = ichor_pool_size(pool);
+            if (ps > 1u)
+                W = (size_t)ps;
+        }
+        if (W > n_items)
+            W = (n_items > 0) ? n_items : 1;
 
-                gf16p_word_combine(tag_a, bit_tags + c->a * GF16_ELEM_BITS * nb,
-                                   nb, lambda, beta);
-                gf16p_word_combine(tag_b, bit_tags + c->b * GF16_ELEM_BITS * nb,
-                                   nb, lambda, beta);
-                gf16p_word_combine(tag_c, bit_tags + c->c * GF16_ELEM_BITS * nb,
-                                   nb, lambda, beta);
-                gf16p_embed(emb_a, val_a, lambda);
-                gf16p_embed(emb_b, val_b, lambda);
-                gf16p_embed(emb_c, val_c, lambda);
+        size_t *offs = calloc(W + 1, sizeof(*offs));
+        gf16p_zk_hash_3_ctx *hashers = calloc(W, sizeof(*hashers));
+        gf16p_accum_scratch_t *scr = calloc(W, sizeof(*scr));
+        if (!offs || !hashers || !scr) {
+            free(mul_ids);
+            free(offs);
+            free(hashers);
+            free(scr);
+            goto err;
+        }
 
-                gf16p_gf_mul(prod, tag_a, tag_b, lambda);
-                for (unsigned int k = 0; k < nb; k++)
-                    v0[k] = prod[k] ^ tag_c[k];
-
-                gf16p_gf_mul(v1, tag_a, emb_b, lambda);
-                gf16p_gf_mul(prod, tag_b, emb_a, lambda);
-                for (unsigned int k = 0; k < nb; k++)
-                    v1[k] ^= prod[k] ^ emb_c[k];
-
-                /* v2 = embed(val_c): the CLAIMED product value, not
-                 * embed(val_a*val_b).  For a correct constraint val_c =
-                 * val_a*val_b so the verifier's delta^2 term matches; for a
-                 * wrong one they differ and verification fails (soundness). */
-                gf16p_embed(v2, val_c, lambda);
-
-                const uint8_t *vv[3] = {v0, v1, v2};
-                gf16p_zk_hash_3_update(&hasher, vv, 3, tmp1, tmp2);
-                break;
+        /*
+         * Weighted contiguous partition: syndrome items cost much more than a
+         * single gate, so split by cumulative weight to balance blocks.  Cuts
+         * stay on item (canonical-order) edges; empty blocks are harmless.
+         */
+        offs[0] = 0;
+        offs[W] = n_items;
+        if (W > 1) {
+            uint64_t total_w = (uint64_t)c2 + (uint64_t)n_syn * 8u;
+            uint64_t cw = 0;
+            size_t b = 1;
+            for (size_t g = 0; g < n_items && b < W; g++) {
+                unsigned int wt = (g < c2) ? 1u : 8u;
+                cw += wt;
+                while (b < W && cw * (uint64_t)W >= (uint64_t)b * total_w) {
+                    offs[b] = g + 1;
+                    b++;
+                }
             }
-            case GF16_CONSTRAINT_ZERO: {
-                gf16p_word_combine(tag_a, bit_tags + c->a * GF16_ELEM_BITS * nb,
-                                   nb, lambda, beta);
-                const uint8_t *vv[1] = {tag_a};
-                gf16p_zk_hash_3_update(&hasher, vv, 1, tmp1, tmp2);
-                break;
-            }
-            case GF16_CONSTRAINT_EQUAL: {
-                gf16p_word_combine(tag_a, bit_tags + c->a * GF16_ELEM_BITS * nb,
-                                   nb, lambda, beta);
-                gf16p_word_combine(tag_b, bit_tags + c->b * GF16_ELEM_BITS * nb,
-                                   nb, lambda, beta);
-                for (unsigned int k = 0; k < nb; k++)
-                    tag_a[k] ^= tag_b[k];
-                const uint8_t *vv[1] = {tag_a};
-                gf16p_zk_hash_3_update(&hasher, vv, 1, tmp1, tmp2);
-                break;
-            }
+            while (b < W) {
+                offs[b] = n_items;
+                b++;
             }
         }
 
-        /* Less-than (NLT) constraints: degree-(w+1) family batched into the
-         * same zk_hash at natural degree (§18.1). */
-        {
-            size_t n_lt = voleith_gf16_circuit_lt_count(circuit);
-            const gf16_lt_entry_t *lts =
-                voleith_gf16_circuit_lt_constraints(circuit);
-            const gf16_wire_id *lt_bits = voleith_gf16_circuit_lt_bits(circuit);
-            for (size_t li = 0; li < n_lt; li++)
-                if (gf16p_accumulate_lt(
-                        &hasher, &lts[li], lt_bits + lts[li].bits_off, bit_tags,
-                        wire_vals, lambda, nb, beta, tmp1, tmp2) != 0)
-                    goto err;
-        }
+        for (size_t b = 0; b < W; b++)
+            gf16p_zk_hash_3_init(&hashers[b], chall_2, lambda, d);
 
-        /* Syndrome constraints (s = M*e^T): degree-idx_bits family, batched
-         * into the same zk_hash at natural degree (sections 8-10). */
-        {
-            size_t n_syn = voleith_gf16_circuit_syndrome_count(circuit);
-            const gf16_syndrome_entry_t *syn =
-                voleith_gf16_circuit_syndrome_constraints(circuit);
-            const gf16_wire_id *syn_bits =
-                voleith_gf16_circuit_syndrome_bits(circuit);
-            for (size_t si = 0; si < n_syn; si++) {
-                int src = voleith_gf16_syndrome_ref_mode
-                              ? gf16p_accumulate_syndrome_ref(
-                                    &hasher, &syn[si], syn_bits, bit_tags,
-                                    wire_vals, lambda, nb, beta, tmp1, tmp2)
-                              : gf16p_accumulate_syndrome(
-                                    &hasher, &syn[si], syn_bits, bit_tags,
-                                    wire_vals, lambda, nb, beta, tmp1, tmp2);
-                if (src != 0)
-                    goto err;
+        gf16p_accum_shared_t sh;
+        memset(&sh, 0, sizeof(sh));
+        sh.wires = wires;
+        sh.constraints = constraints;
+        sh.mul_ids = mul_ids;
+        sh.bit_tags = bit_tags;
+        sh.wire_vals = wire_vals;
+        sh.beta = beta;
+        sh.lts = lts;
+        sh.lt_bits = lt_bits;
+        sh.syn = syn;
+        sh.syn_bits = syn_bits;
+        sh.offs = offs;
+        sh.hashers = hashers;
+        sh.scr = scr;
+        sh.c0 = c0;
+        sh.c1 = c1;
+        sh.c2 = c2;
+        sh.lambda = lambda;
+        sh.nb = nb;
+        sh.syn_ref_mode = voleith_gf16_syndrome_ref_mode;
+
+        int perr;
+        if (W <= 1)
+            perr = gf16p_qs_accum_range(&sh, 0, 0, n_items);
+        else
+            perr = ichor_pool_parallel_for(pool, W, gf16p_qs_accum_job, &sh);
+
+        if (perr == 0) {
+            /* Fold the blocks into the zeroed master context, in order:
+             * H = H*s^{L_b} + H_b  (and the t-stream with t^{L_b}). */
+            uint8_t spow[32], tpow[32];
+            for (size_t b = 0; b < W; b++) {
+                gf16p_zk_hash_3_ctx *hb = &hashers[b];
+                gf16p_gf_pow(spow, hasher.s, hb->n_upd, lambda, nb);
+                gf16p_gf_pow(tpow, hasher.t, hb->n_upd, lambda, nb);
+                for (unsigned int i = 0; i <= d; i++) {
+                    gf16p_gf_mul(tmp1, hasher.h0[i], spow, lambda);
+                    for (unsigned int k = 0; k < nb; k++)
+                        hasher.h0[i][k] = tmp1[k] ^ hb->h0[i][k];
+                    gf16p_gf_mul(tmp2, hasher.h1[i], tpow, lambda);
+                    for (unsigned int k = 0; k < nb; k++)
+                        hasher.h1[i][k] = tmp2[k] ^ hb->h1[i][k];
+                }
             }
+            voleith_secure_zero(spow, sizeof(spow));
+            voleith_secure_zero(tpow, sizeof(tpow));
         }
 
-        /* Zero per-gate stack buffers (witness-derived material). */
-        voleith_secure_zero(tag_a, sizeof(tag_a));
-        voleith_secure_zero(tag_b, sizeof(tag_b));
-        voleith_secure_zero(tag_c, sizeof(tag_c));
-        voleith_secure_zero(emb_a, sizeof(emb_a));
-        voleith_secure_zero(emb_b, sizeof(emb_b));
-        voleith_secure_zero(emb_c, sizeof(emb_c));
-        voleith_secure_zero(v0, sizeof(v0));
-        voleith_secure_zero(v1, sizeof(v1));
-        voleith_secure_zero(v2, sizeof(v2));
-        voleith_secure_zero(prod, sizeof(prod));
+        /* Per-block secret material scrubbed before free (local tags in the
+         * contexts, and the embed / tag scratch). */
+        voleith_secure_zero(hashers, W * sizeof(*hashers));
+        voleith_secure_zero(scr, W * sizeof(*scr));
+        free(mul_ids);
+        free(offs);
+        free(hashers);
+        free(scr);
+        if (perr != 0)
+            goto err;
     }
 
     /* Step 6: d+1 x1 corrections from the VOLE mask blocks beyond ell*16.
@@ -1036,7 +1507,19 @@ voleith_gf16_qs_prove(const voleith_gf16_circuit_t *circuit,
                       uint8_t *const *a_out)
 {
     return gf16_qs_prove_impl(circuit, witness, instance, lambda, u, V, chall_2,
-                              d_out, a_out, 1);
+                              d_out, a_out, 1, NULL);
+}
+
+int
+voleith_gf16_qs_prove_ex(const voleith_gf16_circuit_t *circuit,
+                         const voleith_gf16_t *witness,
+                         const voleith_gf16_t *instance, unsigned int lambda,
+                         const uint8_t *u, const uint8_t **V,
+                         const uint8_t *chall_2, uint8_t *d_out,
+                         uint8_t *const *a_out, struct ichor_pool *pool)
+{
+    return gf16_qs_prove_impl(circuit, witness, instance, lambda, u, V, chall_2,
+                              d_out, a_out, 1, pool);
 }
 
 int
@@ -1048,7 +1531,7 @@ voleith_gf16_qs_prove_unchecked(const voleith_gf16_circuit_t *circuit,
                                 uint8_t *d_out, uint8_t *const *a_out)
 {
     return gf16_qs_prove_impl(circuit, witness, instance, lambda, u, V, chall_2,
-                              d_out, a_out, 0);
+                              d_out, a_out, 0, NULL);
 }
 
 static int

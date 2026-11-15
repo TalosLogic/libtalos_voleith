@@ -163,6 +163,18 @@ typedef struct {
 extern const voleith_node_hash_vt voleith_node_hash_hirose;
 extern const voleith_node_hash_vt voleith_node_hash_hirose_fixed32;
 /*
+ * Hirose norm-S-box vts.  Byte-identical node output to the three
+ * voleith_node_hash_hirose* vts (same construction, IV / c constants,
+ * 128-bit CR, 14 AES-256 rounds), but the two inner AES-256
+ * encryptions per iteration commit packed 4-bit subfield norms, so the
+ * per-iteration inv_in is 388 bytes instead of 500 (the AES-256 key
+ * schedule stays frozen 8-bit; only the encryptions' S-boxes shrink).
+ * Round count and the dense c constants are unchanged, preserving the
+ * quantum-collision posture.  See circuits/node_hash_hirose_norm_gf8.h.
+ */
+extern const voleith_node_hash_vt voleith_node_hash_hirose_norm;
+extern const voleith_node_hash_vt voleith_node_hash_hirose_fixed32_norm;
+/*
  * hirose_fixed96: fixed-leaf Hirose-AES-256 over 6 iterations, 96-byte
  * leaf-preimage capacity (32B node, 2^128 CR).  Min-cost 128-bit-CR
  * leaf hash for the 65-96 byte range (Q11): a composable leaf preimage
@@ -171,6 +183,8 @@ extern const voleith_node_hash_vt voleith_node_hash_hirose_fixed32;
  * distinct c_leaf constant.
  */
 extern const voleith_node_hash_vt voleith_node_hash_hirose_fixed96;
+/* Norm-S-box twin of voleith_node_hash_hirose_fixed96 (see above). */
+extern const voleith_node_hash_vt voleith_node_hash_hirose_fixed96_norm;
 
 /*
  * AES-family vts.  Both have node_bytes=16 and cr_bits=64.
@@ -192,6 +206,18 @@ extern const voleith_node_hash_vt voleith_node_hash_hirose_fixed96;
  */
 extern const voleith_node_hash_vt voleith_node_hash_aes_dm;
 extern const voleith_node_hash_vt voleith_node_hash_aes_cmac128;
+
+/*
+ * AES-family norm-S-box vts.  Byte-identical node output to
+ * voleith_node_hash_aes_dm / _aes_cmac128 (same MMO / CMAC
+ * construction, same domain constants, same 2^64 CR), but each inner
+ * AES call commits packed 4-bit subfield norms (FAEST paired-round
+ * S-box), so the per-call inv_in is 160 bytes instead of 200.  The
+ * witness is smaller at equal verify cost; drop-in for any merkle_vt /
+ * indexed_merkle_vt circuit.  See circuits/node_hash_aes_norm_gf8.h.
+ */
+extern const voleith_node_hash_vt voleith_node_hash_aes_dm_norm;
+extern const voleith_node_hash_vt voleith_node_hash_aes_cmac128_norm;
 
 /*
  * Grøstl-family vts.  All four share the same RFC-6962 domain
@@ -247,5 +273,19 @@ extern const voleith_node_hash_vt voleith_node_hash_grostl512_fixed;
  */
 extern const voleith_node_hash_vt voleith_node_hash_grostl256_fixed128;
 extern const voleith_node_hash_vt voleith_node_hash_grostl512_fixed256;
+
+/*
+ * Fixed-input Grøstl norm-S-box vts.  Byte-identical node output to the
+ * four fixed vts above (same compression, IV constants, CR), but each
+ * permutation round-pair commits packed 4-bit subfield norms (FAEST
+ * paired-round S-box).  Grøstl has no key schedule, so the witness is a
+ * clean 0.75 of the frozen one at equal verify cost; drop-in for any
+ * merkle_vt / indexed_merkle_vt circuit.  The deprecated Merkle-Damgård
+ * variants have no norm twin.  See circuits/node_hash_grostl_norm_gf8.h.
+ */
+extern const voleith_node_hash_vt voleith_node_hash_grostl256_fixed_norm;
+extern const voleith_node_hash_vt voleith_node_hash_grostl512_fixed_norm;
+extern const voleith_node_hash_vt voleith_node_hash_grostl256_fixed128_norm;
+extern const voleith_node_hash_vt voleith_node_hash_grostl512_fixed256_norm;
 
 #endif /* VOLEITH_NODE_HASH_VT_H */

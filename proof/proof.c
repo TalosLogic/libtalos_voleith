@@ -23,6 +23,7 @@
 
 #include "../core/util.h"
 #include "../core/backend_notice.h"
+#include <ichor/pool.h> /* ichor_pool_t lifecycle (T0.1 threading) */
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -168,6 +169,8 @@ struct voleith_prover_commit_t {
     size_t proof_size;
     unsigned int qs_degree; /* QS constraint degree d (d=2 baseline) */
     uint8_t *pbuf;          /* proof buffer (c and iv already written) */
+    voleith_threadctx_t
+        tctx; /* pool + ownership, plumbed to voleith_commit_ex */
 };
 
 struct voleith_verifier_reconstruct_t {
@@ -410,6 +413,21 @@ voleith_prove_commit(voleith_prover_commit_t **ctx_out,
                      const uint8_t *instance, const uint8_t *fs_seed,
                      size_t fs_seed_len, uint8_t *commitment_out)
 {
+    /* Historical behavior: single-threaded. */
+    voleith_threading_opts_t opts = {.nthreads = 1, .pool = NULL};
+    return voleith_prove_commit_ex(ctx_out, params, circuit, witness, instance,
+                                   fs_seed, fs_seed_len, commitment_out, &opts);
+}
+
+int
+voleith_prove_commit_ex(voleith_prover_commit_t **ctx_out,
+                        const voleith_params_t *params,
+                        const voleith_circuit_t *circuit,
+                        const uint8_t *witness, const uint8_t *instance,
+                        const uint8_t *fs_seed, size_t fs_seed_len,
+                        uint8_t *commitment_out,
+                        const voleith_threading_opts_t *opts)
+{
     if (!ctx_out || !params || !circuit || !witness || !fs_seed ||
         !commitment_out)
         return -1;
@@ -467,6 +485,35 @@ voleith_prove_commit(voleith_prover_commit_t **ctx_out,
         return -1;
     }
 
+    /*
+     * Create or borrow the commit context's worker pool.  A caller-supplied
+     * pool (opts->pool) is borrowed and must NOT be destroyed here; otherwise
+     * an internal pool is created, sized by opts->nthreads (0 = physical
+     * cores).  opts == NULL requests the physical-core default.  On a
+     * non-threaded ichor build the pool runs every job inline regardless.
+     * The pool is torn down (when owned) in voleith_prover_commit_free.
+     */
+    if (opts && opts->pool) {
+        ctx->tctx.pool = opts->pool;
+        ctx->tctx.owns_pool = 0;
+    } else {
+        unsigned int nthreads = opts ? opts->nthreads : 0;
+        if (ichor_pool_create(&ctx->tctx.pool, nthreads) != 0) {
+            voleith_prover_commit_free(ctx);
+            return -1;
+        }
+        ctx->tctx.owns_pool = 1;
+    }
+
+    /* Preallocate the commit chain's per-proof scratch on the context (T1.5),
+     * sized to vcp and ellhat_bytes, so prove_commit does no per-proof
+     * allocation in voleith_commit. */
+    if (voleith_threadctx_scratch_init(&ctx->tctx, &ctx->vcp, ellhat_bytes) !=
+        0) {
+        voleith_prover_commit_free(ctx);
+        return -1;
+    }
+
     /* Step 0: build and write the v1 metadata header into pbuf[0..47].
      * The body follows at pbuf + VOLEITH_PROOF_HEADER_BYTES, so every
      * subsequent offset is biased by HEADER_BYTES.  The header bytes
@@ -517,7 +564,7 @@ voleith_prove_commit(voleith_prover_commit_t **ctx_out,
 
     /* Step 2: VOLEitH commit */
     int commit_rc = voleith_commit(&ctx->com, &ctx->state, &ctx->vcp, root_seed,
-                                   iv_ptr, (unsigned int)ellhat);
+                                   iv_ptr, (unsigned int)ellhat, &ctx->tctx);
     voleith_secure_zero(root_seed, sizeof(root_seed));
     if (commit_rc != 0) {
         voleith_prover_commit_free(ctx);
@@ -678,6 +725,9 @@ voleith_prover_commit_free(voleith_prover_commit_t *ctx)
 {
     if (!ctx)
         return;
+    voleith_threadctx_scratch_free(&ctx->tctx);
+    if (ctx->tctx.owns_pool)
+        ichor_pool_destroy(ctx->tctx.pool);
     voleith_commitment_free(&ctx->com);
     voleith_prover_free(&ctx->state);
     if (ctx->pbuf) {
@@ -972,6 +1022,18 @@ voleith_prove(voleith_proof_t *proof, const voleith_params_t *params,
               const uint8_t *instance, const uint8_t *fs_seed,
               size_t fs_seed_len)
 {
+    /* Historical behavior: single-threaded. */
+    voleith_threading_opts_t opts = {.nthreads = 1, .pool = NULL};
+    return voleith_prove_ex(proof, params, circuit, witness, instance, fs_seed,
+                            fs_seed_len, &opts);
+}
+
+int
+voleith_prove_ex(voleith_proof_t *proof, const voleith_params_t *params,
+                 const voleith_circuit_t *circuit, const uint8_t *witness,
+                 const uint8_t *instance, const uint8_t *fs_seed,
+                 size_t fs_seed_len, const voleith_threading_opts_t *opts)
+{
     if (!proof || !params || !circuit || !witness || !fs_seed)
         return -1;
 
@@ -987,8 +1049,8 @@ voleith_prove(voleith_proof_t *proof, const voleith_params_t *params,
         return -1;
 
     voleith_prover_commit_t *ctx = NULL;
-    if (voleith_prove_commit(&ctx, params, circuit, witness, instance, fs_seed,
-                             fs_seed_len, blob) != 0) {
+    if (voleith_prove_commit_ex(&ctx, params, circuit, witness, instance,
+                                fs_seed, fs_seed_len, blob, opts) != 0) {
         free(blob);
         return -1;
     }
@@ -1150,6 +1212,24 @@ voleith_prove_v2(voleith_proof_t *proof, const voleith_params_t *params,
 
     return voleith_prove(proof, params, circuit, witness, instance, fs_seed,
                          fs_seed_len);
+}
+
+int
+voleith_prove_v2_ex(voleith_proof_t *proof, const voleith_params_t *params,
+                    const voleith_circuit_t *circuit, const uint8_t *witness,
+                    size_t witness_len, const uint8_t *instance,
+                    size_t instance_len, const uint8_t *fs_seed,
+                    size_t fs_seed_len, const voleith_threading_opts_t *opts)
+{
+    if (circuit == NULL)
+        return -1;
+    if (witness_len != voleith_circuit_witness_byte_len(circuit))
+        return -1;
+    if (instance_len != voleith_circuit_instance_byte_len(circuit))
+        return -1;
+
+    return voleith_prove_ex(proof, params, circuit, witness, instance, fs_seed,
+                            fs_seed_len, opts);
 }
 
 int

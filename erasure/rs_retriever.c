@@ -51,10 +51,11 @@ root_from_leaf(const voleith_node_hash_vt *vt, const uint8_t *leaf,
 }
 
 int
-voleith_rs_recover_index(voleith_rs_cr_profile_t cr, const uint8_t *fwk,
-                         const uint8_t *merkle_root, size_t n_chunks,
-                         const uint8_t *chunk_digest, const uint8_t *siblings,
-                         size_t *index_out)
+voleith_rs_recover_index(voleith_rs_cr_profile_t cr,
+                         const voleith_node_hash_vt *node_vt,
+                         const uint8_t *fwk, const uint8_t *merkle_root,
+                         size_t n_chunks, const uint8_t *chunk_digest,
+                         const uint8_t *siblings, size_t *index_out)
 {
     const voleith_node_hash_vt *vt;
     uint8_t leaf[MERKLE_VT_MAX_NODE_BYTES];
@@ -66,7 +67,7 @@ voleith_rs_recover_index(voleith_rs_cr_profile_t cr, const uint8_t *fwk,
         index_out == NULL)
         return -1;
 
-    vt = voleith_rs_chunk_node_vt(cr);
+    vt = voleith_rs_chunk_node_vt_resolve(cr, node_vt);
     if (vt == NULL)
         return -1;
     if (n_chunks == 0 || n_chunks > VOLEITH_RS_TREE_MAX_CAPACITY)
@@ -79,8 +80,8 @@ voleith_rs_recover_index(voleith_rs_cr_profile_t cr, const uint8_t *fwk,
         return -1;
 
     for (size_t c = 0; c < n_chunks; c++) {
-        if (voleith_rs_leaf_hash(cr, fwk, chunk_digest, c, index_bytes, leaf,
-                                 W) != VOLEITH_EC_OK)
+        if (voleith_rs_leaf_hash(cr, vt, fwk, chunk_digest, c, index_bytes,
+                                 leaf, W) != VOLEITH_EC_OK)
             goto out;
         if (root_from_leaf(vt, leaf, siblings, c, depth, root_c) != 0)
             goto out;
@@ -98,6 +99,7 @@ out:
 
 int
 voleith_rs_retriever_init(voleith_rs_retriever_t *r, voleith_rs_cr_profile_t cr,
+                          const voleith_node_hash_vt *node_vt,
                           const voleith_params_t *params,
                           voleith_ec_matrix_kind_t kind, int secret_index,
                           const uint8_t *merkle_root, const uint8_t *R,
@@ -113,7 +115,7 @@ voleith_rs_retriever_init(voleith_rs_retriever_t *r, voleith_rs_cr_profile_t cr,
 
     memset(r, 0, sizeof(*r));
 
-    vt = voleith_rs_chunk_node_vt(cr);
+    vt = voleith_rs_chunk_node_vt_resolve(cr, node_vt);
     if (vt == NULL || metadata->cr_profile != cr)
         return VOLEITH_EC_ERR_PARAM;
     if (secret_index && fwk == NULL)
@@ -128,6 +130,7 @@ voleith_rs_retriever_init(voleith_rs_retriever_t *r, voleith_rs_cr_profile_t cr,
         return VOLEITH_EC_ERR_PARAM;
 
     r->cr = cr;
+    r->node_vt = vt;
     r->params = params;
     r->kind = kind;
     r->secret_index = secret_index ? 1 : 0;
@@ -195,16 +198,16 @@ voleith_rs_retriever_offer(voleith_rs_retriever_t *r,
      * computed digest (so the bytes hash to the committed chunk_digest). */
     if (r->secret_index) {
         vrc = voleith_rs_chunk_cert_verify_secret_dir(
-            cert, r->params, r->cr, r->n, digest, r->merkle_root, r->metadata,
-            r->R, r->R_len);
+            cert, r->params, r->cr, r->node_vt, r->n, digest, r->merkle_root,
+            r->metadata, r->R, r->R_len);
     } else {
         if (public_index >= r->n) {
             *disp_out = VOLEITH_RS_CHUNK_REJECTED;
             return VOLEITH_EC_OK;
         }
-        vrc = voleith_rs_chunk_cert_verify(cert, r->params, r->cr, r->n,
-                                           public_index, digest, r->merkle_root,
-                                           r->metadata, r->R, r->R_len);
+        vrc = voleith_rs_chunk_cert_verify(
+            cert, r->params, r->cr, r->node_vt, r->n, public_index, digest,
+            r->merkle_root, r->metadata, r->R, r->R_len);
     }
     if (vrc != 0) {
         *disp_out = VOLEITH_RS_CHUNK_REJECTED;
@@ -213,8 +216,8 @@ voleith_rs_retriever_offer(voleith_rs_retriever_t *r,
 
     /* Determine the index for dedup / decode. */
     if (r->secret_index) {
-        if (voleith_rs_recover_index(r->cr, r->fwk, r->merkle_root, r->n,
-                                     digest, siblings, &index) != 0) {
+        if (voleith_rs_recover_index(r->cr, r->node_vt, r->fwk, r->merkle_root,
+                                     r->n, digest, siblings, &index) != 0) {
             *disp_out = VOLEITH_RS_CHUNK_REJECTED;
             return VOLEITH_EC_OK;
         }

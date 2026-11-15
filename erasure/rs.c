@@ -14,7 +14,10 @@
 
 #include "rs.h"
 
+#include <ichor/gf256.h>
+
 #include <stdlib.h>
+#include <string.h>
 
 int
 voleith_rs_init(voleith_rs_t *rs, size_t n, size_t k,
@@ -58,17 +61,20 @@ static void
 encode_row(const voleith_rs_t *rs, size_t row, const uint8_t *message,
            size_t chunk_bytes, uint8_t *out)
 {
-    size_t j, c;
+    size_t j;
 
-    for (c = 0; c < chunk_bytes; c++) {
-        uint16_t acc = 0;
-        for (j = 0; j < rs->k; j++) {
-            uint16_t coeff = voleith_ec_matrix_get(&rs->g, row, j);
-            uint16_t sym = message[j * chunk_bytes + c];
-            acc = voleith_ec_field_add(
-                acc, voleith_ec_field_mul(VOLEITH_EC_FIELD_GF8, coeff, sym));
-        }
-        out[c] = (uint8_t)acc;
+    /* out = sum_j G[row][j] (x) message_chunk_j, as a row-major accumulation of
+     * per-chunk GF(2^8) region axpys (dst ^= coeff (x) src), through the ichor
+     * gf256 primitive (poly 0x11B == voleith_gf8_mul).  XOR-accumulation is
+     * commutative, so this is byte-identical to the column-major sum.  A zero
+     * coefficient contributes nothing and is skipped. */
+    memset(out, 0, chunk_bytes);
+    for (j = 0; j < rs->k; j++) {
+        uint8_t coeff = (uint8_t)voleith_ec_matrix_get(&rs->g, row, j);
+        if (coeff == 0)
+            continue;
+        ichor_gf256_muladd_region(out, message + j * chunk_bytes, coeff,
+                                  chunk_bytes);
     }
 }
 
@@ -94,7 +100,7 @@ voleith_rs_decode(const voleith_rs_t *rs, const size_t *chunk_idx,
                   uint8_t *message)
 {
     voleith_ec_matrix_t sub = {0}, inv = {0};
-    size_t i, j, c;
+    size_t i, j;
     int rc;
 
     if (rs == NULL || chunk_idx == NULL || chunks == NULL || message == NULL ||
@@ -113,19 +119,18 @@ voleith_rs_decode(const voleith_rs_t *rs, const size_t *chunk_idx,
     if (rc != VOLEITH_EC_OK)
         return rc;
 
-    /* message = inv . received, applied symbol-wise over chunk_bytes. */
+    /* message = inv . received, as a row-major accumulation of per-chunk
+     * GF(2^8) region axpys through the ichor gf256 primitive (byte-identical to
+     * the column-major sum; zero coefficients skipped). */
     for (i = 0; i < rs->k; i++) {
         uint8_t *out = message + i * chunk_bytes;
-        for (c = 0; c < chunk_bytes; c++) {
-            uint16_t acc = 0;
-            for (j = 0; j < rs->k; j++) {
-                uint16_t coeff = voleith_ec_matrix_get(&inv, i, j);
-                uint16_t sym = chunks[j * chunk_bytes + c];
-                acc = voleith_ec_field_add(
-                    acc,
-                    voleith_ec_field_mul(VOLEITH_EC_FIELD_GF8, coeff, sym));
-            }
-            out[c] = (uint8_t)acc;
+        memset(out, 0, chunk_bytes);
+        for (j = 0; j < rs->k; j++) {
+            uint8_t coeff = (uint8_t)voleith_ec_matrix_get(&inv, i, j);
+            if (coeff == 0)
+                continue;
+            ichor_gf256_muladd_region(out, chunks + j * chunk_bytes, coeff,
+                                      chunk_bytes);
         }
     }
 

@@ -109,7 +109,7 @@ main(void)
             fail("chunk_digest");
             goto cleanup;
         }
-    if (voleith_rs_tree_root(cr, fwk, digests, n, root, sizeof(root)) !=
+    if (voleith_rs_tree_root(cr, NULL, fwk, digests, n, root, sizeof(root)) !=
         VOLEITH_EC_OK) {
         fail("tree_root");
         goto cleanup;
@@ -120,7 +120,7 @@ main(void)
         fail("out of memory");
         goto cleanup;
     }
-    if (voleith_rs_tree_sibling_path(cr, fwk, digests, n, idx, siblings,
+    if (voleith_rs_tree_sibling_path(cr, NULL, fwk, digests, n, idx, siblings,
                                      depth * W) != VOLEITH_EC_OK) {
         fail("sibling_path");
         goto cleanup;
@@ -146,7 +146,7 @@ main(void)
     }
 
     /* ---- Owner: issue the membership certificate for chunk SHOW_INDEX. ---- */
-    if (voleith_rs_chunk_cert_prove(&cert, &params, cr, n, idx, fwk,
+    if (voleith_rs_chunk_cert_prove(&cert, &params, cr, NULL, n, idx, fwk,
                                     digests + idx * digb, root, siblings,
                                     &meta) != 0) {
         fail("cert_prove");
@@ -286,8 +286,8 @@ main(void)
             cert_view.data = (uint8_t *)(uintptr_t)cert_p;
             cert_view.len = cert_len;
 
-            if (voleith_rs_chunk_cert_verify(&cert_view, &params, cr, n, idx,
-                                             cdigest, root_p, &pmeta, R,
+            if (voleith_rs_chunk_cert_verify(&cert_view, &params, cr, NULL, n,
+                                             idx, cdigest, root_p, &pmeta, R,
                                              W) != 0) {
                 fail("certificate did not verify from the wire bytes");
                 goto cleanup;

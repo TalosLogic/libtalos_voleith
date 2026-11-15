@@ -13,6 +13,7 @@
 #include "hash.h"
 #include "util.h"
 #include <assert.h>
+#include <ichor/pool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -254,11 +255,180 @@ leaf_commit_em(int lambda, const uint8_t *seed, const uint8_t iv[16],
     voleith_prg_clear(&prg);
 }
 
+/* ---- Prover threading-context scratch (T1.5) ---- */
+
+int
+voleith_threadctx_scratch_init(voleith_threadctx_t *tctx,
+                               const voleith_vc_params_t *params,
+                               size_t ellhat_bytes)
+{
+    if (!tctx || !params)
+        return -1;
+
+    size_t tau = (size_t)params->tau;
+    size_t sb = (size_t)params->lambda / 8;
+    size_t com_bytes = (size_t)params->n_leafcom * sb;
+    size_t hash_bytes = 2 * sb;
+    size_t max_N = (size_t)1 << params->k;
+
+    /* Transient scratch is per-worker (nworkers slots); the pool count is the
+     * source of truth (nthreads == 0 already resolved to physical cores).  No
+     * pool means a single inline worker (T2.3). */
+    size_t nworkers = tctx->pool ? (size_t)ichor_pool_size(tctx->pool) : 1u;
+
+    tctx->jobs = calloc(tau, sizeof(struct ichor_job_info));
+    tctx->bavc_concat = calloc(nworkers * max_N, com_bytes);
+    tctx->bavc_h_all = calloc(tau, hash_bytes);
+    tctx->vole_sd_buf = calloc(nworkers * max_N, sb);
+    tctx->vole_r = calloc(nworkers * 2 * max_N, ellhat_bytes);
+    tctx->vole_ui = calloc(tau, ellhat_bytes);
+    tctx->vole_v_off = calloc(tau + 1, sizeof(int));
+    if (!tctx->jobs || !tctx->bavc_concat || !tctx->bavc_h_all ||
+        !tctx->vole_sd_buf || !tctx->vole_r || !tctx->vole_ui ||
+        !tctx->vole_v_off) {
+        voleith_threadctx_scratch_free(tctx);
+        return -1;
+    }
+
+    tctx->vole_sd_buf_bytes = nworkers * max_N * sb;
+    tctx->vole_r_bytes = nworkers * 2 * max_N * ellhat_bytes;
+    tctx->vole_ui_bytes = tau * ellhat_bytes;
+
+    /* v_off is public and fixed by params, so fill it once here (T1.2). */
+    tctx->vole_v_off[0] = 0;
+    for (int i = 0; i < params->tau; i++) {
+        int ki = (i < params->tau1) ? params->k : (params->k - 1);
+        tctx->vole_v_off[i + 1] = tctx->vole_v_off[i] + ki;
+    }
+
+    tctx->scratch_tau = params->tau;
+    tctx->scratch_nworkers = (int)nworkers;
+    tctx->scratch_ellhat_bytes = ellhat_bytes;
+    return 0;
+}
+
+void
+voleith_threadctx_scratch_free(voleith_threadctx_t *tctx)
+{
+    if (!tctx)
+        return;
+
+    /* Secret buffers: zero before free (the per-call zeroing in
+     * voleith_vole_commit / voleith_convert_to_vole already clears the used
+     * portions; this is the defense-in-depth backstop other free sites in this
+     * file also apply, and it also scrubs any slot tail a short vector left
+     * untouched). */
+    if (tctx->vole_sd_buf)
+        voleith_secure_zero(tctx->vole_sd_buf, tctx->vole_sd_buf_bytes);
+    if (tctx->vole_r)
+        voleith_secure_zero(tctx->vole_r, tctx->vole_r_bytes);
+    if (tctx->vole_ui)
+        voleith_secure_zero(tctx->vole_ui, tctx->vole_ui_bytes);
+
+    free(tctx->jobs);
+    free(tctx->bavc_concat);
+    free(tctx->bavc_h_all);
+    free(tctx->vole_sd_buf);
+    free(tctx->vole_r);
+    free(tctx->vole_ui);
+    free(tctx->vole_v_off);
+
+    tctx->jobs = NULL;
+    tctx->bavc_concat = NULL;
+    tctx->bavc_h_all = NULL;
+    tctx->vole_sd_buf = NULL;
+    tctx->vole_r = NULL;
+    tctx->vole_ui = NULL;
+    tctx->vole_v_off = NULL;
+    tctx->scratch_tau = 0;
+    tctx->scratch_nworkers = 0;
+    tctx->scratch_ellhat_bytes = 0;
+    tctx->vole_sd_buf_bytes = 0;
+    tctx->vole_r_bytes = 0;
+    tctx->vole_ui_bytes = 0;
+}
+
 /* ---- BAVC Commit (FAEST spec Figure 5.4) ---- */
+
+/*
+ * Shared, read-only arguments for the per-vector commit job (T1.3).  One
+ * instance is built on the stack of voleith_bavc_commit and pointed at by
+ * every job descriptor; the job's own vector index arrives as the descriptor
+ * index i.  The GGM tree (in result->tree) is expanded once before any job
+ * runs and only read here; each job writes only its vector's disjoint RETAINED
+ * slices of result->leaf_seeds / result->leaf_coms and its h_all[i] slot
+ * (tau-indexed), and uses a PER-WORKER concat slot (concat_base + worker *
+ * concat_slot_bytes, worker = ichor_job_worker_index) as transient scratch, so
+ * the running jobs never touch the same bytes (T2.3).
+ */
+typedef struct {
+    voleith_bavc_t *result;
+    const voleith_vc_params_t *params;
+    const uint8_t *iv;
+    uint8_t *concat_base; /* per-worker: slot = concat_base + w*slot_bytes */
+    uint8_t *h_all;       /* per-tau (retained) */
+    size_t L;
+    size_t sb;
+    size_t com_bytes;
+    size_t concat_slot_bytes;
+    size_t hash_bytes;
+    int lambda;
+} bavc_commit_job_t;
+
+/*
+ * Commit one tau vector i: gather its leaf seeds, compute its leaf
+ * commitments, and fold them into h_all[i] = H_1(com_{i,0} || ... ||
+ * com_{i,N_i-1}).  Behavior-identical to the former two serial loops fused per
+ * vector: vector i reads only the leaf commitments it just wrote (its own
+ * PosInTree leaves), so fusing the compute and hash steps changes no output.
+ * Returns 0 (no failure path today; leaf_commit_em is infallible).
+ */
+static int
+bavc_commit_vector_job(size_t i, void *ud, ichor_job_ctx_t *jctx)
+{
+    const bavc_commit_job_t *a = ud;
+    const voleith_vc_params_t *params = a->params;
+    voleith_bavc_t *result = a->result;
+    size_t L = a->L;
+    size_t sb = a->sb;
+    size_t com_bytes = a->com_bytes;
+    int lambda = a->lambda;
+
+    uint32_t twk = (uint32_t)(i + L - 1);
+    size_t Ni = voleith_vc_N(params, (int)i);
+    uint8_t *concat = a->concat_base + (size_t)ichor_job_worker_index(jctx) *
+                                           a->concat_slot_bytes;
+
+    for (size_t j = 0; j < Ni; j++) {
+        size_t alpha = voleith_pos_in_tree(params, (int)i, j);
+        size_t leaf_idx = alpha - (L - 1);
+        const uint8_t *k_alpha = voleith_ggm_tree_node(&result->tree, alpha);
+
+        /* Leaf seed: for EM, sd = k_alpha. */
+        memcpy(result->leaf_seeds + leaf_idx * sb, k_alpha, sb);
+
+        /* Leaf commitment. */
+        if (params->n_leafcom == 2) {
+            /* FAEST-EM variant. */
+            leaf_commit_em(lambda, k_alpha, a->iv, twk,
+                           result->leaf_coms + leaf_idx * com_bytes);
+        }
+        /* TODO: FAEST variant (n_leafcom == 3) with LeafHash */
+
+        /* Build concat of com_{i,0} || ... || com_{i,N_i-1} in (i,j) order. */
+        memcpy(concat + j * com_bytes, result->leaf_coms + leaf_idx * com_bytes,
+               com_bytes);
+    }
+
+    /* h_i = H_1(concat). */
+    hash_h1(lambda, concat, Ni * com_bytes, a->h_all + i * a->hash_bytes);
+    return 0;
+}
 
 int
 voleith_bavc_commit(voleith_bavc_t *result, const voleith_vc_params_t *params,
-                    const uint8_t *root_seed, const uint8_t iv[16])
+                    const uint8_t *root_seed, const uint8_t iv[16],
+                    const voleith_threadctx_t *tctx)
 {
     int lambda = params->lambda;
     size_t sb = (size_t)lambda / 8;
@@ -286,91 +456,107 @@ voleith_bavc_commit(voleith_bavc_t *result, const voleith_vc_params_t *params,
     }
 
     /*
-     * Steps 8-11: For each leaf, compute LeafCommit.
+     * Steps 8-13: for each tau vector, compute its leaf commitments (FAEST-EM:
+     * sd_{i,j} = k_alpha, com_{i,j} = PRG(k_alpha, iv, i+L-1; 2lambda), same
+     * tweak across a vector, distinct seeds) and fold them into the per-vector
+     * hash h_i = H_1(com_{i,0} || ... || com_{i,N_i-1}).  Each vector's leaves
+     * (its PosInTree positions) are disjoint from every other vector's, so the
+     * vectors are independent and the tau-rep loop runs either serially or as
+     * one pool batch, bit-identically.  The final com = H_1(h_0 || ... ||
+     * h_{tau-1}) stays serial after the join (ordered absorb).
      *
-     * We iterate leaves by tree position (0..L-1), using a reverse
-     * mapping. But it's simpler to iterate by (i, j) pairs to get the
-     * correct tweak and to organize seeds/coms by leaf tree index.
-     *
-     * For FAEST-EM:
-     *   sd_{i,j} = k_α (the tree leaf seed)
-     *   com_{i,j} = PRG(k_α, iv, α; 2λ)
-     *
-     * The PRG tweak for LeafCommit is (i + L - 1), matching the FAEST
-     * spec and faest-ref. All leaves within the same vector i share the
-     * same tweak; they get different commitments because they have
-     * different seeds (k_alpha).
+     * Scratch (T2.3): h_all is per-tau (retained); concat is PER-WORKER
+     * transient scratch (nworkers slots, keyed in the job by worker index), so a
+     * worker reuses its one slot across the vectors it runs.  Prefer the
+     * prover's preallocated scratch on tctx; fall back to a local allocation
+     * when there is none (tctx == NULL, or a bare tctx as in a vole-layer test),
+     * sized to nworkers slots (1 when there is no pool).  hash_bytes = 2*sb is
+     * the H_1 output (2lambda bits).
      */
-    for (int i = 0; i < tau; i++) {
-        uint32_t twk = (uint32_t)((size_t)i + L - 1);
-        size_t Ni = voleith_vc_N(params, i);
-        for (size_t j = 0; j < Ni; j++) {
-            size_t alpha = voleith_pos_in_tree(params, i, j);
-            size_t leaf_idx = alpha - (L - 1);
+    size_t hash_bytes = 2 * sb;
+    size_t max_N = (size_t)1 << params->k;
+    size_t concat_slot_bytes = max_N * com_bytes;
+    size_t nworkers =
+        (tctx && tctx->pool) ? (size_t)ichor_pool_size(tctx->pool) : 1u;
 
-            const uint8_t *k_alpha =
-                voleith_ggm_tree_node(&result->tree, alpha);
-
-            /* Leaf seed: for EM, sd = k_α */
-            memcpy(result->leaf_seeds + leaf_idx * sb, k_alpha, sb);
-
-            /* Leaf commitment */
-            if (params->n_leafcom == 2) {
-                /* FAEST-EM variant */
-                leaf_commit_em(lambda, k_alpha, iv, twk,
-                               result->leaf_coms + leaf_idx * com_bytes);
-            }
-            /* TODO: FAEST variant (n_leafcom == 3) with LeafHash */
+    int have_scratch = (tctx && tctx->scratch_tau == tau);
+    uint8_t *h_all =
+        have_scratch ? tctx->bavc_h_all : calloc((size_t)tau, hash_bytes);
+    uint8_t *concat_all =
+        have_scratch ? tctx->bavc_concat : calloc(nworkers * max_N, com_bytes);
+    if (!h_all || !concat_all) {
+        if (!have_scratch) {
+            free(h_all);
+            free(concat_all);
         }
-    }
-
-    /*
-     * Steps 12-13: Hash leaf commitments per vector, then hash all vectors.
-     *
-     * h_i = H_1(com_{i,0} || com_{i,1} || ... || com_{i,N_i-1})
-     * com = H_1(h_0 || h_1 || ... || h_{τ-1})
-     *
-     * H_1(m) = SHAKE(m || 0x01; 2λ)
-     */
-    size_t hash_bytes = 2 * sb; /* H_1 output = 2λ bits */
-
-    /* Allocate temporary buffer for per-vector hashes */
-    uint8_t *h_all = calloc((size_t)tau, hash_bytes);
-    if (!h_all) {
         voleith_bavc_free(result);
         return -1;
     }
 
-    for (int i = 0; i < tau; i++) {
-        size_t Ni = voleith_vc_N(params, i);
+    bavc_commit_job_t jarg = {
+        .result = result,
+        .params = params,
+        .iv = iv,
+        .concat_base = concat_all,
+        .h_all = h_all,
+        .L = L,
+        .sb = sb,
+        .com_bytes = com_bytes,
+        .concat_slot_bytes = concat_slot_bytes,
+        .hash_bytes = hash_bytes,
+        .lambda = lambda,
+    };
 
-        /* Build concatenation of com_{i,0} || ... || com_{i,N_i-1} */
-        /* We need to collect the coms in (i,j) order */
-        size_t concat_len = Ni * com_bytes;
-        uint8_t *concat = calloc(1, concat_len);
-        if (!concat) {
-            free(h_all);
-            voleith_bavc_free(result);
-            return -1;
+    int rc = 0;
+    if (tctx && tctx->pool) {
+        /*
+         * Threaded path: submit the tau vectors as one caller-owned batch and
+         * block until all finish.  Reuse the preallocated descriptor array when
+         * present, else a local one.  jarg and jobs stay alive on this stack /
+         * on tctx until the wait returns, as the submit contract requires.
+         */
+        ichor_job_info_t *jobs =
+            have_scratch ? tctx->jobs : calloc((size_t)tau, sizeof(*jobs));
+        if (!jobs) {
+            rc = -1;
+        } else {
+            for (int i = 0; i < tau; i++) {
+                jobs[i].fn = bavc_commit_vector_job;
+                jobs[i].ud = &jarg;
+            }
+            uint64_t label = ichor_pool_new_label(tctx->pool);
+            int done = 0;
+            int err = 0;
+            rc = ichor_pool_submit_jobs(tctx->pool, jobs, (size_t)tau, label);
+            if (rc == 0)
+                rc = ichor_pool_wait(tctx->pool, label, -1, &done, &err);
+            if (rc == 0 && err != 0)
+                rc = err;
+            if (!have_scratch)
+                free(jobs);
         }
-
-        for (size_t j = 0; j < Ni; j++) {
-            size_t alpha = voleith_pos_in_tree(params, i, j);
-            size_t leaf_idx = alpha - (L - 1);
-            memcpy(concat + j * com_bytes,
-                   result->leaf_coms + leaf_idx * com_bytes, com_bytes);
-        }
-
-        /* h_i = H_1(concat) */
-        hash_h1(lambda, concat, concat_len, h_all + (size_t)i * hash_bytes);
-
-        free(concat);
+    } else {
+        /* Serial path (no pool, e.g. tctx == NULL): same job, run inline. */
+        for (int i = 0; i < tau; i++)
+            (void)bavc_commit_vector_job((size_t)i, &jarg, NULL);
     }
 
-    /* com = H_1(h_0 || ... || h_{τ-1}) */
+    if (rc != 0) {
+        if (!have_scratch) {
+            free(h_all);
+            free(concat_all);
+        }
+        voleith_bavc_free(result);
+        return -1;
+    }
+
+    /* com = H_1(h_0 || ... || h_{tau-1}). */
     hash_h1(lambda, h_all, (size_t)tau * hash_bytes, result->com);
 
-    free(h_all);
+    if (!have_scratch) {
+        free(concat_all);
+        free(h_all);
+    }
     return 0;
 }
 
@@ -561,11 +747,85 @@ voleith_bavc_opening_free(voleith_bavc_opening_t *opening)
 
 /* ---- BAVC Reconstruct (FAEST spec Figure 5.4, Reconstruct) ---- */
 
+/*
+ * Per-vector reconstruct job (T3.4a).  Mirrors bavc_commit_vector_job: computes
+ * vector i's leaf seeds / commitments (hidden leaf from the opening, the rest
+ * via LeafCommit on the reconstructed key) and folds them into h_i = H_1(concat
+ * of its com_{i,j}).  Each vector's leaves (its PosInTree positions) are
+ * disjoint, so the tau vectors are independent and run serially or as one pool
+ * batch, bit-identically.  concat is PER-WORKER transient scratch (nworkers
+ * slots, keyed by worker index); keys / rec / h_all are read or written at
+ * per-tau-disjoint offsets.
+ */
+typedef struct {
+    voleith_bavc_reconstruct_t *rec;
+    const voleith_bavc_opening_t *opening;
+    const voleith_vc_params_t *params;
+    const size_t *i_delta;
+    const uint8_t *keys;
+    const uint8_t *iv;
+    uint8_t *h_all;
+    uint8_t *concat_base;
+    size_t concat_slot_bytes;
+    size_t hash_bytes;
+    size_t com_bytes;
+    size_t sb;
+    size_t L;
+    int lambda;
+} bavc_reconstruct_job_t;
+
+static int
+bavc_reconstruct_vector_job(size_t i, void *ud, ichor_job_ctx_t *jctx)
+{
+    const bavc_reconstruct_job_t *a = ud;
+    const voleith_vc_params_t *params = a->params;
+    size_t L = a->L;
+    size_t sb = a->sb;
+    size_t com_bytes = a->com_bytes;
+    int lambda = a->lambda;
+
+    uint32_t twk = (uint32_t)(i + L - 1);
+    size_t Ni = voleith_vc_N(params, (int)i);
+    size_t delta_i = a->i_delta[i];
+    uint8_t *concat = a->concat_base + (size_t)ichor_job_worker_index(jctx) *
+                                           a->concat_slot_bytes;
+
+    for (size_t j = 0; j < Ni; j++) {
+        size_t alpha = voleith_pos_in_tree(params, (int)i, j);
+        size_t leaf_idx = alpha - (L - 1);
+
+        if (j == delta_i) {
+            /* Hidden leaf: commitment from opening, seed stays zero. */
+            const uint8_t *hidden_com = a->opening->data + i * com_bytes;
+            memcpy(a->rec->leaf_coms + leaf_idx * com_bytes, hidden_com,
+                   com_bytes);
+            memcpy(concat + j * com_bytes, hidden_com, com_bytes);
+        } else {
+            /* Non-hidden leaf: LeafCommit from the reconstructed key. */
+            const uint8_t *k_alpha = a->keys + alpha * sb;
+            memcpy(a->rec->leaf_seeds + leaf_idx * sb, k_alpha, sb);
+
+            if (params->n_leafcom == 2)
+                leaf_commit_em(lambda, k_alpha, a->iv, twk,
+                               a->rec->leaf_coms + leaf_idx * com_bytes);
+            /* TODO: FAEST variant (n_leafcom == 3) */
+
+            memcpy(concat + j * com_bytes,
+                   a->rec->leaf_coms + leaf_idx * com_bytes, com_bytes);
+        }
+    }
+
+    /* h_i = H_1(concat). */
+    hash_h1(lambda, concat, Ni * com_bytes, a->h_all + i * a->hash_bytes);
+    return 0;
+}
+
 int
-voleith_bavc_reconstruct(voleith_bavc_reconstruct_t *rec,
-                         const voleith_bavc_opening_t *opening,
-                         const voleith_vc_params_t *params,
-                         const size_t *i_delta, const uint8_t iv[16])
+voleith_bavc_reconstruct_ex(voleith_bavc_reconstruct_t *rec,
+                            const voleith_bavc_opening_t *opening,
+                            const voleith_vc_params_t *params,
+                            const size_t *i_delta, const uint8_t iv[16],
+                            const voleith_threadctx_t *tctx)
 {
     int lambda = params->lambda;
     size_t sb = (size_t)lambda / 8;
@@ -694,86 +954,106 @@ voleith_bavc_reconstruct(voleith_bavc_reconstruct_t *rec,
 
     voleith_secure_zero(prg_out, sizeof(prg_out));
 
-    /* Allocate output arrays */
-    rec->leaf_seeds = calloc(L, sb);
-    rec->leaf_coms = calloc(L, com_bytes);
-    if (!rec->leaf_seeds || !rec->leaf_coms) {
-        voleith_bavc_reconstruct_free(rec);
-        free(S);
-        free(keys);
-        return -1;
-    }
-
     /*
-     * For each (i, j): compute leaf seed and commitment.
-     * Hidden leaves get their commitment from the opening.
-     * Non-hidden leaves get (sd, com) from LeafCommit on the reconstructed key.
-     *
-     * Simultaneously build per-vector hashes for the global commitment.
+     * For each (i, j): compute leaf seed and commitment, and build per-vector
+     * hashes for the global commitment.  The tau vectors are independent (T3.4a)
+     * and run either serially or as one pool batch, bit-identically.  h_all is
+     * per-tau (retained); concat is PER-WORKER transient scratch (nworkers
+     * slots, keyed in the job by worker index).  The reconstruct is one-shot
+     * (not a repeated prover chain), so the scratch is allocated locally here
+     * rather than carried on the threadctx.
      */
     size_t hash_bytes = 2 * sb;
+    size_t max_N = (size_t)1 << params->k;
+    size_t concat_slot_bytes = max_N * com_bytes;
+    size_t nworkers =
+        (tctx && tctx->pool) ? (size_t)ichor_pool_size(tctx->pool) : 1u;
+
+    rec->leaf_seeds = calloc(L, sb);
+    rec->leaf_coms = calloc(L, com_bytes);
     uint8_t *h_all = calloc((size_t)tau, hash_bytes);
-    if (!h_all) {
+    uint8_t *concat_all = calloc(nworkers * max_N, com_bytes);
+    if (!rec->leaf_seeds || !rec->leaf_coms || !h_all || !concat_all) {
+        free(concat_all);
+        free(h_all);
         voleith_bavc_reconstruct_free(rec);
         free(S);
         free(keys);
         return -1;
     }
 
-    for (int i = 0; i < tau; i++) {
-        uint32_t twk = (uint32_t)((size_t)i + L - 1);
-        size_t Ni = voleith_vc_N(params, i);
-        size_t concat_len = Ni * com_bytes;
-        uint8_t *concat = calloc(1, concat_len);
-        if (!concat) {
-            free(h_all);
-            voleith_bavc_reconstruct_free(rec);
-            free(S);
-            free(keys);
-            return -1;
-        }
+    bavc_reconstruct_job_t jarg = {
+        .rec = rec,
+        .opening = opening,
+        .params = params,
+        .i_delta = i_delta,
+        .keys = keys,
+        .iv = iv,
+        .h_all = h_all,
+        .concat_base = concat_all,
+        .concat_slot_bytes = concat_slot_bytes,
+        .hash_bytes = hash_bytes,
+        .com_bytes = com_bytes,
+        .sb = sb,
+        .L = L,
+        .lambda = lambda,
+    };
 
-        for (size_t j = 0; j < Ni; j++) {
-            size_t alpha = voleith_pos_in_tree(params, i, j);
-            size_t leaf_idx = alpha - (L - 1);
-
-            if (j == i_delta[i]) {
-                /* Hidden leaf: use commitment from opening, seed stays zero */
-                const uint8_t *hidden_com =
-                    opening->data + (size_t)i * com_bytes;
-                memcpy(rec->leaf_coms + leaf_idx * com_bytes, hidden_com,
-                       com_bytes);
-                memcpy(concat + j * com_bytes, hidden_com, com_bytes);
-            } else {
-                /* Non-hidden leaf: LeafCommit from reconstructed key */
-                const uint8_t *k_alpha = keys + alpha * sb;
-                memcpy(rec->leaf_seeds + leaf_idx * sb, k_alpha, sb);
-
-                if (params->n_leafcom == 2) {
-                    /* FAEST-EM: com = PRG(k_α, iv, twk; 2λ), sd = k_α */
-                    leaf_commit_em(lambda, k_alpha, iv, twk,
-                                   rec->leaf_coms + leaf_idx * com_bytes);
-                }
-                /* TODO: FAEST variant (n_leafcom == 3) */
-
-                memcpy(concat + j * com_bytes,
-                       rec->leaf_coms + leaf_idx * com_bytes, com_bytes);
+    int rc = 0;
+    if (tctx && tctx->pool) {
+        ichor_job_info_t *jobs = calloc((size_t)tau, sizeof(*jobs));
+        if (!jobs) {
+            rc = -1;
+        } else {
+            for (int i = 0; i < tau; i++) {
+                jobs[i].fn = bavc_reconstruct_vector_job;
+                jobs[i].ud = &jarg;
             }
+            uint64_t label = ichor_pool_new_label(tctx->pool);
+            int done = 0;
+            int err = 0;
+            rc = ichor_pool_submit_jobs(tctx->pool, jobs, (size_t)tau, label);
+            if (rc == 0)
+                rc = ichor_pool_wait(tctx->pool, label, -1, &done, &err);
+            if (rc == 0 && err != 0)
+                rc = err;
+            free(jobs);
         }
+    } else {
+        /* Serial path (no pool, e.g. tctx == NULL): same job, run inline. */
+        for (int i = 0; i < tau; i++)
+            (void)bavc_reconstruct_vector_job((size_t)i, &jarg, NULL);
+    }
 
-        /* h_i = H_1(concat) */
-        hash_h1(lambda, concat, concat_len, h_all + (size_t)i * hash_bytes);
-        free(concat);
+    if (rc != 0) {
+        free(concat_all);
+        free(h_all);
+        voleith_bavc_reconstruct_free(rec);
+        free(S);
+        free(keys);
+        return -1;
     }
 
     /* com = H_1(h_0 || ... || h_{τ-1}) */
     hash_h1(lambda, h_all, (size_t)tau * hash_bytes, rec->com);
 
+    free(concat_all);
     free(h_all);
     voleith_secure_zero(keys, total_nodes * sb);
     free(keys);
     free(S);
     return 0;
+}
+
+/* Serial reconstruct: the historical entry point, now a thin wrapper over the
+ * threaded _ex with no pool (bit-identical to the pre-T3.4a code). */
+int
+voleith_bavc_reconstruct(voleith_bavc_reconstruct_t *rec,
+                         const voleith_bavc_opening_t *opening,
+                         const voleith_vc_params_t *params,
+                         const size_t *i_delta, const uint8_t iv[16])
+{
+    return voleith_bavc_reconstruct_ex(rec, opening, params, i_delta, iv, NULL);
 }
 
 void

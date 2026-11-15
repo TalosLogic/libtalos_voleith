@@ -101,6 +101,74 @@ voleith_gf8_circuit_fingerprint(
             &ctx, normalize_operand(constraints[i].b));
         rc |= voleith_shake128_absorb_u32_le(
             &ctx, normalize_operand(constraints[i].c));
+        /*
+         * The fourth operand `d` exists only for PRODUCT3 and is absorbed
+         * only for that kind, appended after `c`.  ZERO/EQUAL/PRODUCT
+         * constraints absorb exactly as before, so their fingerprints stay
+         * byte-identical to pre-PRODUCT3 circuits.
+         */
+        if (constraints[i].kind == GF8_CONSTRAINT_PRODUCT3)
+            rc |= voleith_shake128_absorb_u32_le(
+                &ctx, normalize_operand(constraints[i].d));
+    }
+
+    /*
+     * AES norm round-pair table (paired-round norm S-box).  Appended only when
+     * the circuit has at least one norm entry, so circuits without them (every
+     * frozen circuit) are byte-identical to the pre-norm encoding, exactly as
+     * the PRODUCT3 fourth operand is appended only for that kind.  Each entry
+     * binds nst, the last_pair flag, and its 4*nst wire ids.
+     */
+    {
+        size_t n_norm = voleith_gf8_circuit_norm_count(circuit);
+        if (n_norm > 0) {
+            const gf8_norm_entry_t *norms =
+                voleith_gf8_circuit_norm_constraints(circuit);
+            const gf8_wire_id *nw = voleith_gf8_circuit_norm_wires(circuit);
+            size_t j, k;
+            rc |= voleith_shake128_absorb_u32_le(&ctx, (uint32_t)n_norm);
+            for (j = 0; j < n_norm; j++) {
+                size_t cnt = (size_t)4 * norms[j].nst;
+                rc |= voleith_shake128_absorb_u32_le(&ctx,
+                                                     (uint32_t)norms[j].nst);
+                rc |= absorb_u8(&ctx, (uint8_t)(norms[j].last_pair ? 1 : 0));
+                for (k = 0; k < cnt; k++)
+                    rc |= voleith_shake128_absorb_u32_le(
+                        &ctx, normalize_operand(nw[norms[j].wires_off + k]));
+            }
+        }
+    }
+
+    /*
+     * Grostl norm round-pair table (sibling of the AES norm table).  Appended
+     * only when the circuit has at least one Grostl norm entry, so circuits
+     * without them stay byte-identical to the pre-Grostl-norm encoding.  Each
+     * entry binds nst, cols, is_q, odd_round, the 8 ShiftBytes row shifts, and
+     * its 3*nst wire ids.
+     */
+    {
+        size_t n_gn = voleith_gf8_circuit_grostl_norm_count(circuit);
+        if (n_gn > 0) {
+            const gf8_grostl_norm_entry_t *gn =
+                voleith_gf8_circuit_grostl_norm_constraints(circuit);
+            const gf8_wire_id *gw =
+                voleith_gf8_circuit_grostl_norm_wires(circuit);
+            size_t j, k;
+            rc |= voleith_shake128_absorb_u32_le(&ctx, (uint32_t)n_gn);
+            for (j = 0; j < n_gn; j++) {
+                size_t cnt = (size_t)3 * gn[j].nst;
+                rc |= voleith_shake128_absorb_u32_le(&ctx, (uint32_t)gn[j].nst);
+                rc |=
+                    voleith_shake128_absorb_u32_le(&ctx, (uint32_t)gn[j].cols);
+                rc |= absorb_u8(&ctx, gn[j].is_q);
+                rc |= absorb_u8(&ctx, gn[j].odd_round);
+                for (k = 0; k < 8; k++)
+                    rc |= absorb_u8(&ctx, gn[j].shift[k]);
+                for (k = 0; k < cnt; k++)
+                    rc |= voleith_shake128_absorb_u32_le(
+                        &ctx, normalize_operand(gw[gn[j].wires_off + k]));
+            }
+        }
     }
 
     /* nonzero only on absorb-after-squeeze (unreachable here, single squeeze

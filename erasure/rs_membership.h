@@ -145,13 +145,31 @@ voleith_rs_fwk_bytes(voleith_rs_cr_profile_t cr)
 }
 
 /*
- * Returns the node-hash vt the chunk tree uses for a profile: grostl256_fixed
- * (128-bit CR, 32-byte nodes) or grostl512_fixed (256-bit CR, 64-byte nodes),
- * or NULL for an unknown profile.  The same vt the certificate circuit binds,
- * so callers (circuit builder, tests) take the leaf / node geometry from here.
+ * Returns the DEFAULT node-hash vt for a profile: grostl256_fixed (128-bit CR,
+ * 32-byte nodes) or grostl512_fixed (256-bit CR, 64-byte nodes), or NULL for an
+ * unknown profile.  This is the vt used whenever a caller passes node_vt ==
+ * NULL below; callers may instead supply any conforming vt (e.g. a norm twin).
  */
 const voleith_node_hash_vt *
 voleith_rs_chunk_node_vt(voleith_rs_cr_profile_t cr);
+
+/*
+ * Node-hash selection: throughout the chunk-cert / erasure API a
+ * `const voleith_node_hash_vt *node_vt` argument selects the chunk tree's
+ * node hash.  NULL selects the profile default (voleith_rs_chunk_node_vt).  A
+ * non-NULL vt must CONFORM to the profile: node_bytes ==
+ * voleith_rs_cr_digest_bytes(cr) and cr_bits >= the profile strength (128 /
+ * 256); a non-conforming vt is rejected with VOLEITH_EC_ERR_FIELD.  The chosen
+ * vt is part of the proven statement, so a dataset's tree, its cert circuit,
+ * and the verifier must all use the same vt (the circuit rebuild enforces this:
+ * a mismatch yields a different constraint system and fails verification).
+ *
+ * Returns the resolved vt for (cr, node_vt), or NULL if the profile is unknown
+ * or node_vt is non-NULL and non-conforming.
+ */
+const voleith_node_hash_vt *
+voleith_rs_chunk_node_vt_resolve(voleith_rs_cr_profile_t cr,
+                                 const voleith_node_hash_vt *node_vt);
 
 /* ========================================================================
  * Chunk digest and leaf hash
@@ -175,9 +193,11 @@ int voleith_rs_chunk_digest(voleith_rs_cr_profile_t cr, const uint8_t *chunk,
  * in that width.  The FWK-carrying preimage scratch is zeroized before return.
  * Returns 0 on success, a negative VOLEITH_EC_ERR_* on failure.
  */
-int voleith_rs_leaf_hash(voleith_rs_cr_profile_t cr, const uint8_t *fwk,
-                         const uint8_t *chunk_digest, size_t index,
-                         size_t index_bytes, uint8_t *out, size_t out_cap);
+int voleith_rs_leaf_hash(voleith_rs_cr_profile_t cr,
+                         const voleith_node_hash_vt *node_vt,
+                         const uint8_t *fwk, const uint8_t *chunk_digest,
+                         size_t index, size_t index_bytes, uint8_t *out,
+                         size_t out_cap);
 
 /* ========================================================================
  * Tree root, sibling path, and path directions
@@ -192,9 +212,10 @@ int voleith_rs_leaf_hash(voleith_rs_cr_profile_t cr, const uint8_t *fwk,
  * digests.  Requires 0 < n_chunks <= VOLEITH_RS_TREE_MAX_CAPACITY.  Returns 0
  * on success, a negative VOLEITH_EC_ERR_* on failure.
  */
-int voleith_rs_tree_root(voleith_rs_cr_profile_t cr, const uint8_t *fwk,
-                         const uint8_t *chunk_digests, size_t n_chunks,
-                         uint8_t *root_out, size_t root_cap);
+int voleith_rs_tree_root(voleith_rs_cr_profile_t cr,
+                         const voleith_node_hash_vt *node_vt,
+                         const uint8_t *fwk, const uint8_t *chunk_digests,
+                         size_t n_chunks, uint8_t *root_out, size_t root_cap);
 
 /*
  * Emits the sibling path for the chunk at index (which must be < n_chunks)
@@ -204,7 +225,9 @@ int voleith_rs_tree_root(voleith_rs_cr_profile_t cr, const uint8_t *fwk,
  * (LSB-first, matching the Merkle path circuit).  Returns 0 on success, a
  * negative VOLEITH_EC_ERR_* on failure.
  */
-int voleith_rs_tree_sibling_path(voleith_rs_cr_profile_t cr, const uint8_t *fwk,
+int voleith_rs_tree_sibling_path(voleith_rs_cr_profile_t cr,
+                                 const voleith_node_hash_vt *node_vt,
+                                 const uint8_t *fwk,
                                  const uint8_t *chunk_digests, size_t n_chunks,
                                  size_t index, uint8_t *siblings_out,
                                  size_t siblings_cap);

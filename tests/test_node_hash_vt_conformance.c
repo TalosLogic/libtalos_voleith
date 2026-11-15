@@ -174,6 +174,24 @@ static const vt_case_t CASES[] = {
      N_LEAF_SIZES_VARIABLE, LEAF_DATA_BYTES, 1},
     {"aes-cmac128", &voleith_node_hash_aes_cmac128, 16, 64, LEAF_SIZES_VARIABLE,
      N_LEAF_SIZES_VARIABLE, LEAF_DATA_BYTES, 1},
+    {"aes-dm-norm", &voleith_node_hash_aes_dm_norm, 16, 64, LEAF_SIZES_VARIABLE,
+     N_LEAF_SIZES_VARIABLE, LEAF_DATA_BYTES, 1},
+    {"aes-cmac128-norm", &voleith_node_hash_aes_cmac128_norm, 16, 64,
+     LEAF_SIZES_VARIABLE, N_LEAF_SIZES_VARIABLE, LEAF_DATA_BYTES, 1},
+    {"hirose-aes-256-norm", &voleith_node_hash_hirose_norm, 32, 128,
+     LEAF_SIZES_VARIABLE, N_LEAF_SIZES_VARIABLE, LEAF_DATA_BYTES, 1},
+    {"hirose-aes-256-fixed32-norm", &voleith_node_hash_hirose_fixed32_norm, 32,
+     128, LEAF_SIZES_FIXED32, N_LEAF_SIZES_FIXED32, LEAF_DATA_BYTES, 0},
+    {"hirose-aes-256-fixed96-norm", &voleith_node_hash_hirose_fixed96_norm, 32,
+     128, LEAF_SIZES_FIXED96, N_LEAF_SIZES_FIXED96, 96u, 0},
+    {"grostl-256-fixed-norm", &voleith_node_hash_grostl256_fixed_norm, 32, 128,
+     LEAF_SIZES_FIXED32, N_LEAF_SIZES_FIXED32, 32u, 0},
+    {"grostl-512-fixed-norm", &voleith_node_hash_grostl512_fixed_norm, 64, 256,
+     LEAF_SIZES_FIXED64, N_LEAF_SIZES_FIXED64, 64u, 0},
+    {"grostl-256-fixed128-norm", &voleith_node_hash_grostl256_fixed128_norm, 32,
+     128, LEAF_SIZES_FIXED128, N_LEAF_SIZES_FIXED128, 128u, 0},
+    {"grostl-512-fixed256-norm", &voleith_node_hash_grostl512_fixed256_norm, 64,
+     256, LEAF_SIZES_FIXED256, N_LEAF_SIZES_FIXED256, 256u, 0},
     {"grostl256", &voleith_node_hash_grostl256, 32, 128, LEAF_SIZES_VARIABLE,
      N_LEAF_SIZES_VARIABLE, LEAF_DATA_BYTES, 1},
     {"grostl256_t27", &voleith_node_hash_grostl256_t27, 27, 108,
@@ -864,6 +882,82 @@ check_secret_dir_booleanity(const vt_case_t *cs)
 }
 
 /* ================================================================
+ * 8. Norm vs frozen twin: smaller witness, identical node output.
+ *
+ * The norm vt's reduced inv_in is the whole point of the family; its
+ * node output must be byte-identical to the frozen twin (same MMO /
+ * CMAC construction).  The per-slot conformance checks above already
+ * prove each norm vt's witness builder matches its own circuit and its
+ * own software helper; this check closes the loop against the frozen
+ * twin directly.
+ *
+ * Witness-size relation (not a loose "< frozen"): both vts emit
+ * n_calls * inv_per_call, with inv_per_call = frozen_unit (frozen) /
+ * norm_unit (norm).  The relation norm * frozen_unit == frozen *
+ * norm_unit holds exactly (both are the same n_calls times their unit).
+ * The key schedule stays frozen, so the ratio is above the clean 0.75
+ * of the pure data path:
+ *   AES-128 family: 160 / 200 = 0.80 (per AES call).
+ *   Hirose:         388 / 500 = 0.776 (per iteration; 52 frozen KS +
+ *                   2 enc of 168 vs 224).
+ * ================================================================ */
+
+static void
+check_norm_vs_frozen(const char *label, const voleith_node_hash_vt *norm,
+                     const voleith_node_hash_vt *frozen, size_t frozen_unit,
+                     size_t norm_unit)
+{
+    char name[192];
+
+    printf("  %s vs %s\n", norm->name, frozen->name);
+
+    snprintf(name, sizeof(name), "[%s] node_bytes / cr_bits match frozen twin",
+             label);
+    check(name, norm->node_bytes == frozen->node_bytes &&
+                    norm->cr_bits == frozen->cr_bits);
+
+    /* inode: smaller, exact norm_unit/frozen_unit relation. */
+    size_t fi = frozen->inode_invin_bytes();
+    size_t ni = norm->inode_invin_bytes();
+    snprintf(name, sizeof(name),
+             "[%s] inode inv_in norm=%zu < frozen=%zu (%zu/%zu)", label, ni, fi,
+             norm_unit, frozen_unit);
+    check(name, ni < fi && ni * frozen_unit == fi * norm_unit);
+
+    /* leaf: smaller, exact relation across the sweep. */
+    for (size_t k = 0; k < N_LEAF_SIZES_VARIABLE; k++) {
+        size_t N = LEAF_SIZES_VARIABLE[k];
+        size_t fl = frozen->leaf_invin_bytes(N);
+        size_t nl = norm->leaf_invin_bytes(N);
+        snprintf(name, sizeof(name),
+                 "[%s] leaf inv_in (N=%zu) norm=%zu < frozen=%zu (%zu/%zu)",
+                 label, N, nl, fl, norm_unit, frozen_unit);
+        check(name, nl < fl && nl * frozen_unit == fl * norm_unit);
+    }
+
+    /* Output parity: leaf_hash and inode_hash equal the frozen twin. */
+    uint8_t data[LEAF_DATA_BYTES];
+    for (size_t i = 0; i < LEAF_DATA_BYTES; i++)
+        data[i] = (uint8_t)(0xA0 + i);
+    uint8_t norm_leaf[MAX_NODE_BYTES], froz_leaf[MAX_NODE_BYTES];
+    MUST_OK(norm->leaf_hash(data, LEAF_DATA_BYTES, norm_leaf));
+    MUST_OK(frozen->leaf_hash(data, LEAF_DATA_BYTES, froz_leaf));
+    snprintf(name, sizeof(name), "[%s] leaf_hash == frozen twin", label);
+    check(name, memcmp(norm_leaf, froz_leaf, norm->node_bytes) == 0);
+
+    uint8_t L[MAX_NODE_BYTES], R[MAX_NODE_BYTES];
+    for (size_t i = 0; i < norm->node_bytes; i++) {
+        L[i] = (uint8_t)(0x10 + i);
+        R[i] = (uint8_t)(0xE0 - i);
+    }
+    uint8_t norm_inode[MAX_NODE_BYTES], froz_inode[MAX_NODE_BYTES];
+    MUST_OK(norm->inode_hash(L, R, norm_inode));
+    MUST_OK(frozen->inode_hash(L, R, froz_inode));
+    snprintf(name, sizeof(name), "[%s] inode_hash == frozen twin", label);
+    check(name, memcmp(norm_inode, froz_inode, norm->node_bytes) == 0);
+}
+
+/* ================================================================
  * Run all conformance checks per vt.
  * ================================================================ */
 
@@ -891,6 +985,38 @@ main(void)
     printf("=== Node-hash vt conformance suite (Branch D) ===\n");
     for (size_t i = 0; i < N_CASES; i++)
         run_vt_case(&CASES[i]);
+
+    printf("\n--- norm vs frozen twin ---\n");
+    /* AES family: 200 (frozen) / 160 (norm) inv_in per AES-128 call. */
+    check_norm_vs_frozen("aes-dm-norm", &voleith_node_hash_aes_dm_norm,
+                         &voleith_node_hash_aes_dm, 200, 160);
+    check_norm_vs_frozen("aes-cmac128-norm",
+                         &voleith_node_hash_aes_cmac128_norm,
+                         &voleith_node_hash_aes_cmac128, 200, 160);
+    /* Hirose: 500 (frozen) / 388 (norm) inv_in per iteration. */
+    check_norm_vs_frozen("hirose-aes-256-norm", &voleith_node_hash_hirose_norm,
+                         &voleith_node_hash_hirose, 500, 388);
+    check_norm_vs_frozen("hirose-aes-256-fixed32-norm",
+                         &voleith_node_hash_hirose_fixed32_norm,
+                         &voleith_node_hash_hirose_fixed32, 500, 388);
+    check_norm_vs_frozen("hirose-aes-256-fixed96-norm",
+                         &voleith_node_hash_hirose_fixed96_norm,
+                         &voleith_node_hash_hirose_fixed96, 500, 388);
+    /* Grøstl: clean 0.75 (no key schedule), expressed as 4 (frozen) / 3
+     * (norm): every witness = n_pairs * per-pair, norm per-pair = 0.75
+     * frozen, so norm * 4 == frozen * 3. */
+    check_norm_vs_frozen("grostl-256-fixed-norm",
+                         &voleith_node_hash_grostl256_fixed_norm,
+                         &voleith_node_hash_grostl256_fixed, 4, 3);
+    check_norm_vs_frozen("grostl-512-fixed-norm",
+                         &voleith_node_hash_grostl512_fixed_norm,
+                         &voleith_node_hash_grostl512_fixed, 4, 3);
+    check_norm_vs_frozen("grostl-256-fixed128-norm",
+                         &voleith_node_hash_grostl256_fixed128_norm,
+                         &voleith_node_hash_grostl256_fixed128, 4, 3);
+    check_norm_vs_frozen("grostl-512-fixed256-norm",
+                         &voleith_node_hash_grostl512_fixed256_norm,
+                         &voleith_node_hash_grostl512_fixed256, 4, 3);
 
     printf("\n%d / %d tests passed\n", total_pass, total_tests);
     return (total_pass == total_tests) ? 0 : 1;

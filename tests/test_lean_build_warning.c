@@ -18,6 +18,11 @@
  * present) the notice path is not reachable and the test exits with PASS.
  */
 
+/* POSIX.1-2001 for setenv / unsetenv, which are not ISO C.  Must precede any
+ * include so <stdlib.h> exposes them (clang 19 defaults to C23, where an
+ * implicit declaration is a hard error rather than a warning). */
+#define _POSIX_C_SOURCE 200112L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

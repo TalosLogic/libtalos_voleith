@@ -16,6 +16,7 @@
 #include "vc.h"
 #include "prg.h"
 #include "hash.h"
+#include <ichor/pool.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -77,14 +78,17 @@ test_convert_depth(void)
     uint8_t *v_bufs[1];
     uint8_t v0[32];
     v_bufs[0] = v0;
+    uint8_t rbuf[256]; /* convert butterfly scratch, >= 2*N_i*outlen */
 
-    int d0 = voleith_convert_to_vole(iv, sd0, false, 0, outlen, u, v_bufs, &p);
+    int d0 =
+        voleith_convert_to_vole(iv, sd0, false, 0, outlen, u, v_bufs, &p, rbuf);
     check("convert_depth: vec 0 depth=1", d0 == 1);
 
     /* Vector 8: N_i = 1, depth should be 0 */
     uint8_t sd8[16]; /* 1 seed */
     memset(sd8, 0x22, 16);
-    int d8 = voleith_convert_to_vole(iv, sd8, false, 8, outlen, u, v_bufs, &p);
+    int d8 =
+        voleith_convert_to_vole(iv, sd8, false, 8, outlen, u, v_bufs, &p, rbuf);
     check("convert_depth: vec 8 depth=0", d8 == 0);
 }
 
@@ -106,9 +110,10 @@ test_convert_deterministic(void)
     uint8_t v1[32], v2[32];
     uint8_t *vp1[1] = {v1};
     uint8_t *vp2[1] = {v2};
+    uint8_t rbuf[256]; /* convert butterfly scratch, >= 2*N_i*outlen */
 
-    voleith_convert_to_vole(iv, sd, false, 0, outlen, u1, vp1, &p);
-    voleith_convert_to_vole(iv, sd, false, 0, outlen, u2, vp2, &p);
+    voleith_convert_to_vole(iv, sd, false, 0, outlen, u1, vp1, &p, rbuf);
+    voleith_convert_to_vole(iv, sd, false, 0, outlen, u2, vp2, &p, rbuf);
 
     check("convert_deterministic: u matches", memcmp(u1, u2, outlen) == 0);
     check("convert_deterministic: v matches", memcmp(v1, v2, outlen) == 0);
@@ -139,8 +144,10 @@ test_convert_vole_equation(void)
     uint8_t u[32];
     uint8_t v[32];
     uint8_t *vp[1] = {v};
+    uint8_t rbuf[256]; /* convert butterfly scratch, >= 2*N_i*outlen */
 
-    int depth = voleith_convert_to_vole(iv, sd, false, 0, outlen, u, vp, &p);
+    int depth =
+        voleith_convert_to_vole(iv, sd, false, 0, outlen, u, vp, &p, rbuf);
     check("convert_vole_eq: depth=1", depth == 1);
 
     /* Compute PRG(sd_0) and PRG(sd_1) manually */
@@ -191,7 +198,7 @@ test_vole_commit_basic(void)
     for (int i = 0; i < p.lambda; i++)
         v[i] = v_storage + (size_t)i * ellhat_bytes;
 
-    int rc = voleith_vole_commit(&p, seed, iv, ellhat, &bavc, c, u, v);
+    int rc = voleith_vole_commit(&p, seed, iv, ellhat, &bavc, c, u, v, NULL);
     check("vole_commit_basic: succeeds", rc == 0);
     check("vole_commit_basic: bavc com non-zero",
           memcmp(bavc.com, (uint8_t[64]){0}, 32) != 0);
@@ -242,8 +249,8 @@ test_vole_commit_deterministic(void)
         v2[i] = vs2 + (size_t)i * eb;
     }
 
-    voleith_vole_commit(&p, seed, iv, ellhat, &bavc1, c1, u1, v1);
-    voleith_vole_commit(&p, seed, iv, ellhat, &bavc2, c2, u2, v2);
+    voleith_vole_commit(&p, seed, iv, ellhat, &bavc1, c1, u1, v1, NULL);
+    voleith_vole_commit(&p, seed, iv, ellhat, &bavc2, c2, u2, v2, NULL);
 
     check("vole_commit_deterministic: u matches", memcmp(u1, u2, eb) == 0);
     check("vole_commit_deterministic: c matches",
@@ -259,6 +266,185 @@ test_vole_commit_deterministic(void)
     free(u2);
     free(v1);
     free(v2);
+    free(vs1);
+    free(vs2);
+}
+
+/*
+ * Test 5b: vole_commit threaded output equals serial output (T1.4).
+ *
+ * Runs voleith_vole_commit serially (tctx == NULL) and again through an ichor
+ * pool of `nthreads` workers, then checks the BAVC commitment and the full VOLE
+ * output (u, c, and every v-row, padding included) are byte-identical.  This is
+ * the parity oracle for the threaded ConvertToVOLE loop: the tau vectors write
+ * disjoint sd_buf / ui / v slices, so any sharing or ordering bug diverges here.
+ * Uses larger params (tau1 > 0, k > 1) so multiple v-rows per vector exercise
+ * the precomputed v_off ranges.  Valid in both builds: on a serial-fallback
+ * ichor the pool runs jobs inline.
+ */
+static void
+check_vole_commit_threaded_matches_serial(const char *tag, int lambda, int tau,
+                                          int w_grind, int T_open,
+                                          unsigned int ellhat,
+                                          unsigned nthreads)
+{
+    voleith_vc_params_t p;
+    voleith_vc_params_init(&p, lambda, tau, w_grind, 2, T_open);
+
+    uint8_t seed[32], iv[16];
+    for (size_t i = 0; i < sizeof(seed); i++)
+        seed[i] = (uint8_t)(0x3b ^ i);
+    for (size_t i = 0; i < sizeof(iv); i++)
+        iv[i] = (uint8_t)(0x71 ^ i);
+
+    size_t eb = (ellhat + 7) / 8;
+    size_t c_len = ((size_t)p.tau - 1) * eb;
+    size_t v_len = (size_t)p.lambda * eb;
+
+    uint8_t *cs = calloc(c_len, 1), *ct = calloc(c_len, 1);
+    uint8_t *us = calloc(eb, 1), *ut = calloc(eb, 1);
+    uint8_t **vs = calloc((size_t)p.lambda, sizeof(uint8_t *));
+    uint8_t **vt = calloc((size_t)p.lambda, sizeof(uint8_t *));
+    uint8_t *vss = calloc(v_len, 1), *vts = calloc(v_len, 1);
+    for (int i = 0; i < p.lambda; i++) {
+        vs[i] = vss + (size_t)i * eb;
+        vt[i] = vts + (size_t)i * eb;
+    }
+
+    voleith_bavc_t bs, bt;
+    int rc_s = voleith_vole_commit(&p, seed, iv, ellhat, &bs, cs, us, vs, NULL);
+
+    ichor_pool_t *pool = NULL;
+    int rc_p = ichor_pool_create(&pool, nthreads);
+    voleith_threadctx_t tctx = {.pool = pool, .owns_pool = 0};
+    int rc_t =
+        voleith_vole_commit(&p, seed, iv, ellhat, &bt, ct, ut, vt, &tctx);
+
+    char name[128];
+    snprintf(name, sizeof(name), "%s: serial+threaded commit succeed", tag);
+    check(name, rc_s == 0 && rc_p == 0 && rc_t == 0);
+    snprintf(name, sizeof(name), "%s: bavc com matches serial", tag);
+    check(name, memcmp(bs.com, bt.com, 2 * (size_t)(lambda / 8)) == 0);
+    snprintf(name, sizeof(name), "%s: u matches serial", tag);
+    check(name, memcmp(us, ut, eb) == 0);
+    snprintf(name, sizeof(name), "%s: c matches serial", tag);
+    check(name, memcmp(cs, ct, c_len) == 0);
+    snprintf(name, sizeof(name), "%s: v (all rows) matches serial", tag);
+    check(name, memcmp(vss, vts, v_len) == 0);
+
+    voleith_bavc_free(&bs);
+    voleith_bavc_free(&bt);
+    ichor_pool_destroy(pool);
+    free(cs);
+    free(ct);
+    free(us);
+    free(ut);
+    free(vs);
+    free(vt);
+    free(vss);
+    free(vts);
+}
+
+static void
+test_vole_commit_threaded_parity(void)
+{
+    /* 128f (tau=16, k=4) and 256f (tau=32) so vectors span multiple v-rows,
+     * across 2-worker, 4-worker, and physical-core (nthreads=0) pools. */
+    check_vole_commit_threaded_matches_serial("vole_thr_128f_n2", 128, 16, 8,
+                                              112, 256, 2);
+    check_vole_commit_threaded_matches_serial("vole_thr_128f_n4", 128, 16, 8,
+                                              112, 256, 4);
+    check_vole_commit_threaded_matches_serial("vole_thr_128f_nphys", 128, 16, 8,
+                                              112, 256, 0);
+    check_vole_commit_threaded_matches_serial("vole_thr_256f_n2", 256, 32, 8,
+                                              234, 256, 2);
+    check_vole_commit_threaded_matches_serial("vole_thr_256f_nphys", 256, 32, 8,
+                                              234, 256, 0);
+}
+
+/*
+ * Test 5c: vole_commit with the prover's preallocated threadctx scratch (T1.5)
+ * matches serial, and the scratch is reusable across proofs.
+ *
+ * Mirrors how the proof layer runs: the threadctx carries a worker pool AND the
+ * scratch buffers (job descriptors + bavc/vole working buffers) allocated once
+ * by voleith_threadctx_scratch_init.  Runs the serial baseline, then two
+ * back-to-back threaded commits sharing one scratch-backed threadctx, and
+ * checks both produce byte-identical u / c / v and bavc com.  The second commit
+ * proves the descriptors + buffers are safe to reuse after the first batch is
+ * waited.  Multi-worker so the preallocated path is exercised with real
+ * concurrency, which the 1-worker proof-layer default does not reach.
+ */
+static void
+test_vole_commit_prealloc_scratch_parity(void)
+{
+    voleith_vc_params_t p;
+    voleith_vc_params_init(&p, 256, 32, 8, 2, 234);
+
+    uint8_t seed[32], iv[16];
+    for (size_t i = 0; i < sizeof(seed); i++)
+        seed[i] = (uint8_t)(0xc4 ^ i);
+    for (size_t i = 0; i < sizeof(iv); i++)
+        iv[i] = (uint8_t)(0x2d ^ i);
+
+    unsigned int ellhat = 320;
+    size_t eb = (ellhat + 7) / 8;
+    size_t c_len = ((size_t)p.tau - 1) * eb;
+    size_t v_len = (size_t)p.lambda * eb;
+
+    uint8_t *cs = calloc(c_len, 1), *c1 = calloc(c_len, 1),
+            *c2 = calloc(c_len, 1);
+    uint8_t *us = calloc(eb, 1), *u1 = calloc(eb, 1), *u2 = calloc(eb, 1);
+    uint8_t **vs = calloc((size_t)p.lambda, sizeof(uint8_t *));
+    uint8_t **v1 = calloc((size_t)p.lambda, sizeof(uint8_t *));
+    uint8_t **v2 = calloc((size_t)p.lambda, sizeof(uint8_t *));
+    uint8_t *vss = calloc(v_len, 1), *vs1 = calloc(v_len, 1),
+            *vs2 = calloc(v_len, 1);
+    for (int i = 0; i < p.lambda; i++) {
+        vs[i] = vss + (size_t)i * eb;
+        v1[i] = vs1 + (size_t)i * eb;
+        v2[i] = vs2 + (size_t)i * eb;
+    }
+
+    voleith_bavc_t bs, b1, b2;
+    int rc_s = voleith_vole_commit(&p, seed, iv, ellhat, &bs, cs, us, vs, NULL);
+
+    ichor_pool_t *pool = NULL;
+    int rc_p = ichor_pool_create(&pool, 4);
+    voleith_threadctx_t tctx = {.pool = pool, .owns_pool = 0};
+    int rc_i = voleith_threadctx_scratch_init(&tctx, &p, eb);
+
+    int rc_1 =
+        voleith_vole_commit(&p, seed, iv, ellhat, &b1, c1, u1, v1, &tctx);
+    int rc_2 =
+        voleith_vole_commit(&p, seed, iv, ellhat, &b2, c2, u2, v2, &tctx);
+
+    check("vole_prealloc: setup succeeds",
+          rc_s == 0 && rc_p == 0 && rc_i == 0 && rc_1 == 0 && rc_2 == 0);
+    check("vole_prealloc: commit 1 u/c/v match serial",
+          memcmp(us, u1, eb) == 0 && memcmp(cs, c1, c_len) == 0 &&
+              memcmp(vss, vs1, v_len) == 0);
+    check("vole_prealloc: commit 1 bavc com matches serial",
+          memcmp(bs.com, b1.com, 64) == 0);
+    check("vole_prealloc: commit 2 (reused scratch) u/c/v match serial",
+          memcmp(us, u2, eb) == 0 && memcmp(cs, c2, c_len) == 0 &&
+              memcmp(vss, vs2, v_len) == 0);
+
+    voleith_threadctx_scratch_free(&tctx);
+    ichor_pool_destroy(pool);
+    voleith_bavc_free(&bs);
+    voleith_bavc_free(&b1);
+    voleith_bavc_free(&b2);
+    free(cs);
+    free(c1);
+    free(c2);
+    free(us);
+    free(u1);
+    free(u2);
+    free(vs);
+    free(v1);
+    free(v2);
+    free(vss);
     free(vs1);
     free(vs2);
 }
@@ -288,7 +474,7 @@ test_vole_commit_v_padding(void)
     for (int i = 0; i < p.lambda; i++)
         v[i] = vs + (size_t)i * eb;
 
-    voleith_vole_commit(&p, seed, iv, ellhat, &bavc, c, u, v);
+    voleith_vole_commit(&p, seed, iv, ellhat, &bavc, c, u, v, NULL);
 
     /* Vectors at index 8..127 should be zero (only 8 used for k=1, tau1=8) */
     int ok = 1;
@@ -341,7 +527,7 @@ test_vole_roundtrip_equation(void)
     for (int i = 0; i < p.lambda; i++)
         v[i] = vs + (size_t)i * eb;
 
-    voleith_vole_commit(&p, seed, iv, ellhat, &bavc, c, u, v);
+    voleith_vole_commit(&p, seed, iv, ellhat, &bavc, c, u, v, NULL);
 
     /* Choose challenge */
     size_t i_delta[16];
@@ -427,7 +613,7 @@ test_vole_roundtrip_different_challenges(void)
     for (int i = 0; i < p.lambda; i++)
         v[i] = vs + (size_t)i * eb;
 
-    voleith_vole_commit(&p, seed, iv, ellhat, &bavc, c, u, v);
+    voleith_vole_commit(&p, seed, iv, ellhat, &bavc, c, u, v, NULL);
 
     /* Two different challenges */
     size_t delta_a[16], delta_b[16];
@@ -501,7 +687,7 @@ test_vole_roundtrip_tampered_c(void)
     for (int i = 0; i < p.lambda; i++)
         v[i] = vs + (size_t)i * eb;
 
-    voleith_vole_commit(&p, seed, iv, ellhat, &bavc, c, u, v);
+    voleith_vole_commit(&p, seed, iv, ellhat, &bavc, c, u, v, NULL);
 
     size_t i_delta[16];
     for (int i = 0; i < p.tau; i++)
@@ -558,7 +744,7 @@ test_seed_gather_diagnostic(void)
     uint8_t iv[16] = {0};
 
     voleith_bavc_t bavc;
-    voleith_bavc_commit(&bavc, &p, root_key, iv);
+    voleith_bavc_commit(&bavc, &p, root_key, iv, NULL);
 
     /* Gather seeds for vector 0 using accessor and verify contiguity */
     size_t sb = 16;
@@ -653,7 +839,7 @@ test_xval_vole_commit_h(void)
     for (int i = 0; i < p.lambda; i++)
         v[i] = vs + (size_t)i * XVAL_ELLHAT_BYTES;
 
-    voleith_vole_commit(&p, root_key, iv, XVAL_ELLHAT, &bavc, c, u, v);
+    voleith_vole_commit(&p, root_key, iv, XVAL_ELLHAT, &bavc, c, u, v, NULL);
 
     check("xval_vole_commit: h matches faest-ref",
           memcmp(bavc.com, expected_h, 32) == 0);
@@ -697,7 +883,7 @@ test_xval_vole_commit_u(void)
     for (int i = 0; i < p.lambda; i++)
         v[i] = vs + (size_t)i * XVAL_ELLHAT_BYTES;
 
-    voleith_vole_commit(&p, root_key, iv, XVAL_ELLHAT, &bavc, c, u, v);
+    voleith_vole_commit(&p, root_key, iv, XVAL_ELLHAT, &bavc, c, u, v, NULL);
 
     uint8_t hashed_u[64];
     shake256_hash(u, XVAL_ELLHAT_BYTES, hashed_u);
@@ -754,7 +940,7 @@ test_xval_vole_commit_c_v(void)
     for (int i = 0; i < p.lambda; i++)
         v[i] = vs + (size_t)i * XVAL_ELLHAT_BYTES;
 
-    voleith_vole_commit(&p, root_key, iv, XVAL_ELLHAT, &bavc, c, u, v);
+    voleith_vole_commit(&p, root_key, iv, XVAL_ELLHAT, &bavc, c, u, v, NULL);
 
     uint8_t hashed_c[64], hashed_v[64];
     shake256_hash(c, c_size, hashed_c);
@@ -770,6 +956,114 @@ test_xval_vole_commit_c_v(void)
     free(u);
     free(v);
     free(vs);
+}
+
+/*
+ * Test 12b: threaded vole_commit matches the committed faest-ref xval vectors
+ * (h, hashed_u, hashed_c, hashed_v), across nthreads in {1, 2, physical}.
+ *
+ * The threaded-vs-serial parity tests (5b / 5c) show the pool reproduces the
+ * serial output; this closes the determinism gate by pinning the THREADED
+ * output directly to the external faest-ref vectors, so a bug that corrupted
+ * the serial and threaded paths identically could not slip through.  Runs
+ * through a scratch-backed threadctx (the proof-layer shape).  nthreads == 1 is
+ * included explicitly as the single-worker determinism anchor.
+ */
+static void
+check_xval_vole_threaded(unsigned nthreads)
+{
+    static const uint8_t expected_h[32] = {
+        0xe7, 0x37, 0xbd, 0xc5, 0xc5, 0x0e, 0xca, 0x61, 0x8b, 0xf0, 0x5e,
+        0xde, 0x6a, 0x37, 0xb7, 0xf3, 0x87, 0x4c, 0xe7, 0xc8, 0x63, 0xb3,
+        0x17, 0x70, 0xa2, 0xe4, 0x23, 0x7d, 0x2d, 0x4f, 0x93, 0xf5,
+    };
+    static const uint8_t expected_hashed_u[64] = {
+        0xce, 0x94, 0x44, 0x5c, 0xe3, 0x53, 0xce, 0xff, 0x62, 0x32, 0x5d,
+        0x05, 0x4e, 0x2b, 0xc8, 0x94, 0x91, 0x63, 0x56, 0xae, 0x48, 0x7b,
+        0x41, 0x44, 0xbd, 0xf9, 0xad, 0xd0, 0xad, 0xda, 0x05, 0xf2, 0x60,
+        0x35, 0x24, 0x62, 0xa7, 0x55, 0xe4, 0x14, 0x4f, 0x9e, 0x7c, 0x92,
+        0xfe, 0xe7, 0x4d, 0x87, 0xd6, 0xbd, 0x7e, 0x29, 0x60, 0xb4, 0x17,
+        0x60, 0xe0, 0x08, 0x4a, 0x74, 0x8a, 0x0d, 0xf3, 0x1e,
+    };
+    static const uint8_t expected_hashed_c[64] = {
+        0x43, 0x19, 0xf3, 0xe0, 0x9a, 0x1a, 0x51, 0xc1, 0x4c, 0xf8, 0xa8,
+        0x61, 0x8a, 0x30, 0x78, 0x2b, 0x6b, 0x9d, 0x5f, 0xd9, 0x84, 0x0b,
+        0x92, 0x6f, 0x74, 0x75, 0x26, 0x9a, 0x6d, 0xb8, 0x2a, 0x24, 0x08,
+        0x66, 0xbf, 0x16, 0x86, 0xdd, 0x76, 0x91, 0x48, 0x94, 0x94, 0x62,
+        0xb7, 0x70, 0x47, 0xc7, 0x71, 0xc3, 0x36, 0x2e, 0x03, 0x00, 0x31,
+        0x4c, 0xf0, 0x5c, 0xc3, 0x30, 0x5d, 0x88, 0x60, 0x5e,
+    };
+    static const uint8_t expected_hashed_v[64] = {
+        0xb2, 0xff, 0xfe, 0xca, 0xdd, 0xf9, 0x02, 0x70, 0x30, 0xdb, 0xe0,
+        0x7e, 0x88, 0xd0, 0x84, 0x3a, 0xeb, 0x26, 0xf1, 0xe5, 0x3b, 0xaf,
+        0x86, 0x49, 0xb7, 0xf7, 0x91, 0x5c, 0xa3, 0x6e, 0xf2, 0xcd, 0xad,
+        0xb3, 0x1e, 0x24, 0x8e, 0xb2, 0x12, 0x55, 0x9c, 0xc7, 0x62, 0xdd,
+        0x77, 0x91, 0xa9, 0xf1, 0xf1, 0x93, 0xc8, 0x5c, 0xf1, 0x0f, 0x9e,
+        0xaa, 0x9e, 0x85, 0x29, 0x3d, 0x68, 0x33, 0x1f, 0x57,
+    };
+
+    uint8_t root_key[16];
+    for (int i = 0; i < 16; i++)
+        root_key[i] = (uint8_t)i;
+    uint8_t iv[16] = {0};
+
+    voleith_vc_params_t p;
+    voleith_vc_params_init(&p, XVAL_LAMBDA, XVAL_TAU, XVAL_W_GRIND,
+                           XVAL_N_LEAFCOM, XVAL_T_OPEN);
+
+    size_t c_size = ((size_t)p.tau - 1) * XVAL_ELLHAT_BYTES;
+    size_t vs_size = (size_t)p.lambda * XVAL_ELLHAT_BYTES;
+    uint8_t *c = calloc(c_size, 1);
+    uint8_t *u = calloc(XVAL_ELLHAT_BYTES, 1);
+    uint8_t **v = calloc((size_t)p.lambda, sizeof(uint8_t *));
+    uint8_t *vs = calloc(vs_size, 1);
+    for (int i = 0; i < p.lambda; i++)
+        v[i] = vs + (size_t)i * XVAL_ELLHAT_BYTES;
+
+    ichor_pool_t *pool = NULL;
+    int rc_p = ichor_pool_create(&pool, nthreads);
+    voleith_threadctx_t tctx = {.pool = pool, .owns_pool = 0};
+    int rc_i = voleith_threadctx_scratch_init(&tctx, &p, XVAL_ELLHAT_BYTES);
+
+    voleith_bavc_t bavc;
+    int rc = voleith_vole_commit(&p, root_key, iv, XVAL_ELLHAT, &bavc, c, u, v,
+                                 &tctx);
+
+    uint8_t hashed_u[64], hashed_c[64], hashed_v[64];
+    shake256_hash(u, XVAL_ELLHAT_BYTES, hashed_u);
+    shake256_hash(c, c_size, hashed_c);
+    shake256_hash(vs, vs_size, hashed_v);
+
+    char name[96];
+    snprintf(name, sizeof(name), "xval_vole_threaded(n=%u): setup", nthreads);
+    check(name, rc_p == 0 && rc_i == 0 && rc == 0);
+    snprintf(name, sizeof(name), "xval_vole_threaded(n=%u): h", nthreads);
+    check(name, memcmp(bavc.com, expected_h, 32) == 0);
+    snprintf(name, sizeof(name), "xval_vole_threaded(n=%u): hashed_u",
+             nthreads);
+    check(name, memcmp(hashed_u, expected_hashed_u, 64) == 0);
+    snprintf(name, sizeof(name), "xval_vole_threaded(n=%u): hashed_c",
+             nthreads);
+    check(name, memcmp(hashed_c, expected_hashed_c, 64) == 0);
+    snprintf(name, sizeof(name), "xval_vole_threaded(n=%u): hashed_v",
+             nthreads);
+    check(name, memcmp(hashed_v, expected_hashed_v, 64) == 0);
+
+    voleith_threadctx_scratch_free(&tctx);
+    ichor_pool_destroy(pool);
+    voleith_bavc_free(&bavc);
+    free(c);
+    free(u);
+    free(v);
+    free(vs);
+}
+
+static void
+test_xval_vole_commit_threaded(void)
+{
+    check_xval_vole_threaded(1);
+    check_xval_vole_threaded(2);
+    check_xval_vole_threaded(0);
 }
 
 /*
@@ -811,7 +1105,7 @@ test_xval_vole_reconstruct_q(void)
     for (int i = 0; i < p.lambda; i++)
         v[i] = vs + (size_t)i * XVAL_ELLHAT_BYTES;
 
-    voleith_vole_commit(&p, root_key, iv, XVAL_ELLHAT, &bavc, c, u, v);
+    voleith_vole_commit(&p, root_key, iv, XVAL_ELLHAT, &bavc, c, u, v, NULL);
 
     /* Step 2: Decode challenge into i_delta */
     size_t i_delta[16];
@@ -865,6 +1159,8 @@ main(void)
     /* VOLE commit */
     test_vole_commit_basic();
     test_vole_commit_deterministic();
+    test_vole_commit_threaded_parity();
+    test_vole_commit_prealloc_scratch_parity();
     test_vole_commit_v_padding();
 
     /* VOLE round-trip */
@@ -879,6 +1175,7 @@ main(void)
     test_xval_vole_commit_h();
     test_xval_vole_commit_u();
     test_xval_vole_commit_c_v();
+    test_xval_vole_commit_threaded();
     test_xval_vole_reconstruct_q();
 
     printf("  %d / %d passed\n", pass_count, test_count);

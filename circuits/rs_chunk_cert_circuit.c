@@ -25,8 +25,9 @@
 
 int
 voleith_rs_chunk_cert_build_circuit(voleith_gf8_circuit_t *c,
-                                    voleith_rs_cr_profile_t cr, size_t n_chunks,
-                                    size_t index,
+                                    voleith_rs_cr_profile_t cr,
+                                    const voleith_node_hash_vt *node_vt,
+                                    size_t n_chunks, size_t index,
                                     voleith_rs_chunk_cert_layout_t *layout_out)
 {
     const voleith_node_hash_vt *vt;
@@ -47,7 +48,7 @@ voleith_rs_chunk_cert_build_circuit(voleith_gf8_circuit_t *c,
     if (c == NULL || layout_out == NULL)
         return -1;
 
-    vt = voleith_rs_chunk_node_vt(cr);
+    vt = voleith_rs_chunk_node_vt_resolve(cr, node_vt);
     if (vt == NULL)
         return -1;
     if (n_chunks == 0 || n_chunks > VOLEITH_RS_TREE_MAX_CAPACITY)
@@ -170,9 +171,10 @@ out:
  * committed-index witness on top.
  */
 static int
-chunk_cert_pack_core(voleith_rs_cr_profile_t cr, size_t n_chunks, size_t index,
-                     const uint8_t *fwk, const uint8_t *chunk_digest,
-                     const uint8_t *siblings,
+chunk_cert_pack_core(voleith_rs_cr_profile_t cr,
+                     const voleith_node_hash_vt *node_vt, size_t n_chunks,
+                     size_t index, const uint8_t *fwk,
+                     const uint8_t *chunk_digest, const uint8_t *siblings,
                      const voleith_rs_chunk_cert_layout_t *layout,
                      uint8_t *witness_out)
 {
@@ -188,7 +190,7 @@ chunk_cert_pack_core(voleith_rs_cr_profile_t cr, size_t n_chunks, size_t index,
         witness_out == NULL)
         return -1;
 
-    vt = voleith_rs_chunk_node_vt(cr);
+    vt = voleith_rs_chunk_node_vt_resolve(cr, node_vt);
     if (vt == NULL)
         return -1;
     if (n_chunks == 0 || n_chunks > VOLEITH_RS_TREE_MAX_CAPACITY ||
@@ -256,11 +258,12 @@ out:
 
 int
 voleith_rs_chunk_cert_build_witness(
-    voleith_rs_cr_profile_t cr, size_t n_chunks, size_t index,
-    const uint8_t *fwk, const uint8_t *chunk_digest, const uint8_t *siblings,
+    voleith_rs_cr_profile_t cr, const voleith_node_hash_vt *node_vt,
+    size_t n_chunks, size_t index, const uint8_t *fwk,
+    const uint8_t *chunk_digest, const uint8_t *siblings,
     const voleith_rs_chunk_cert_layout_t *layout, uint8_t *witness_out)
 {
-    return chunk_cert_pack_core(cr, n_chunks, index, fwk, chunk_digest,
+    return chunk_cert_pack_core(cr, node_vt, n_chunks, index, fwk, chunk_digest,
                                 siblings, layout, witness_out);
 }
 
@@ -270,7 +273,8 @@ voleith_rs_chunk_cert_build_witness(
 
 int
 voleith_rs_chunk_cert_build_circuit_secret_dir(
-    voleith_gf8_circuit_t *c, voleith_rs_cr_profile_t cr, size_t n_chunks,
+    voleith_gf8_circuit_t *c, voleith_rs_cr_profile_t cr,
+    const voleith_node_hash_vt *node_vt, size_t n_chunks,
     voleith_rs_chunk_cert_layout_t *layout_out)
 {
     const voleith_node_hash_vt *vt;
@@ -292,7 +296,7 @@ voleith_rs_chunk_cert_build_circuit_secret_dir(
     if (c == NULL || layout_out == NULL)
         return -1;
 
-    vt = voleith_rs_chunk_node_vt(cr);
+    vt = voleith_rs_chunk_node_vt_resolve(cr, node_vt);
     if (vt == NULL)
         return -1;
     if (n_chunks == 0 || n_chunks > VOLEITH_RS_TREE_MAX_CAPACITY)
@@ -441,8 +445,9 @@ out:
 
 int
 voleith_rs_chunk_cert_build_witness_secret_dir(
-    voleith_rs_cr_profile_t cr, size_t n_chunks, size_t index,
-    const uint8_t *fwk, const uint8_t *chunk_digest, const uint8_t *siblings,
+    voleith_rs_cr_profile_t cr, const voleith_node_hash_vt *node_vt,
+    size_t n_chunks, size_t index, const uint8_t *fwk,
+    const uint8_t *chunk_digest, const uint8_t *siblings,
     const voleith_rs_chunk_cert_layout_t *layout, uint8_t *witness_out)
 {
     size_t depth, index_bytes;
@@ -454,8 +459,8 @@ voleith_rs_chunk_cert_build_witness_secret_dir(
 
     /* Common witness (FWK, siblings, leaf inv_in, path inv_in).  This also
      * runs the full argument / range validation. */
-    rc = chunk_cert_pack_core(cr, n_chunks, index, fwk, chunk_digest, siblings,
-                              layout, witness_out);
+    rc = chunk_cert_pack_core(cr, node_vt, n_chunks, index, fwk, chunk_digest,
+                              siblings, layout, witness_out);
     if (rc != 0)
         return rc;
 

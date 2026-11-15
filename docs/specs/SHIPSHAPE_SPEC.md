@@ -2,22 +2,25 @@
 
 **Format name:** Shipshape. **File extension:** `.ship`
 (RECOMMENDED; §1.1). **Format version:** `.shipshape 1.1`
-(semver; §1.4). **Stdlib version:** `crypto-v1`.
-**Spec revision:** 2026-07-12 (r4).
+(semver; §1.4). **Stdlib version:** `crypto-v1` / `crypto-v2` / `crypto-v3`.
+**Spec revision:** 2026-11-05 (r5).
 
 **Status: normative; draft until the first conformant parser
 ships.** Draft revisions MAY change the language itself: r3 named
 the format Shipshape and renamed the header magic from `.circ` (the
 design-time working name) to `.shipshape`. r4 adopted semver on the
 format axis and added the `SCALE_INSTANCE` opcode as the first
-additive MINOR bump (`.shipshape 1.1`; §1.4, §4.2.5). After the first
+additive MINOR bump (`.shipshape 1.1`; §1.4, §4.2.5). r5 added the
+`crypto-v3` stdlib version (norm S-box entries and node-hash types,
+§7.8), an additive Tier 2a registry version that leaves the format
+axis unchanged. After the first
 parser release, a spec revision MUST NOT change which files parse (§1.4).
 This is the single, self-contained normative specification of the
 Shipshape circuit description language and the single source of truth
 for it: the surface syntax and formal grammar (Appendix A, Appendix
 B), the IR semantics, opcodes, costs, lowering, and fingerprint (§§2,
-4, 5, 6, 8), the crypto-v1 registry table and its freeze/CI process
-(§7), and the parser implementation-security invariants (§8.5) are
+4, 5, 6, 8), the crypto-v1/v2/v3 registry tables and their freeze/CI
+process (§7), and the parser implementation-security invariants (§8.5) are
 all consolidated here. Where any other document disagrees with this
 one, this one wins.
 
@@ -29,7 +32,10 @@ surface syntax, lexical rules, gate set with sugar, `user/*`
 subcircuit inlining, the resource bounds (§3.7), and the canonical
 fingerprint serialization (§8) all parse and lower to a
 `voleith_gf8_circuit_t`, with the generic Tier 1 witness generator
-completing the full witness array from the external input. The worked
+completing the full witness array from the external input (including
+the norm-gadget commitments of the `crypto-v3` entries). The
+`crypto-v2` (§7.7) and `crypto-v3` (§7.8) registries are implemented
+and frozen. The worked
 examples in §9 are hand-checked against the Appendix A grammar and
 MUST be promoted to parser conformance fixtures. The open issue
 recorded in r1 (KDF output-length parameter)
@@ -125,16 +131,20 @@ Three version identifiers move independently:
   (`ERR_OPCODE_VERSION`), distinct from an unknown opcode (`ERR_GATE`).
   The declared version is the minimum required; under-declaring a
   newer opcode is an error, over-declaring is legal.
-- The **stdlib version** (`stdlib crypto-v1` or `stdlib crypto-v2`
-  header line) names the Tier 2a registry the file calls into (§7).
-  Registry changes are always a new version, never an in-place edit.
-  `crypto-v2` is ADDITIVE over `crypto-v1`: every crypto-v1 registry
-  entry remains callable under crypto-v2, and crypto-v2 adds the
-  hash-parametric crypto extension entries (§7.7). A parser that
-  supports `crypto-v2` MUST also bundle the complete `crypto-v1`
-  table. There is no cross-version substitution in either direction:
-  a `crypto-v1` file parsed by a `crypto-v2`-only parser is rejected
-  outright (§3.4).
+- The **stdlib version** (`stdlib crypto-v1`, `crypto-v2`, or
+  `crypto-v3` header line) names the Tier 2a registry the file calls
+  into (§7).  Registry changes are always a new version, never an
+  in-place edit.  Each version is ADDITIVE over the previous one:
+  every entry of an earlier version remains callable under a later
+  one.  `crypto-v2` adds the hash-parametric crypto extension entries
+  (§7.7); `crypto-v3` adds the norm S-box entries and node-hash types
+  (§7.8).  A parser that supports a given version MUST also bundle the
+  complete tables of every earlier version.  There is no cross-version
+  substitution in either direction: a file is parsed solely against the
+  table of the version it declares, so a `crypto-v1` file parsed by a
+  `crypto-v2`-only parser is rejected outright, and an entry whose
+  introduced version exceeds the file's declared stdlib version is
+  rejected (§3.4).
 - The **spec revision** (top of this document) tracks editorial
   changes to this text. A spec revision MUST NOT change which files
   parse or what they parse to; any such change is a new format or
@@ -397,8 +407,8 @@ stdlib crypto-v2
 ```
 
 Token spellings are exact and case-sensitive: `GF(2^8)`,
-`irreducible`, `0x11B`, `crypto-v1`, `crypto-v2`. Each supported
-field and stdlib version has exactly one accepted token sequence. A
+`irreducible`, `0x11B`, `crypto-v1`, `crypto-v2`, `crypto-v3`. Each
+supported field and stdlib version has exactly one accepted token sequence. A
 duplicated header keyword is a parse error (enforced structurally by
 the grammar).
 
@@ -412,15 +422,18 @@ the grammar).
   declared field, and the proof-system binding refuses to verify a
   proof whose committed field does not match. This document
   specifies only the GF(2^8) instance; the IR is field-parametric.
-- `stdlib <id>` declares the Tier 2a registry version (§7). Two
-  values are defined: `crypto-v1` (the original 13-entry table, §7.2)
-  and `crypto-v2` (additive superset that adds the hash-parametric
-  crypto extensions of §7.7). The parser MUST have the declared
-  registry bundled or reject the file. There is no cross-version
-  substitution: a `crypto-v1` file is always parsed against the v1
-  table even when the parser also bundles `crypto-v2`; a `crypto-v2`
-  file is rejected by a parser that bundles only `crypto-v1`.
-  Bracketed type selectors (§7.7) are a parse error under
+- `stdlib <id>` declares the Tier 2a registry version (§7). Three
+  values are defined: `crypto-v1` (the original 13-entry table, §7.2),
+  `crypto-v2` (additive superset that adds the hash-parametric crypto
+  extensions of §7.7), and `crypto-v3` (additive superset that adds the
+  norm S-box standalone entries and node-hash types of §7.8). The
+  parser MUST have the declared registry bundled or reject the file.
+  There is no cross-version substitution: a `crypto-v1` file is always
+  parsed against the v1 table even when the parser also bundles a later
+  version; a file is rejected by a parser that bundles only an earlier
+  version, and a call to an entry (or a bracket selecting a node-hash
+  type) whose introduced version exceeds the declared stdlib version is
+  a parse error. Bracketed type selectors (§7.7) are a parse error under
   `crypto-v1`.
 
 ### 3.5 Statements
@@ -1164,13 +1177,17 @@ selector, not a wire. The closed set of defined type names is:
 | `grostl_256_fixed` | 32 | Fixed-input single-compression Grøstl-256; leaf-record width fixed to 32 bytes |
 | `grostl_512_fixed` | 64 | Fixed-input single-compression Grøstl-512; leaf-record width fixed to 64 bytes |
 
-The set is closed as of this version and is extensible only by a
-future registry version (planned additions: `rijndael_256`,
-`whirlpool`). The type-name is also the segment under which a future
-`stdlib/crypto/node_hash/<type>/...` callable could be added;
-that namespace is reserved and registers nothing in phase 1.
+The set above is the `crypto-v2` set and is closed under `crypto-v2`.
+It is extensible only by a future registry version: `crypto-v3` adds
+six norm S-box node-hash types (§7.8.2), and `rijndael_256` /
+`whirlpool` remain planned for a later version. The type-name is also
+the segment under which a future `stdlib/crypto/node_hash/<type>/...`
+callable could be added; that namespace is reserved and registers
+nothing in phase 1.
 
-An unknown type-name in a bracket selector is a parse error.
+An unknown type-name in a bracket selector is a parse error, as is a
+type-name whose introduced stdlib version exceeds the file's declared
+version (for example a norm type under `crypto-v2`; §7.8).
 
 #### 7.7.3 Bracket-selector syntax and rules
 
@@ -1308,6 +1325,74 @@ part of phase 1:
 Phase 2 requires the immediate-constant parameter mechanism not yet
 present in the grammar; no phase-2 item is parseable under the
 current grammar.
+
+---
+
+### 7.8 crypto-v3 registry: norm S-box entries and node-hash types
+
+This section is normative under `stdlib crypto-v3`. `crypto-v3` is an
+additive superset of `crypto-v2` (§1.4): a `crypto-v3` parser MUST
+bundle the complete `crypto-v1` (§7.2) and `crypto-v2` (§7.7) tables,
+and every entry and node-hash type of those versions remains callable
+under `crypto-v3` with an unchanged body hash. `crypto-v3` adds no new
+opcode and no new syntax, so the format version (`.shipshape`) is
+unaffected.
+
+The additions use the FAEST paired-round "norm" S-box arithmetization.
+A norm entry computes the SAME cipher/hash output as its frozen twin
+(validated against the twin and the primitive's public test vectors),
+but commits a different witness and lowers to a different circuit, so
+its body hash (§8) differs from the frozen twin's. The key schedule of
+the keyed primitives is unchanged (the frozen 8-bit expansion), so a
+Shipshape-authored norm circuit is byte-for-byte the gate sequence of
+the corresponding `circuits/*_norm_gf8` builder.
+
+#### 7.8.1 Standalone entries
+
+Ten entries are added, each with the same signature, kind, and
+parameter bounds as its frozen twin (§7.2); only the body differs.
+
+| FQN (`stdlib/crypto/...`) | Kind | Frozen twin |
+| --- | --- | --- |
+| `aes/encrypt_rounds_128_norm` | FIXED | `aes/encrypt_rounds_128` |
+| `aes/encrypt_128_norm` | FIXED | `aes/encrypt_128` |
+| `aes/encrypt_rounds_256_norm` | FIXED | `aes/encrypt_rounds_256` |
+| `aes/encrypt_256_norm` | FIXED | `aes/encrypt_256` |
+| `cmac/aes_128_norm` | PARAMETRIC | `cmac/aes_128` |
+| `cmac/aes_256_norm` | PARAMETRIC | `cmac/aes_256` |
+| `grostl/hash_256_norm` | PARAMETRIC | `grostl/hash_256` |
+| `grostl/hash_256_t27_norm` | PARAMETRIC | `grostl/hash_256_t27` |
+| `grostl/hash_512_norm` | PARAMETRIC | `grostl/hash_512` |
+| `grostl/hash_512_t59_norm` | PARAMETRIC | `grostl/hash_512_t59` |
+
+There is no `aes/sbox_norm` or `aes/keyschedule_*_norm`: the norm form
+is a paired-round arithmetization with no standalone single-S-box body,
+and the key schedule is unchanged from the frozen entry.
+
+#### 7.8.2 Node-hash types
+
+Six node-hash types are added to the closed set of §7.7.2, usable in
+the bracket selector of the §7.7.4 entries under `crypto-v3`:
+
+| Type name | Type id | Node bytes | Frozen twin |
+| --- | --- | --- | --- |
+| `aes_dm_norm` | 10 | 16 | `aes_dm` |
+| `aes_cmac_128_norm` | 11 | 16 | `aes_cmac_128` |
+| `hirose_norm` | 12 | 32 | `hirose` |
+| `hirose_fixed_32_norm` | 13 | 32 | `hirose_fixed_32` |
+| `grostl_256_fixed_norm` | 14 | 32 | `grostl_256_fixed` |
+| `grostl_512_fixed_norm` | 15 | 64 | `grostl_512_fixed` |
+
+The deprecated variable-input Grøstl-as-node-hash types (`grostl_256`,
+`grostl_256_t27`, `grostl_512`, `grostl_512_t59`) have no norm twin.
+
+#### 7.8.3 Gating
+
+Every entry and node-hash type carries a minimum stdlib version. A
+call to a norm entry, or a bracket selecting a norm node-hash type,
+under `crypto-v1` or `crypto-v2` is a parse error (`ERR_REGISTRY`),
+exactly as an unknown name would be: the construction is simply absent
+from those versions' tables.
 
 ---
 
@@ -1642,7 +1727,7 @@ version-line  = ows %s".shipshape" ws %s"1" trail
 field-line    = ows %s"field" ws %s"GF(2^8)" ws %s"irreducible"
                 ws %s"0x11B" trail
 stdlib-line   = ows %s"stdlib" ws stdlib-ver trail
-stdlib-ver    = %s"crypto-v1" / %s"crypto-v2"
+stdlib-ver    = %s"crypto-v1" / %s"crypto-v2" / %s"crypto-v3"
 
 top-line      = ows top-stmt trail
 top-stmt      = decl / gate / assertion / call
@@ -1800,15 +1885,19 @@ policy.
   (define-before-use on the path):
   1. Under `stdlib crypto-v1`, a bracket selector on any call is a
      parse error regardless of the path.
-  2. Under `stdlib crypto-v2`, a bracket selector is REQUIRED on
-     calls to the three hash-parametric entries
+  2. Under `stdlib crypto-v2` or `crypto-v3`, a bracket selector is
+     REQUIRED on calls to the three hash-parametric entries
      (`stdlib/crypto/merkle/path_secret`,
      `stdlib/crypto/indexed_merkle/nonmember_secret`,
      `stdlib/crypto/ring_sig/v1`) and is a parse error on every
-     other call (including all crypto-v1 kernels and all `user/*`
-     calls).
-  3. The type-name MUST be a member of the closed node-hash-type set
-     in §7.7.2. An unknown name is a parse error.
+     other call (including all crypto-v1 kernels, the crypto-v3 norm
+     standalone entries, and all `user/*` calls).
+  3. The type-name MUST be a member of the node-hash-type set
+     available at the declared stdlib version: §7.7.2 under
+     `crypto-v2`, and §7.7.2 plus the §7.8.2 norm types under
+     `crypto-v3`. A name that is unknown, or defined only in a version
+     later than the file declares (e.g. a norm type under `crypto-v2`),
+     is a parse error.
   4. Exactly one type-name per bracket; a comma inside the bracket
      (multi-type) is a parse error.
   5. After the type-name resolves, `node` is bound to the

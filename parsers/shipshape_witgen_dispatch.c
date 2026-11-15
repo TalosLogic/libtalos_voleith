@@ -42,8 +42,8 @@
 #include "shipshape_registry.h"
 #include "util.h"
 
-/* Maximum number of simultaneously registered backends. */
-#define WITGEN_DISPATCH_CAPACITY 32
+/* Maximum number of simultaneously registered backends (public header). */
+#define WITGEN_DISPATCH_CAPACITY VOLEITH_SHIPSHAPE_WITGEN_DISPATCH_CAPACITY
 
 /*
  * One registration table entry.

@@ -49,15 +49,16 @@ store_le32(uint8_t *p, uint32_t v)
 }
 
 /*
- * Build four consecutive CTR-mode input blocks into in_x4, using
- * the supplied iv' template and starting counter value.
+ * Build count consecutive CTR-mode input blocks into in_w, using the supplied
+ * iv' template and the absolute counter value (lower_base + i + b) for each
+ * block.  count is at most VOLEITH_AES_WIDE_MAX.
  */
 static void
-build_ctr_x4(uint8_t in_x4[64], const uint8_t iv_tweaked[16],
-             uint32_t lower_base, size_t i)
+build_ctr_wide(uint8_t *in_w, const uint8_t iv_tweaked[16], uint32_t lower_base,
+               size_t i, unsigned count)
 {
-    for (int b = 0; b < 4; b++) {
-        uint8_t *blk = in_x4 + 16 * b;
+    for (unsigned b = 0; b < count; b++) {
+        uint8_t *blk = in_w + 16 * b;
         memcpy(blk, iv_tweaked, 16);
         store_le32(blk, (uint32_t)(lower_base + (uint32_t)(i + (size_t)b)));
     }
@@ -80,55 +81,55 @@ voleith_prg_gen(const voleith_prg_ctx_t *ctx, uint8_t *out,
     /* Number of full 128-bit blocks and remaining bits */
     size_t full_blocks = m / 128;
     size_t rem_bits = m % 128;
-    size_t total_blocks = full_blocks + (rem_bits > 0 ? 1 : 0);
 
     /* Base lower 32 bits for counter */
     uint32_t lower_base = load_le32(iv_tweaked);
 
     /*
-     * Fast path: process complete 4-block batches via the parallel
-     * encrypt entry point.  This is a no-op gain on backends that
-     * implement _x4 as four serial encrypts (AES-NI today), but is
-     * the primary speed win for the bitsliced backend, where four
-     * blocks share one engine invocation.
+     * Generate the full blocks in batches of up to VOLEITH_AES_WIDE_MAX via the
+     * width-agnostic batch entry point.  The active backend chooses how to
+     * service each batch: the VAES backend runs several YMM dependency chains
+     * in flight, the bitsliced backend shares one engine pass across four
+     * blocks, and the serial hardware paths run exactly as many single-block
+     * encrypts as the batch holds.  The final (possibly partial) batch simply
+     * passes a smaller count.
      */
+    uint8_t in_w[16 * VOLEITH_AES_WIDE_MAX];
+    uint8_t out_w[16 * VOLEITH_AES_WIDE_MAX];
     size_t i = 0;
-    while (i + 4 <= full_blocks) {
-        uint8_t in_x4[64];
-        uint8_t out_x4[64];
+    while (i < full_blocks) {
+        size_t avail = full_blocks - i;
+        unsigned n = (avail < VOLEITH_AES_WIDE_MAX)
+                         ? (unsigned)avail
+                         : (unsigned)VOLEITH_AES_WIDE_MAX;
 
-        build_ctr_x4(in_x4, iv_tweaked, lower_base, i);
-        voleith_aes_encrypt_x4(&ctx->aes, out_x4, in_x4);
-        memcpy(out + i * 16, out_x4, 64);
+        build_ctr_wide(in_w, iv_tweaked, lower_base, i, n);
+        voleith_aes_encrypt_wide(&ctx->aes, out_w, in_w, n);
+        memcpy(out + i * 16, out_w, (size_t)n * 16);
 
-        voleith_secure_zero(in_x4, sizeof(in_x4));
-        voleith_secure_zero(out_x4, sizeof(out_x4));
-        i += 4;
+        voleith_secure_zero(in_w, (size_t)n * 16);
+        voleith_secure_zero(out_w, (size_t)n * 16);
+        i += n;
     }
 
-    /* Tail: remaining full blocks and the optional partial block. */
-    for (; i < total_blocks; i++) {
-        /* ctr_block = AddToLowerWord(iv', i) */
+    /*
+     * Optional partial last block: encrypt one full counter block and copy
+     * only the requested bytes, masking the unused high bits of the final byte.
+     */
+    if (rem_bits > 0) {
         uint8_t ctr_block[16];
         memcpy(ctr_block, iv_tweaked, 16);
-        uint32_t lower = (lower_base + (uint32_t)i) & 0xFFFFFFFF;
-        store_le32(ctr_block, lower);
+        store_le32(ctr_block,
+                   (lower_base + (uint32_t)full_blocks) & 0xFFFFFFFF);
 
         uint8_t block[16];
         voleith_aes_encrypt(&ctx->aes, block, ctr_block);
 
-        if (i < full_blocks) {
-            /* Full block - copy all 16 bytes */
-            memcpy(out + i * 16, block, 16);
-        } else {
-            /* Partial last block - copy only needed bytes */
-            size_t rem_bytes = (rem_bits + 7) / 8;
-            memcpy(out + i * 16, block, rem_bytes);
-            /* Zero unused high bits in the last byte */
-            if (rem_bits % 8 != 0) {
-                uint8_t mask = (uint8_t)((1u << (rem_bits % 8)) - 1);
-                out[i * 16 + rem_bytes - 1] &= mask;
-            }
+        size_t rem_bytes = (rem_bits + 7) / 8;
+        memcpy(out + full_blocks * 16, block, rem_bytes);
+        if (rem_bits % 8 != 0) {
+            uint8_t mask = (uint8_t)((1u << (rem_bits % 8)) - 1);
+            out[full_blocks * 16 + rem_bytes - 1] &= mask;
         }
         voleith_secure_zero(block, sizeof(block));
     }

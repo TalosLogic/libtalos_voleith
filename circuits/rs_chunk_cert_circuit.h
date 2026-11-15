@@ -115,8 +115,9 @@ typedef struct {
  * out of range, index >= n_chunks, or a circuit-builder failure.
  */
 int voleith_rs_chunk_cert_build_circuit(
-    voleith_gf8_circuit_t *c, voleith_rs_cr_profile_t cr, size_t n_chunks,
-    size_t index, voleith_rs_chunk_cert_layout_t *layout_out);
+    voleith_gf8_circuit_t *c, voleith_rs_cr_profile_t cr,
+    const voleith_node_hash_vt *node_vt, size_t n_chunks, size_t index,
+    voleith_rs_chunk_cert_layout_t *layout_out);
 
 /*
  * voleith_rs_chunk_cert_build_witness - assemble the witness buffer matching a
@@ -138,8 +139,9 @@ int voleith_rs_chunk_cert_build_circuit(
  * propagated vt-builder failure.
  */
 int voleith_rs_chunk_cert_build_witness(
-    voleith_rs_cr_profile_t cr, size_t n_chunks, size_t index,
-    const uint8_t *fwk, const uint8_t *chunk_digest, const uint8_t *siblings,
+    voleith_rs_cr_profile_t cr, const voleith_node_hash_vt *node_vt,
+    size_t n_chunks, size_t index, const uint8_t *fwk,
+    const uint8_t *chunk_digest, const uint8_t *siblings,
     const voleith_rs_chunk_cert_layout_t *layout, uint8_t *witness_out);
 
 /*
@@ -159,7 +161,8 @@ int voleith_rs_chunk_cert_build_witness(
  * out of range, or a circuit-builder failure.
  */
 int voleith_rs_chunk_cert_build_circuit_secret_dir(
-    voleith_gf8_circuit_t *c, voleith_rs_cr_profile_t cr, size_t n_chunks,
+    voleith_gf8_circuit_t *c, voleith_rs_cr_profile_t cr,
+    const voleith_node_hash_vt *node_vt, size_t n_chunks,
     voleith_rs_chunk_cert_layout_t *layout_out);
 
 /*
@@ -178,8 +181,9 @@ int voleith_rs_chunk_cert_build_circuit_secret_dir(
  * failure.
  */
 int voleith_rs_chunk_cert_build_witness_secret_dir(
-    voleith_rs_cr_profile_t cr, size_t n_chunks, size_t index,
-    const uint8_t *fwk, const uint8_t *chunk_digest, const uint8_t *siblings,
+    voleith_rs_cr_profile_t cr, const voleith_node_hash_vt *node_vt,
+    size_t n_chunks, size_t index, const uint8_t *fwk,
+    const uint8_t *chunk_digest, const uint8_t *siblings,
     const voleith_rs_chunk_cert_layout_t *layout, uint8_t *witness_out);
 
 #endif /* VOLEITH_RS_CHUNK_CERT_CIRCUIT_H */

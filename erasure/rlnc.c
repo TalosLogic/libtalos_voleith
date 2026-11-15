@@ -14,6 +14,8 @@
 
 #include "rlnc.h"
 
+#include <ichor/gf16.h>
+
 #include <stdlib.h>
 
 #include "util.h"
@@ -177,36 +179,26 @@ voleith_rlnc_decoder_free(voleith_rlnc_decoder_t *dec)
     dec->rank = 0;
 }
 
-/* Adds factor * (stored row r) into the incoming work row. */
+/* Adds factor * (stored row r) into the incoming work row.  Both the
+ * coefficient and payload rows are host-order GF(2^16) regions, so the axpy
+ * runs through the ichor gf16 primitive (poly 0x1100B == voleith_gf16_mul). */
 static void
 work_axpy_row(voleith_rlnc_decoder_t *dec, size_t r, voleith_gf16_t factor)
 {
-    size_t j, s;
-
-    for (j = 0; j < dec->k; j++)
-        dec->work_coeff[j] = voleith_gf16_add(
-            dec->work_coeff[j],
-            voleith_gf16_mul(factor, dec->coeffs[r * dec->k + j]));
-    for (s = 0; s < dec->elems; s++)
-        dec->work_payload[s] = voleith_gf16_add(
-            dec->work_payload[s],
-            voleith_gf16_mul(factor, dec->payload[r * dec->elems + s]));
+    ichor_gf16_muladd_region(dec->work_coeff, dec->coeffs + r * dec->k, factor,
+                             dec->k);
+    ichor_gf16_muladd_region(dec->work_payload, dec->payload + r * dec->elems,
+                             factor, dec->elems);
 }
 
 /* Adds factor * (work row) into stored row r (back-reduction for RREF). */
 static void
 row_axpy_work(voleith_rlnc_decoder_t *dec, size_t r, voleith_gf16_t factor)
 {
-    size_t j, s;
-
-    for (j = 0; j < dec->k; j++)
-        dec->coeffs[r * dec->k + j] =
-            voleith_gf16_add(dec->coeffs[r * dec->k + j],
-                             voleith_gf16_mul(factor, dec->work_coeff[j]));
-    for (s = 0; s < dec->elems; s++)
-        dec->payload[r * dec->elems + s] =
-            voleith_gf16_add(dec->payload[r * dec->elems + s],
-                             voleith_gf16_mul(factor, dec->work_payload[s]));
+    ichor_gf16_muladd_region(dec->coeffs + r * dec->k, dec->work_coeff, factor,
+                             dec->k);
+    ichor_gf16_muladd_region(dec->payload + r * dec->elems, dec->work_payload,
+                             factor, dec->elems);
 }
 
 int
@@ -249,12 +241,11 @@ voleith_rlnc_decoder_add(voleith_rlnc_decoder_t *dec, const uint8_t *packet)
     if (pivot == dec->k)
         return 0; /* Linearly dependent: no new information. */
 
-    /* Normalize the work row so its pivot coefficient is 1. */
+    /* Normalize the work row so its pivot coefficient is 1 (in-place scale). */
     pinv = voleith_gf16_inv(dec->work_coeff[pivot]);
-    for (j = 0; j < dec->k; j++)
-        dec->work_coeff[j] = voleith_gf16_mul(pinv, dec->work_coeff[j]);
-    for (s = 0; s < dec->elems; s++)
-        dec->work_payload[s] = voleith_gf16_mul(pinv, dec->work_payload[s]);
+    ichor_gf16_mul_region(dec->work_coeff, dec->work_coeff, pinv, dec->k);
+    ichor_gf16_mul_region(dec->work_payload, dec->work_payload, pinv,
+                          dec->elems);
 
     /* Back-reduce the pivot column out of every stored row (keep RREF). */
     for (r = 0; r < dec->rank; r++) {

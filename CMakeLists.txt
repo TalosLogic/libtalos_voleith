@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 cmake_minimum_required(VERSION 3.16)
-project(libvoleith VERSION 1.11.0 LANGUAGES C)
+project(libvoleith VERSION 1.12.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -13,6 +13,7 @@ option(VOLEITH_AES_NI     "Compile AES-NI backend (omit for lean build)"        
 option(VOLEITH_CLMUL      "Compile CLMUL (PCLMULQDQ) field backend (omit for lean build)" ON)
 option(VOLEITH_ARMV8_AES  "Compile ARMv8 AES backend (omit for lean build)"         ON)
 option(VOLEITH_PMULL      "Compile ARMv8 PMULL field backend (omit for lean build)"  ON)
+option(VOLEITH_THREADS    "Enable the ichor thread pool (prover tau-rep parallelism); OFF builds the serial fallback" ON)
 option(VOLEITH_BUILD_TESTS "Build test suite" ON)
 option(VOLEITH_BUILD_EXAMPLES "Build example programs" ON)
 option(VOLEITH_BUILD_SHARED "Build shared library (libvoleith.so/.dylib) in addition to static" OFF)
@@ -216,6 +217,13 @@ set(ICHOR_ARMV8_AES ${VOLEITH_ARMV8_AES})
 set(ICHOR_CLMUL     ${VOLEITH_CLMUL})
 set(ICHOR_PMULL     ${VOLEITH_PMULL})
 
+# Threading: map onto ichor's ICHOR_THREADS so a serial voleith build
+# (-DVOLEITH_THREADS=OFF) compiles ichor's serial pool fallback (ICHOR_WITH_
+# THREADS=0, no pthreads link) and the two stay in lockstep.  The prover commit
+# chain is bit-identical threaded vs serial (parallel-compute-then-ordered-
+# hash), so the test suite is the parity oracle across the two configurations.
+set(ICHOR_THREADS   ${VOLEITH_THREADS})
+
 # ichor carries its own KAT / dudect suites in its own tree; do not build them
 # inside voleith.
 set(ICHOR_BUILD_TESTS  OFF)
@@ -339,11 +347,15 @@ set(VOLEITH_CORE_SOURCES
     proof/rs_opener_argus_gf8.c
     circuits/aes_circuit.c
     circuits/aes_gf8_circuit.c
+    circuits/aes_norm_gf8_circuit.c
     circuits/grostl_gf8_circuit.c
+    circuits/grostl_norm_gf8_circuit.c
     circuits/aes_cmac_circuit.c
     circuits/aes_cmac_gf8_circuit.c
+    circuits/aes_cmac_norm_gf8_circuit.c
     circuits/kdf_ctr_cmac_circuit.c
     circuits/kdf_ctr_cmac_gf8_circuit.c
+    circuits/kdf_ctr_cmac_norm_gf8_circuit.c
     circuits/merkle_circuit.c
     circuits/merkle_gf8_circuit.c
     circuits/merkle_grostl_gf8_circuit.c
@@ -352,8 +364,11 @@ set(VOLEITH_CORE_SOURCES
     circuits/indexed_merkle_grostl_gf8_circuit.c
     circuits/range_gf8_circuit.c
     circuits/node_hash_hirose_gf8.c
+    circuits/node_hash_hirose_norm_gf8.c
     circuits/node_hash_aes_gf8.c
+    circuits/node_hash_aes_norm_gf8.c
     circuits/node_hash_grostl_gf8.c
+    circuits/node_hash_grostl_norm_gf8.c
     circuits/merkle_vt_gf8_circuit.c
     circuits/merkle_vt_gf8_helpers.c
     circuits/indexed_merkle_vt_gf8_circuit.c

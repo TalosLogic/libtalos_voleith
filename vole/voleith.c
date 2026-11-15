@@ -55,7 +55,8 @@ voleith_decode_challenge(const uint8_t *delta,
 int
 voleith_commit(voleith_commitment_t *com, voleith_prover_t *state,
                const voleith_vc_params_t *params, const uint8_t *root_seed,
-               const uint8_t iv[16], unsigned int ellhat)
+               const uint8_t iv[16], unsigned int ellhat,
+               const voleith_threadctx_t *tctx)
 {
     const size_t lambda_bytes = (size_t)params->lambda / 8;
     const size_t ellhat_bytes = (ellhat + 7) / 8;
@@ -78,7 +79,7 @@ voleith_commit(voleith_commitment_t *com, voleith_prover_t *state,
 
     /* Run BAVC.Commit + ConvertToVOLE */
     int ret = voleith_vole_commit(params, root_seed, iv, ellhat, &state->bavc,
-                                  com->c, com->u, state->v);
+                                  com->c, com->u, state->v, tctx);
     if (ret != 0)
         goto fail_state;
 

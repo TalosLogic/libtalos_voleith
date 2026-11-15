@@ -101,7 +101,7 @@ ds_init(struct ds *d, voleith_rs_cr_profile_t cr, size_t n, size_t k, size_t cb,
                                     d->digb) != VOLEITH_EC_OK)
             return -1;
 
-    if (voleith_rs_tree_root(cr, d->fwk, d->digests, n, d->root,
+    if (voleith_rs_tree_root(cr, NULL, d->fwk, d->digests, n, d->root,
                              sizeof(d->root)) != VOLEITH_EC_OK)
         return -1;
 
@@ -110,7 +110,7 @@ ds_init(struct ds *d, voleith_rs_cr_profile_t cr, size_t n, size_t k, size_t cb,
         if (d->siblings == NULL)
             return -1;
         for (size_t i = 0; i < n; i++)
-            if (voleith_rs_tree_sibling_path(cr, d->fwk, d->digests, n, i,
+            if (voleith_rs_tree_sibling_path(cr, NULL, d->fwk, d->digests, n, i,
                                              d->siblings + i * d->depth * d->W,
                                              d->depth * d->W) != VOLEITH_EC_OK)
                 return -1;
@@ -158,11 +158,11 @@ prove_cert(const struct ds *d, const voleith_params_t *params, size_t i,
     const uint8_t *sib = ds_sib(d, i);
 
     if (secret)
-        return voleith_rs_chunk_cert_prove_secret_dir(out, params, d->cr, d->n,
-                                                      i, d->fwk, digest,
+        return voleith_rs_chunk_cert_prove_secret_dir(out, params, d->cr, NULL,
+                                                      d->n, i, d->fwk, digest,
                                                       d->root, sib, &d->meta);
-    return voleith_rs_chunk_cert_prove(out, params, d->cr, d->n, i, d->fwk,
-                                       digest, d->root, sib, &d->meta);
+    return voleith_rs_chunk_cert_prove(out, params, d->cr, NULL, d->n, i,
+                                       d->fwk, digest, d->root, sib, &d->meta);
 }
 
 static void
@@ -190,8 +190,9 @@ test_public(void)
         ds_free(&d);
         return;
     }
-    if (voleith_rs_retriever_init(&r, d.cr, &params, VOLEITH_EC_MATRIX_CAUCHY,
-                                  0, d.root, d.R, d.W, &d.meta, NULL) != 0) {
+    if (voleith_rs_retriever_init(&r, d.cr, NULL, &params,
+                                  VOLEITH_EC_MATRIX_CAUCHY, 0, d.root, d.R, d.W,
+                                  &d.meta, NULL) != 0) {
         FAIL("retriever_init");
         ds_free(&d);
         return;
@@ -291,8 +292,9 @@ test_secret_identical(void)
         ds_free(&d);
         return;
     }
-    if (voleith_rs_retriever_init(&r, d.cr, &params, VOLEITH_EC_MATRIX_CAUCHY,
-                                  1, d.root, d.R, d.W, &d.meta, d.fwk) != 0) {
+    if (voleith_rs_retriever_init(&r, d.cr, NULL, &params,
+                                  VOLEITH_EC_MATRIX_CAUCHY, 1, d.root, d.R, d.W,
+                                  &d.meta, d.fwk) != 0) {
         FAIL("retriever_init");
         ds_free(&d);
         return;

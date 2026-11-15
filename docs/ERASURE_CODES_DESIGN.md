@@ -368,6 +368,16 @@ hidden by the FWK in either mode, so the index choice is about chunk anonymity
 and dedup convenience, not owner anonymity. Public-dir is the default here, not
 the only option.
 
+Node-hash selection. The `node_hash` above is not fixed. The chunk-certificate
+circuit (`circuits/rs_chunk_cert_circuit.c`) and its proof take a caller-supplied
+`voleith_node_hash_vt`, the same hash-agnostic interface the Merkle and
+ring-signature circuits use, so the FWK-blinded leaf and the tree run over
+whichever shipped node hash the owner picks (AES-DM, Grøstl, Hirose) and, since
+1.12.0, over the `_norm` vts, which cut the certificate's VOLE-slot count by up
+to ~25% at byte-identical roots. The node-hash families and the norm form are
+specified in [`docs/CIRCUIT_DESIGN.md`](CIRCUIT_DESIGN.md); the certificate is
+agnostic to which one is chosen.
+
 ### 6.2 Motivating use case: ledger-driven durability monitoring
 
 Three roles. The design separates three roles by job, regardless of whether one
@@ -1275,6 +1285,12 @@ In scope (this library provides):
   `merkle_root`, `compute_R` / `verify_R`, and index-recovery-by-trial.
 - Local decision primitives (pure functions the application calls): dedup,
   distinct-count, RLNC rank, "do I have `k` distinct yet".
+
+As of 1.12.0 this erasure proof surface (the RS chunk-certificate prove / verify
+and its circuit builder) is exported through the public umbrella header
+`include/voleith_gf8.h`, so a consumer reaches it the same way as the core proof
+API, without a direct `circuits/` or `proof/` include. The plaintext codec and
+the serialization types keep their own headers.
 
 Out of scope (the consuming application provides):
 

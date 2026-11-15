@@ -24,6 +24,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "vc.h"
+#include "threadctx.h"
 
 /*
  * ConvertToVOLE for a single vector instance.
@@ -43,12 +44,16 @@
  * v:         output array of depth pointers, each pointing to outlen bytes.
  *            v[0..depth-1] are written. Caller must allocate.
  * params:    VC parameters
+ * r:         caller-owned scratch of at least 2 * N_i * outlen bytes (size it
+ *            2 * (1<<params->k) * outlen to fit any vector).  Need not be
+ *            zeroed; this call scrubs the portion it used before returning.
  *
  * Returns the depth (k or k-1) = number of v vectors produced.
  */
 int voleith_convert_to_vole(const uint8_t *iv, const uint8_t *sd, bool sd0_bot,
                             int vec_index, size_t outlen, uint8_t *u,
-                            uint8_t **v, const voleith_vc_params_t *params);
+                            uint8_t **v, const voleith_vc_params_t *params,
+                            uint8_t *r);
 
 /*
  * VOLE Commit - prover side.
@@ -68,10 +73,15 @@ int voleith_convert_to_vole(const uint8_t *iv, const uint8_t *sd, bool sd0_bot,
  *
  * Returns 0 on success, -1 on error.
  */
+/*
+ * tctx carries the prover's worker pool for the tau-rep loop.  Pass NULL
+ * (or a tctx whose pool is NULL) to run the serial path.
+ */
 int voleith_vole_commit(const voleith_vc_params_t *params,
                         const uint8_t *root_seed, const uint8_t iv[16],
                         unsigned int ellhat, voleith_bavc_t *bavc, uint8_t *c,
-                        uint8_t *u, uint8_t **v);
+                        uint8_t *u, uint8_t **v,
+                        const voleith_threadctx_t *tctx);
 
 /*
  * VOLE Reconstruct - verifier side.
@@ -96,5 +106,19 @@ int voleith_vole_reconstruct(const voleith_vc_params_t *params,
                              const size_t *i_delta, const uint8_t iv[16],
                              unsigned int ellhat, const uint8_t *c,
                              uint8_t *com, uint8_t **q);
+
+/*
+ * As voleith_vole_reconstruct, with a threading context (T3.4a).  tctx carries
+ * the verifier's worker pool for the tau-rep loop (the leaf-commitment loop in
+ * BAVC.Reconstruct and the per-vector ConvertToVOLE loop here).  Pass NULL (or
+ * a tctx whose pool is NULL) for the serial path; voleith_vole_reconstruct is
+ * exactly that case.  Output q / com is bit-identical regardless of threads.
+ */
+int voleith_vole_reconstruct_ex(const voleith_vc_params_t *params,
+                                const voleith_bavc_opening_t *opening,
+                                const size_t *i_delta, const uint8_t iv[16],
+                                unsigned int ellhat, const uint8_t *c,
+                                uint8_t *com, uint8_t **q,
+                                const voleith_threadctx_t *tctx);
 
 #endif /* VOLEITH_CONVERT_H */

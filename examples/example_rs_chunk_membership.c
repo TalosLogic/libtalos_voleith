@@ -120,7 +120,7 @@ main(void)
             fail("chunk_digest");
             goto cleanup;
         }
-    if (voleith_rs_tree_root(cr, fwk, digests, n, root, sizeof(root)) !=
+    if (voleith_rs_tree_root(cr, NULL, fwk, digests, n, root, sizeof(root)) !=
         VOLEITH_EC_OK) {
         fail("tree_root");
         goto cleanup;
@@ -132,7 +132,7 @@ main(void)
         goto cleanup;
     }
     for (i = 0; i < n; i++)
-        if (voleith_rs_tree_sibling_path(cr, fwk, digests, n, i,
+        if (voleith_rs_tree_sibling_path(cr, NULL, fwk, digests, n, i,
                                          siblings + i * depth * W,
                                          depth * W) != VOLEITH_EC_OK) {
             fail("sibling_path");
@@ -161,7 +161,7 @@ main(void)
 
     /* ---- Owner: issue a membership certificate for every chunk. ---- */
     for (i = 0; i < n; i++)
-        if (voleith_rs_chunk_cert_prove(&certs[i], &params, cr, n, i, fwk,
+        if (voleith_rs_chunk_cert_prove(&certs[i], &params, cr, NULL, n, i, fwk,
                                         digests + i * digb, root,
                                         siblings + i * depth * W, &meta) != 0) {
             fail("cert_prove");
@@ -170,8 +170,9 @@ main(void)
     printf("  issued %zu membership certificates\n", n);
 
     /* ---- Retriever: verify, dedup, and collect k distinct chunks. ---- */
-    if (voleith_rs_retriever_init(&r, cr, &params, VOLEITH_EC_MATRIX_CAUCHY, 0,
-                                  root, R, W, &meta, NULL) != 0) {
+    if (voleith_rs_retriever_init(&r, cr, NULL, &params,
+                                  VOLEITH_EC_MATRIX_CAUCHY, 0, root, R, W,
+                                  &meta, NULL) != 0) {
         fail("retriever_init");
         goto cleanup;
     }

@@ -33,10 +33,14 @@ typedef ichor_aes_backend_t voleith_aes_backend_t;
 #define VOLEITH_AES_BACKEND_AESNI ICHOR_AES_BACKEND_AESNI
 #define VOLEITH_AES_BACKEND_ARMV8 ICHOR_AES_BACKEND_ARMV8
 #define VOLEITH_AES_BACKEND_BITSLICED ICHOR_AES_BACKEND_BITSLICED
+#define VOLEITH_AES_BACKEND_VAES ICHOR_AES_BACKEND_VAES
+
+#define VOLEITH_AES_WIDE_MAX ICHOR_AES_WIDE_MAX
 
 #define voleith_aes_key_expand ichor_aes_key_expand
 #define voleith_aes_encrypt ichor_aes_encrypt
 #define voleith_aes_encrypt_x4 ichor_aes_encrypt_x4
+#define voleith_aes_encrypt_wide ichor_aes_encrypt_wide
 #define voleith_aes_ctx_clear ichor_aes_ctx_clear
 #define voleith_aes_backend ichor_aes_backend
 #define voleith_aes_backend_name ichor_aes_backend_name

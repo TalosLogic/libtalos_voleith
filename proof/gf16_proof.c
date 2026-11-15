@@ -37,6 +37,8 @@
 
 #include "../core/field16.h"
 #include "../core/util.h"
+#include <ichor/pool.h> /* ichor_pool_t lifecycle (T0.1 threading) */
+#include <ichor/cpu.h>  /* ichor_cpu_physical_cores (worker cap at tau) */
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -59,6 +61,8 @@ struct voleith_gf16_prover_commit_t {
     size_t proof_size;
     unsigned int qs_degree; /* QS constraint degree d (d=2 baseline) */
     uint8_t *pbuf;
+    voleith_threadctx_t
+        tctx; /* pool + ownership, plumbed to voleith_commit_ex */
 };
 
 struct voleith_gf16_verifier_reconstruct_t {
@@ -292,6 +296,20 @@ voleith_gf16_prove_commit(voleith_gf16_prover_commit_t **ctx_out,
                           const uint8_t *fs_seed, size_t fs_seed_len,
                           uint8_t *commitment_out)
 {
+    /* Historical behavior: single-threaded. */
+    voleith_threading_opts_t opts = {.nthreads = 1, .pool = NULL};
+    return voleith_gf16_prove_commit_ex(ctx_out, params, circuit, witness,
+                                        instance, fs_seed, fs_seed_len,
+                                        commitment_out, &opts);
+}
+
+int
+voleith_gf16_prove_commit_ex(
+    voleith_gf16_prover_commit_t **ctx_out, const voleith_params_t *params,
+    const voleith_gf16_circuit_t *circuit, const voleith_gf16_t *witness,
+    const voleith_gf16_t *instance, const uint8_t *fs_seed, size_t fs_seed_len,
+    uint8_t *commitment_out, const voleith_threading_opts_t *opts)
+{
     if (!ctx_out || !params || !circuit || !witness || !fs_seed ||
         !commitment_out)
         return -1;
@@ -340,6 +358,35 @@ voleith_gf16_prove_commit(voleith_gf16_prover_commit_t **ctx_out,
         return -1;
     }
 
+    /*
+     * Create or borrow the commit context's worker pool.  A caller-supplied
+     * pool (opts->pool) is borrowed and must NOT be destroyed here; otherwise
+     * an internal pool is created, sized by opts->nthreads (0 = physical
+     * cores).  opts == NULL requests the physical-core default.  On a
+     * non-threaded ichor build the pool runs every job inline regardless.
+     * The pool is torn down (when owned) in voleith_gf16_prover_commit_free.
+     */
+    if (opts && opts->pool) {
+        ctx->tctx.pool = opts->pool;
+        ctx->tctx.owns_pool = 0;
+    } else {
+        unsigned int nthreads = opts ? opts->nthreads : 0;
+        if (ichor_pool_create(&ctx->tctx.pool, nthreads) != 0) {
+            voleith_gf16_prover_commit_free(ctx);
+            return -1;
+        }
+        ctx->tctx.owns_pool = 1;
+    }
+
+    /* Preallocate the commit chain's per-proof scratch on the context (T1.5),
+     * sized to vcp and ellhat_bytes, so prove_commit does no per-proof
+     * allocation in voleith_commit. */
+    if (voleith_threadctx_scratch_init(&ctx->tctx, &ctx->vcp, ellhat_bytes) !=
+        0) {
+        voleith_gf16_prover_commit_free(ctx);
+        return -1;
+    }
+
     /* Step 0: build the v1 metadata header into pbuf[0..47]. */
     if (gf16_build_header_bytes(ctx->pbuf, circuit, params) != 0) {
         voleith_gf16_prover_commit_free(ctx);
@@ -373,7 +420,7 @@ voleith_gf16_prove_commit(voleith_gf16_prover_commit_t **ctx_out,
     /* Step 2: VOLEitH commit (ellhat in bits). */
     unsigned int ellhat_bits = (unsigned int)(ellhat_bytes * 8);
     int commit_rc = voleith_commit(&ctx->com, &ctx->state, &ctx->vcp, root_seed,
-                                   iv_ptr, ellhat_bits);
+                                   iv_ptr, ellhat_bits, &ctx->tctx);
     voleith_secure_zero(root_seed, sizeof(root_seed));
     if (commit_rc != 0) {
         voleith_gf16_prover_commit_free(ctx);
@@ -466,9 +513,10 @@ voleith_gf16_prove_respond(voleith_proof_t *proof_out,
         a_out[0] = a0_tilde;
         for (unsigned int i = 1; i <= ctx->qs_degree; i++)
             a_out[i] = a_tilde[i - 1];
-        int ret = voleith_gf16_qs_prove(
-            circuit, witness, instance, lambda, ctx->com.u,
-            (const uint8_t **)ctx->state.v, chall_2, d_dyn, a_out);
+        int ret =
+            voleith_gf16_qs_prove_ex(circuit, witness, instance, lambda,
+                                     ctx->com.u, (const uint8_t **)ctx->state.v,
+                                     chall_2, d_dyn, a_out, ctx->tctx.pool);
         if (d_tmp_heap) {
             voleith_secure_zero(d_tmp_heap, ell_bytes);
             free(d_tmp_heap);
@@ -523,6 +571,9 @@ voleith_gf16_prover_commit_free(voleith_gf16_prover_commit_t *ctx)
 {
     if (!ctx)
         return;
+    voleith_threadctx_scratch_free(&ctx->tctx);
+    if (ctx->tctx.owns_pool)
+        ichor_pool_destroy(ctx->tctx.pool);
     voleith_commitment_free(&ctx->com);
     voleith_prover_free(&ctx->state);
     if (ctx->pbuf) {
@@ -541,7 +592,8 @@ gf16_verify_reconstruct_body(voleith_gf16_verifier_reconstruct_t **ctx_out,
                              const voleith_proof_t *body_proof,
                              const voleith_params_t *params,
                              const voleith_gf16_circuit_t *circuit,
-                             uint8_t *body_blob_out)
+                             uint8_t *body_blob_out,
+                             const voleith_threadctx_t *tctx)
 {
     if (!ctx_out || !body_proof || !body_proof->data || !params || !circuit ||
         !body_blob_out)
@@ -642,9 +694,9 @@ gf16_verify_reconstruct_body(voleith_gf16_verifier_reconstruct_t **ctx_out,
     opening.n_revealed = 0;
 
     uint8_t hcom_rec[64];
-    if (voleith_vole_reconstruct(&ctx->vcp, &opening, i_delta, iv,
-                                 (unsigned int)(ellhat_bytes * 8), c, hcom_rec,
-                                 ctx->Q) != 0) {
+    if (voleith_vole_reconstruct_ex(&ctx->vcp, &opening, i_delta, iv,
+                                    (unsigned int)(ellhat_bytes * 8), c,
+                                    hcom_rec, ctx->Q, tctx) != 0) {
         voleith_gf16_verifier_reconstruct_free(ctx);
         return -1;
     }
@@ -657,12 +709,17 @@ gf16_verify_reconstruct_body(voleith_gf16_verifier_reconstruct_t **ctx_out,
     return 0;
 }
 
-int
-voleith_gf16_verify_reconstruct(voleith_gf16_verifier_reconstruct_t **ctx_out,
-                                const voleith_proof_t *proof,
-                                const voleith_params_t *params,
-                                const voleith_gf16_circuit_t *circuit,
-                                uint8_t *commitment_out)
+/*
+ * Shared header-parse + body dispatch for the v1 public reconstruct entries.
+ * tctx == NULL runs serial; a tctx with a pool threads the tau-rep loop (T3.4a).
+ */
+static int
+gf16_verify_reconstruct_hdr(voleith_gf16_verifier_reconstruct_t **ctx_out,
+                            const voleith_proof_t *proof,
+                            const voleith_params_t *params,
+                            const voleith_gf16_circuit_t *circuit,
+                            uint8_t *commitment_out,
+                            const voleith_threadctx_t *tctx)
 {
     voleith_proof_header_t h;
     voleith_proof_t body_view;
@@ -681,9 +738,55 @@ voleith_gf16_verify_reconstruct(voleith_gf16_verifier_reconstruct_t **ctx_out,
     body_view.data = proof->data + VOLEITH_PROOF_HEADER_BYTES;
     body_view.len = proof->len - VOLEITH_PROOF_HEADER_BYTES;
 
-    return gf16_verify_reconstruct_body(ctx_out, &body_view, params, circuit,
-                                        commitment_out +
-                                            VOLEITH_PROOF_HEADER_BYTES);
+    return gf16_verify_reconstruct_body(
+        ctx_out, &body_view, params, circuit,
+        commitment_out + VOLEITH_PROOF_HEADER_BYTES, tctx);
+}
+
+int
+voleith_gf16_verify_reconstruct(voleith_gf16_verifier_reconstruct_t **ctx_out,
+                                const voleith_proof_t *proof,
+                                const voleith_params_t *params,
+                                const voleith_gf16_circuit_t *circuit,
+                                uint8_t *commitment_out)
+{
+    return gf16_verify_reconstruct_hdr(ctx_out, proof, params, circuit,
+                                       commitment_out, NULL);
+}
+
+int
+voleith_gf16_verify_reconstruct_ex(
+    voleith_gf16_verifier_reconstruct_t **ctx_out, const voleith_proof_t *proof,
+    const voleith_params_t *params, const voleith_gf16_circuit_t *circuit,
+    uint8_t *commitment_out, const voleith_threading_opts_t *opts)
+{
+    voleith_threadctx_t tctx = {0};
+    int created = 0;
+    int rc;
+
+    if (opts && opts->pool) {
+        tctx.pool = opts->pool; /* borrowed (caller sized it) */
+    } else if (opts && opts->nthreads != 1) {
+        /* Cap the owned pool at tau: only tau independent reconstruct jobs. */
+        unsigned int nt = opts->nthreads;
+        unsigned int cap = (unsigned int)params->tau;
+        if (nt == 0)
+            nt = ichor_cpu_physical_cores();
+        if (nt > cap)
+            nt = cap;
+        if (nt < 1)
+            nt = 1;
+        if (ichor_pool_create(&tctx.pool, nt) != 0)
+            return -1;
+        created = 1;
+    }
+
+    rc = gf16_verify_reconstruct_hdr(ctx_out, proof, params, circuit,
+                                     commitment_out, &tctx);
+
+    if (created)
+        ichor_pool_destroy(tctx.pool);
+    return rc;
 }
 
 int
@@ -796,6 +899,19 @@ voleith_gf16_prove(voleith_proof_t *proof, const voleith_params_t *params,
                    const voleith_gf16_t *instance, const uint8_t *fs_seed,
                    size_t fs_seed_len)
 {
+    /* Historical behavior: single-threaded. */
+    voleith_threading_opts_t opts = {.nthreads = 1, .pool = NULL};
+    return voleith_gf16_prove_ex(proof, params, circuit, witness, instance,
+                                 fs_seed, fs_seed_len, &opts);
+}
+
+int
+voleith_gf16_prove_ex(voleith_proof_t *proof, const voleith_params_t *params,
+                      const voleith_gf16_circuit_t *circuit,
+                      const voleith_gf16_t *witness,
+                      const voleith_gf16_t *instance, const uint8_t *fs_seed,
+                      size_t fs_seed_len, const voleith_threading_opts_t *opts)
+{
     if (!proof || !params || !circuit || !witness || !fs_seed)
         return -1;
 
@@ -808,8 +924,8 @@ voleith_gf16_prove(voleith_proof_t *proof, const voleith_params_t *params,
         return -1;
 
     voleith_gf16_prover_commit_t *ctx = NULL;
-    if (voleith_gf16_prove_commit(&ctx, params, circuit, witness, instance,
-                                  fs_seed, fs_seed_len, blob) != 0) {
+    if (voleith_gf16_prove_commit_ex(&ctx, params, circuit, witness, instance,
+                                     fs_seed, fs_seed_len, blob, opts) != 0) {
         free(blob);
         return -1;
     }
@@ -924,6 +1040,25 @@ voleith_gf16_prove_v2(voleith_proof_t *proof, const voleith_params_t *params,
 
     return voleith_gf16_prove(proof, params, circuit, witness, instance,
                               fs_seed, fs_seed_len);
+}
+
+int
+voleith_gf16_prove_v2_ex(voleith_proof_t *proof, const voleith_params_t *params,
+                         const voleith_gf16_circuit_t *circuit,
+                         const voleith_gf16_t *witness, size_t witness_len,
+                         const voleith_gf16_t *instance, size_t instance_len,
+                         const uint8_t *fs_seed, size_t fs_seed_len,
+                         const voleith_threading_opts_t *opts)
+{
+    if (circuit == NULL)
+        return -1;
+    if (witness_len != voleith_gf16_circuit_witness_len(circuit))
+        return -1;
+    if (instance_len != voleith_gf16_circuit_instance_len(circuit))
+        return -1;
+
+    return voleith_gf16_prove_ex(proof, params, circuit, witness, instance,
+                                 fs_seed, fs_seed_len, opts);
 }
 
 int

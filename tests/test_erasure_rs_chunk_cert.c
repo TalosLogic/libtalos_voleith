@@ -84,7 +84,7 @@ dataset_init(struct dataset *d, voleith_rs_cr_profile_t cr, size_t n,
             return -1;
     }
 
-    if (voleith_rs_tree_root(cr, d->fwk, d->digests, n, d->root,
+    if (voleith_rs_tree_root(cr, NULL, d->fwk, d->digests, n, d->root,
                              sizeof(d->root)) != VOLEITH_EC_OK)
         return -1;
 
@@ -92,7 +92,7 @@ dataset_init(struct dataset *d, voleith_rs_cr_profile_t cr, size_t n,
         d->siblings = calloc(d->depth, d->W);
         if (d->siblings == NULL)
             return -1;
-        if (voleith_rs_tree_sibling_path(cr, d->fwk, d->digests, n, index,
+        if (voleith_rs_tree_sibling_path(cr, NULL, d->fwk, d->digests, n, index,
                                          d->siblings,
                                          d->depth * d->W) != VOLEITH_EC_OK)
             return -1;
@@ -150,9 +150,9 @@ public_tamper_all_reject(const voleith_proof_t *proof,
         copy[offs[t]] ^= 0xff;
         view.data = copy;
         view.len = proof->len;
-        rv = voleith_rs_chunk_cert_verify(&view, params, d->cr, d->n, d->index,
-                                          digest_of(d, d->index), d->root,
-                                          &d->meta, d->R, d->W);
+        rv = voleith_rs_chunk_cert_verify(&view, params, d->cr, NULL, d->n,
+                                          d->index, digest_of(d, d->index),
+                                          d->root, &d->meta, d->R, d->W);
         free(copy);
         if (rv == 0)
             return 0;
@@ -180,13 +180,13 @@ test_public(voleith_rs_cr_profile_t cr, size_t n, size_t index,
     }
 
     /* Genuine certificate verifies. */
-    if (voleith_rs_chunk_cert_prove(&proof, &params, cr, n, index, d.fwk,
+    if (voleith_rs_chunk_cert_prove(&proof, &params, cr, NULL, n, index, d.fwk,
                                     digest_of(&d, index), d.root, d.siblings,
                                     &d.meta) != 0) {
         FAIL("prove");
         goto done;
     }
-    if (voleith_rs_chunk_cert_verify(&proof, &params, cr, n, index,
+    if (voleith_rs_chunk_cert_verify(&proof, &params, cr, NULL, n, index,
                                      digest_of(&d, index), d.root, &d.meta, d.R,
                                      d.W) != 0) {
         FAIL("genuine verify");
@@ -198,8 +198,8 @@ test_public(voleith_rs_cr_profile_t cr, size_t n, size_t index,
     bad_fwk[0] ^= 0x01;
     {
         voleith_proof_t p2 = {NULL, 0};
-        if (voleith_rs_chunk_cert_prove(&p2, &params, cr, n, index, bad_fwk,
-                                        digest_of(&d, index), d.root,
+        if (voleith_rs_chunk_cert_prove(&p2, &params, cr, NULL, n, index,
+                                        bad_fwk, digest_of(&d, index), d.root,
                                         d.siblings, &d.meta) == 0) {
             voleith_proof_free(&p2);
             FAIL("wrong FWK proved");
@@ -216,7 +216,7 @@ test_public(voleith_rs_cr_profile_t cr, size_t n, size_t index,
     /* Wrong authoritative R: two-layer check fails. */
     memcpy(bad_R, d.R, d.W);
     bad_R[0] ^= 0x01;
-    if (voleith_rs_chunk_cert_verify(&proof, &params, cr, n, index,
+    if (voleith_rs_chunk_cert_verify(&proof, &params, cr, NULL, n, index,
                                      digest_of(&d, index), d.root, &d.meta,
                                      bad_R, d.W) == 0) {
         FAIL("wrong R accepted");
@@ -226,7 +226,7 @@ test_public(voleith_rs_cr_profile_t cr, size_t n, size_t index,
     /* Wrong metadata: R no longer matches. */
     bad_meta = d.meta;
     bad_meta.k = (uint16_t)(d.meta.k + 1);
-    if (voleith_rs_chunk_cert_verify(&proof, &params, cr, n, index,
+    if (voleith_rs_chunk_cert_verify(&proof, &params, cr, NULL, n, index,
                                      digest_of(&d, index), d.root, &bad_meta,
                                      d.R, d.W) == 0) {
         FAIL("wrong metadata accepted");
@@ -236,7 +236,7 @@ test_public(voleith_rs_cr_profile_t cr, size_t n, size_t index,
     /* Wrong merkle_root. */
     memcpy(bad_root, d.root, d.W);
     bad_root[0] ^= 0x01;
-    if (voleith_rs_chunk_cert_verify(&proof, &params, cr, n, index,
+    if (voleith_rs_chunk_cert_verify(&proof, &params, cr, NULL, n, index,
                                      digest_of(&d, index), bad_root, &d.meta,
                                      d.R, d.W) == 0) {
         FAIL("wrong merkle_root accepted");
@@ -244,7 +244,7 @@ test_public(voleith_rs_cr_profile_t cr, size_t n, size_t index,
     }
 
     /* Wrong chunk_digest (a different chunk's digest). */
-    if (voleith_rs_chunk_cert_verify(&proof, &params, cr, n, index,
+    if (voleith_rs_chunk_cert_verify(&proof, &params, cr, NULL, n, index,
                                      digest_of(&d, (index + 1) % n), d.root,
                                      &d.meta, d.R, d.W) == 0) {
         FAIL("wrong chunk_digest accepted");
@@ -252,15 +252,15 @@ test_public(voleith_rs_cr_profile_t cr, size_t n, size_t index,
     }
 
     /* Wrong index (different circuit / fs_seed). */
-    if (voleith_rs_chunk_cert_verify(&proof, &params, cr, n, (index + 1) % n,
-                                     digest_of(&d, index), d.root, &d.meta, d.R,
-                                     d.W) == 0) {
+    if (voleith_rs_chunk_cert_verify(&proof, &params, cr, NULL, n,
+                                     (index + 1) % n, digest_of(&d, index),
+                                     d.root, &d.meta, d.R, d.W) == 0) {
         FAIL("wrong index accepted");
         goto done;
     }
 
     /* A public certificate must not verify as secret-index. */
-    if (voleith_rs_chunk_cert_verify_secret_dir(&proof, &params, cr, n,
+    if (voleith_rs_chunk_cert_verify_secret_dir(&proof, &params, cr, NULL, n,
                                                 digest_of(&d, index), d.root,
                                                 &d.meta, d.R, d.W) == 0) {
         FAIL("public cert verified as secret");
@@ -294,12 +294,12 @@ test_secret(voleith_rs_cr_profile_t cr, size_t n, size_t index,
 
     /* Genuine secret-index certificate verifies (no index at verify). */
     if (voleith_rs_chunk_cert_prove_secret_dir(
-            &proof, &params, cr, n, index, d.fwk, digest_of(&d, index), d.root,
-            d.siblings, &d.meta) != 0) {
+            &proof, &params, cr, NULL, n, index, d.fwk, digest_of(&d, index),
+            d.root, d.siblings, &d.meta) != 0) {
         FAIL("prove_secret");
         goto done;
     }
-    if (voleith_rs_chunk_cert_verify_secret_dir(&proof, &params, cr, n,
+    if (voleith_rs_chunk_cert_verify_secret_dir(&proof, &params, cr, NULL, n,
                                                 digest_of(&d, index), d.root,
                                                 &d.meta, d.R, d.W) != 0) {
         FAIL("genuine secret verify");
@@ -307,7 +307,7 @@ test_secret(voleith_rs_cr_profile_t cr, size_t n, size_t index,
     }
 
     /* A secret certificate must not verify as public-index. */
-    if (voleith_rs_chunk_cert_verify(&proof, &params, cr, n, index,
+    if (voleith_rs_chunk_cert_verify(&proof, &params, cr, NULL, n, index,
                                      digest_of(&d, index), d.root, &d.meta, d.R,
                                      d.W) == 0) {
         FAIL("secret cert verified as public");
@@ -330,8 +330,8 @@ test_secret(voleith_rs_cr_profile_t cr, size_t n, size_t index,
             view.data = copy;
             view.len = proof.len;
             rv = voleith_rs_chunk_cert_verify_secret_dir(
-                &view, &params, cr, n, digest_of(&d, index), d.root, &d.meta,
-                d.R, d.W);
+                &view, &params, cr, NULL, n, digest_of(&d, index), d.root,
+                &d.meta, d.R, d.W);
             free(copy);
             if (rv == 0) {
                 FAIL("secret proof tamper accepted");
@@ -343,7 +343,7 @@ test_secret(voleith_rs_cr_profile_t cr, size_t n, size_t index,
     /* Wrong metadata / merkle_root rejected by the two-layer check. */
     bad_meta = d.meta;
     bad_meta.file_len ^= 0x01;
-    if (voleith_rs_chunk_cert_verify_secret_dir(&proof, &params, cr, n,
+    if (voleith_rs_chunk_cert_verify_secret_dir(&proof, &params, cr, NULL, n,
                                                 digest_of(&d, index), d.root,
                                                 &bad_meta, d.R, d.W) == 0) {
         FAIL("secret wrong metadata accepted");
@@ -352,7 +352,7 @@ test_secret(voleith_rs_cr_profile_t cr, size_t n, size_t index,
 
     memcpy(bad_root, d.root, d.W);
     bad_root[0] ^= 0x01;
-    if (voleith_rs_chunk_cert_verify_secret_dir(&proof, &params, cr, n,
+    if (voleith_rs_chunk_cert_verify_secret_dir(&proof, &params, cr, NULL, n,
                                                 digest_of(&d, index), bad_root,
                                                 &d.meta, d.R, d.W) == 0) {
         FAIL("secret wrong merkle_root accepted");
@@ -361,8 +361,8 @@ test_secret(voleith_rs_cr_profile_t cr, size_t n, size_t index,
 
     /* Wrong chunk_digest rejected. */
     if (voleith_rs_chunk_cert_verify_secret_dir(
-            &proof, &params, cr, n, digest_of(&d, (index + 1) % n), d.root,
-            &d.meta, d.R, d.W) == 0) {
+            &proof, &params, cr, NULL, n, digest_of(&d, (index + 1) % n),
+            d.root, &d.meta, d.R, d.W) == 0) {
         FAIL("secret wrong chunk_digest accepted");
         goto done;
     }

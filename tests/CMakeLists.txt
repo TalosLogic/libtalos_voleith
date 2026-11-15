@@ -99,6 +99,8 @@ voleith_add_test(test_rlnc_confidential test_rlnc_confidential.c)
 voleith_add_test(test_erasure_rs_dataset test_erasure_rs_dataset.c)
 voleith_add_test(test_erasure_rs_chunk_cert_circuit
                  test_erasure_rs_chunk_cert_circuit.c)
+voleith_add_test(test_erasure_rs_chunk_cert_norm_gf8
+                 test_erasure_rs_chunk_cert_norm_gf8.c)
 voleith_add_test(test_erasure_rs_chunk_cert test_erasure_rs_chunk_cert.c)
 voleith_label_test(test_erasure_rs_chunk_cert slow)
 voleith_add_test(test_erasure_rs_retriever test_erasure_rs_retriever.c)
@@ -107,8 +109,24 @@ voleith_add_test(test_rs_wire test_rs_wire.c)
 voleith_add_test(test_node_hash_hirose_gf8 test_node_hash_hirose_gf8.c)
 voleith_add_test(test_prg test_prg.c)
 voleith_add_test(test_vc test_vc.c)
+# test_vc / test_convert's threaded-parity tests construct an ichor pool
+# directly, so they need ichor's headers and symbols; voleith_core links ichor
+# PRIVATE and does not propagate them, so link ichor onto these test targets.
+target_link_libraries(test_vc ichor)
 voleith_add_test(test_convert test_convert.c)
+target_link_libraries(test_convert ichor)
 voleith_add_test(test_voleith test_voleith.c)
+
+# WS2 per-job-allocation gate (T2.5): counts heap allocations during a
+# scratch-backed commit via the linker's --wrap mechanism, which is GNU ld only
+# (macOS ld64 has no --wrap), so build it on non-Apple hosts only.  Needs ichor
+# (constructs a pool directly) and the wrap flags for malloc/calloc/realloc/free.
+if(NOT APPLE)
+    voleith_add_test(test_threading_alloc test_threading_alloc.c)
+    target_link_libraries(test_threading_alloc ichor)
+    target_link_options(test_threading_alloc PRIVATE
+        -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free)
+endif()
 voleith_add_test(test_circuit test_circuit.c)
 voleith_add_test(test_aes_circuit test_aes_circuit.c)
 voleith_add_test(test_quicksilver test_quicksilver.c)
@@ -139,8 +157,11 @@ voleith_add_test(test_merkle_vt_gf8_helpers test_merkle_vt_gf8_helpers.c)
 voleith_add_test(test_indexed_merkle_vt_gf8_helpers test_indexed_merkle_vt_gf8_helpers.c)
 voleith_add_test(test_indexed_merkle_vt_gf8_equivalence test_indexed_merkle_vt_gf8_equivalence.c)
 voleith_add_test(test_node_hash_vt_conformance test_node_hash_vt_conformance.c)
+voleith_add_test(test_merkle_vt_gf8_norm test_merkle_vt_gf8_norm.c)
 voleith_add_test(test_node_hash_fixed_multiblock_gf8 test_node_hash_fixed_multiblock_gf8.c)
 voleith_add_test(test_gf8_quicksilver test_gf8_quicksilver.c)
+voleith_add_test(test_product3_compat test_product3_compat.c)
+voleith_add_test(test_norm_basis_compat test_norm_basis_compat.c)
 voleith_add_test(test_syndrome_gf8 test_syndrome_gf8.c)
 voleith_add_test(test_syndrome_opener_e2e_gf8 test_syndrome_opener_e2e_gf8.c)
 voleith_label_test(test_syndrome_opener_e2e_gf8 slow)
@@ -151,8 +172,12 @@ voleith_add_test(test_rlnc_gf16_cert_circuit test_rlnc_gf16_cert_circuit.c)
 voleith_add_test(test_permutation_gf16_circuit test_permutation_gf16_circuit.c)
 voleith_add_test(test_rlnc_confidential_gf16_circuit test_rlnc_confidential_gf16_circuit.c)
 voleith_add_test(test_gf8_proof test_gf8_proof.c)
+voleith_add_test(test_gf8_qs_thread_determinism test_gf8_qs_thread_determinism.c)
+voleith_add_test(test_gf16_qs_thread_determinism test_gf16_qs_thread_determinism.c)
 voleith_add_test(test_ring_sig_v1_gf8 test_ring_sig_v1_gf8.c)
+voleith_add_test(test_ring_sig_v1_norm_gf8 test_ring_sig_v1_norm_gf8.c)
 voleith_add_test(test_rs_gf8 test_rs_gf8.c)
+voleith_add_test(test_rs_norm_gf8 test_rs_norm_gf8.c)
 voleith_add_test(test_rs_epoch_gf8 test_rs_epoch_gf8.c)
 voleith_add_test(test_rs_opener_gf8 test_rs_opener_gf8.c)
 voleith_add_test(test_rs_opener_e2e_gf8 test_rs_opener_e2e_gf8.c)
@@ -234,6 +259,10 @@ set_tests_properties(test_shipshape_registry_grid_slow PROPERTIES LABELS slow)
 voleith_add_test(test_shipshape_reg_hash_grid test_shipshape_reg_hash_grid.c)
 # MR3: crypto-v2 parser smoke test (also extended in MR4 with Group D cases).
 voleith_add_test(test_shipshape_crypto_v2_parse test_shipshape_crypto_v2_parse.c)
+# crypto-v3: norm S-box registry entries and node-hash types (spec 7.8).
+voleith_add_test(test_shipshape_crypto_v3 test_shipshape_crypto_v3.c)
+# crypto-v3: prove/verify norm standalone entries via the generic witgen.
+voleith_add_test(test_shipshape_crypto_v3_proof test_shipshape_crypto_v3_proof.c)
 # MR4: crypto-v2 equivalence and prove/verify soundness tests.
 voleith_add_test(test_shipshape_crypto_v2_equiv test_shipshape_crypto_v2_equiv.c)
 voleith_add_test(test_shipshape_crypto_v2_proof test_shipshape_crypto_v2_proof.c)

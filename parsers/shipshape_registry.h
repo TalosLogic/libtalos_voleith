@@ -62,7 +62,11 @@ typedef struct {
 /*
  * One registry entry.  param_min / param_max are the inclusive bounds
  * on the inferred length parameter for PARAMETRIC entries (FIXED: both
- * 0).  bodies points at the frozen grid (n_bodies >= 1).
+ * 0).  bodies points at the frozen grid (n_bodies >= 1).  introduced_version
+ * is the minimum stdlib version (crypto-vN) under which the entry is
+ * callable (1, 2, 3, ...): a file declaring a lower stdlib version is
+ * rejected (the Shipshape spec 1.4; registry changes are a new version,
+ * never an in-place edit).
  */
 typedef struct {
     const char *fqn;
@@ -72,6 +76,7 @@ typedef struct {
     uint32_t param_max;
     const voleith_shipshape_reg_body_t *bodies;
     size_t n_bodies;
+    uint8_t introduced_version;
 } voleith_shipshape_reg_entry_t;
 
 /*
@@ -243,6 +248,7 @@ typedef struct {
     uint8_t out_is_node_vec; /* 1: output = node bytes; 0: none */
     const voleith_shipshape_reg_hash_body_t *bodies;
     size_t n_bodies;
+    uint8_t introduced_version; /* min stdlib version (crypto-vN) */
 } voleith_shipshape_reg_hash_entry_t;
 
 /*
@@ -258,6 +264,15 @@ extern const size_t voleith_shipshape_reg_hash_count;
 
 /* Number of live hash-parametric descriptors. */
 size_t voleith_shipshape_reg_hash_descriptor_count(void);
+
+/*
+ * Minimum stdlib version (crypto-vN) under which live entry idx is
+ * callable.  Returns 0 if idx is out of range.  Consumed by the freeze
+ * tool (to emit the frozen table's introduced_version column) and the
+ * consistency tests.
+ */
+uint8_t voleith_shipshape_registry_introduced_version(size_t idx);
+uint8_t voleith_shipshape_reg_hash_introduced_version(size_t idx);
 
 /*
  * Metadata for hash-parametric entry idx.  Any out pointer may be NULL.

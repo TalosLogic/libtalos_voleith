@@ -19,12 +19,33 @@
  */
 
 #include "aes_cmac_gf8_circuit.h"
+#include "aes_cmac_norm_gf8_circuit.h"
 #include "gf8_circuit.h"
+#include "gf8_circuit_fingerprint.h"
 #include "aes.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
+
+/*
+ * Golden fingerprints of the norm S-box AES-CMAC circuits (new twins).  Capture
+ * once from a build of this commit: run the test, copy the bytes printed under
+ * the matching "... norm circuit fingerprint:" line, and replace the
+ * placeholder.  Until pinned, the all-zero placeholder prints the bytes and the
+ * golden assert is skipped.  The pinned circuits are AES-128 / 16-byte message
+ * and AES-256 / 40-byte message.
+ */
+#ifndef AES128_CMAC_NORM_GF8_FP_GOLDEN_BYTES
+#define AES128_CMAC_NORM_GF8_FP_GOLDEN_BYTES                                   \
+    0x3e, 0xe1, 0x8f, 0x3c, 0x61, 0x2d, 0xb9, 0x26, 0x9f, 0x5a, 0xd7, 0x8d,    \
+        0x45, 0x0c, 0x4a, 0xfb
+#endif
+#ifndef AES256_CMAC_NORM_GF8_FP_GOLDEN_BYTES
+#define AES256_CMAC_NORM_GF8_FP_GOLDEN_BYTES                                   \
+    0x38, 0xa7, 0x4c, 0x9a, 0x21, 0x39, 0x48, 0xd6, 0xb7, 0xb0, 0x08, 0xeb,    \
+        0x38, 0x55, 0x2a, 0xb3
+#endif
 
 static int test_count = 0;
 static int pass_count = 0;
@@ -493,6 +514,190 @@ test_cmac_cavp_aes256(void)
     }
 }
 
+/* ================================================================
+ * Norm S-box AES-CMAC twin: same tag (RFC 4493 / CAVP), smaller witness.
+ * ================================================================ */
+
+/* Build + evaluate an aes_cmac_norm_gf8_circuit, returning the 16-byte tag. */
+static int
+eval_cmac_norm_gf8_circuit(const uint8_t *key, size_t key_bytes,
+                           const uint8_t *msg, size_t msg_bytes,
+                           uint8_t result[16])
+{
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    if (!c)
+        return -1;
+
+    gf8_wire_id key_wires[32];
+    for (size_t i = 0; i < key_bytes; i++)
+        key_wires[i] = voleith_gf8_add_witness(c);
+
+    gf8_wire_id *msg_wires = NULL;
+    if (msg_bytes > 0) {
+        msg_wires = calloc(msg_bytes, sizeof(gf8_wire_id));
+        for (size_t i = 0; i < msg_bytes; i++)
+            msg_wires[i] = voleith_gf8_add_instance(c);
+    }
+
+    gf8_wire_id tag_wires[16];
+    aes_cmac_norm_gf8_circuit(c, key_wires, key_bytes, msg_wires, msg_bytes,
+                              tag_wires);
+
+    size_t n_wires = voleith_gf8_circuit_wire_count(c);
+    uint8_t *vals = calloc(n_wires, 1);
+    size_t w_bytes = aes_cmac_norm_gf8_witness_bytes(key_bytes, msg_bytes);
+    uint8_t *witness = calloc(w_bytes, 1);
+    aes_cmac_norm_gf8_build_witness(key, key_bytes, msg, msg_bytes, witness,
+                                    NULL);
+
+    int ok =
+        voleith_gf8_circuit_eval(c, witness, msg_bytes > 0 ? msg : NULL, vals);
+    for (int i = 0; i < 16; i++)
+        result[i] = vals[tag_wires[i]];
+
+    free(witness);
+    free(vals);
+    free(msg_wires);
+    voleith_gf8_circuit_free(c);
+    return ok;
+}
+
+static void
+check_norm_fp(const char *name, const uint8_t *key, size_t key_bytes,
+              size_t msg_bytes, const uint8_t golden[16])
+{
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    gf8_wire_id key_wires[32];
+    for (size_t i = 0; i < key_bytes; i++)
+        key_wires[i] = voleith_gf8_add_witness(c);
+    gf8_wire_id *msg_wires = NULL;
+    if (msg_bytes > 0) {
+        msg_wires = calloc(msg_bytes, sizeof(gf8_wire_id));
+        for (size_t i = 0; i < msg_bytes; i++)
+            msg_wires[i] = voleith_gf8_add_instance(c);
+    }
+    gf8_wire_id tag_wires[16];
+    aes_cmac_norm_gf8_circuit(c, key_wires, key_bytes, msg_wires, msg_bytes,
+                              tag_wires);
+
+    uint8_t fp[VOLEITH_GF8_CIRCUIT_FINGERPRINT_BYTES];
+    uint8_t zero[16] = {0};
+    if (voleith_gf8_circuit_fingerprint(c, fp) != 0) {
+        check(name, 0);
+    } else {
+        printf("  %s:", name);
+        for (int i = 0; i < 16; i++)
+            printf(" %02x", fp[i]);
+        printf("\n");
+        if (memcmp(golden, zero, 16) == 0)
+            printf("    NOTE: golden unset; pin the bytes above.\n");
+        else
+            check(name, memcmp(fp, golden, 16) == 0);
+    }
+    free(msg_wires);
+    voleith_gf8_circuit_free(c);
+}
+
+static void
+test_cmac_norm(void)
+{
+    static const uint8_t K128[16] = {0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae,
+                                     0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88,
+                                     0x09, 0xcf, 0x4f, 0x3c};
+    static const uint8_t K256[32] = {
+        0x60, 0x3d, 0xeb, 0x10, 0x15, 0xca, 0x71, 0xbe, 0x2b, 0x73, 0xae,
+        0xf0, 0x85, 0x7d, 0x77, 0x81, 0x1f, 0x35, 0x2c, 0x07, 0x3b, 0x61,
+        0x08, 0xd7, 0x2d, 0x98, 0x10, 0xa3, 0x09, 0x14, 0xdf, 0xf4};
+    static const uint8_t M64[64] = {
+        0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e,
+        0x11, 0x73, 0x93, 0x17, 0x2a, 0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03,
+        0xac, 0x9c, 0x9e, 0xb7, 0x6f, 0xac, 0x45, 0xaf, 0x8e, 0x51, 0x30,
+        0xc8, 0x1c, 0x46, 0xa3, 0x5c, 0xe4, 0x11, 0xe5, 0xfb, 0xc1, 0x19,
+        0x1a, 0x0a, 0x52, 0xef, 0xf6, 0x9f, 0x24, 0x45, 0xdf, 0x4f, 0x9b,
+        0x17, 0xad, 0x2b, 0x41, 0x7b, 0xe6, 0x6c, 0x37, 0x10};
+
+    /* Tag parity: norm tag == RFC 4493 published vectors (AES-128, K1 and K2
+     * paths across message shapes). */
+    static const uint8_t EX1[16] = {0xbb, 0x1d, 0x69, 0x29, 0xe9, 0x59,
+                                    0x37, 0x28, 0x7f, 0xa3, 0x7d, 0x12,
+                                    0x9b, 0x75, 0x67, 0x46};
+    static const uint8_t EX3[16] = {0xdf, 0xa6, 0x67, 0x47, 0xde, 0x9a,
+                                    0xe6, 0x30, 0x30, 0xca, 0x32, 0x61,
+                                    0x14, 0x97, 0xc8, 0x27};
+    static const uint8_t EX4[16] = {0x51, 0xf0, 0xbe, 0xbf, 0x7e, 0x3b,
+                                    0x9d, 0x92, 0xfc, 0x49, 0x74, 0x17,
+                                    0x79, 0x36, 0x3c, 0xfe};
+    uint8_t r[16];
+    eval_cmac_norm_gf8_circuit(K128, 16, NULL, 0, r);
+    check("AES-128-CMAC norm empty == RFC 4493 Ex.1", memcmp(r, EX1, 16) == 0);
+    eval_cmac_norm_gf8_circuit(K128, 16, M64, 40, r);
+    check("AES-128-CMAC norm 40B (K2) == RFC 4493 Ex.3",
+          memcmp(r, EX3, 16) == 0);
+    eval_cmac_norm_gf8_circuit(K128, 16, M64, 64, r);
+    check("AES-128-CMAC norm 64B (K1) == RFC 4493 Ex.4",
+          memcmp(r, EX4, 16) == 0);
+
+    /* AES-256: norm tag == software reference and == frozen circuit. */
+    {
+        uint8_t ref[16], frozen[16];
+        cmac_ref(K256, 256, M64, 40, ref);
+        eval_cmac_gf8_circuit(K256, 32, M64, 40, frozen);
+        eval_cmac_norm_gf8_circuit(K256, 32, M64, 40, r);
+        check("AES-256-CMAC norm 40B == software reference",
+              memcmp(r, ref, 16) == 0);
+        check("AES-256-CMAC norm 40B == frozen circuit",
+              memcmp(r, frozen, 16) == 0);
+        cmac_ref(K256, 256, NULL, 0, ref);
+        eval_cmac_norm_gf8_circuit(K256, 32, NULL, 0, r);
+        check("AES-256-CMAC norm empty == software reference",
+              memcmp(r, ref, 16) == 0);
+    }
+
+    /* Witness sizes: exact formula, matches qs_ell, smaller than frozen, zero
+     * mul gates, qs_degree 2.  Per-call inv is 160 (AES-128) / 220 (AES-256)
+     * vs frozen 200 / 276 (key schedule stays frozen 8-bit, so only the
+     * encryption S-boxes shrink; not a clean 75% of the whole call). */
+    {
+        int fail = 0;
+        struct {
+            size_t kb, mb;
+        } cases[] = {{16, 0}, {16, 40}, {16, 64}, {32, 0}, {32, 40}};
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            size_t kb = cases[i].kb, mb = cases[i].mb;
+            size_t wn = aes_cmac_norm_gf8_witness_bytes(kb, mb);
+            size_t wf = aes_cmac_gf8_witness_bytes(kb, mb);
+            size_t inv = (kb == 16) ? 160u : 220u;
+            size_t expect = kb + aes_cmac_norm_gf8_n_aes_calls(mb) * inv;
+
+            voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+            gf8_wire_id kw[32];
+            for (size_t j = 0; j < kb; j++)
+                kw[j] = voleith_gf8_add_witness(c);
+            gf8_wire_id *mw = mb ? calloc(mb, sizeof(gf8_wire_id)) : NULL;
+            for (size_t j = 0; j < mb; j++)
+                mw[j] = voleith_gf8_add_instance(c);
+            gf8_wire_id tag[16];
+            aes_cmac_norm_gf8_circuit(c, kw, kb, mw, mb, tag);
+
+            if (wn != expect || wn != voleith_gf8_qs_ell(c) || wn >= wf ||
+                voleith_gf8_circuit_witness_count(c) != wn ||
+                voleith_gf8_circuit_mul_count(c) != 0 ||
+                voleith_gf8_circuit_qs_degree(c) != 2)
+                fail = 1;
+            free(mw);
+            voleith_gf8_circuit_free(c);
+        }
+        check("AES-CMAC norm: witness == formula == qs_ell, < frozen, 0 mul, "
+              "deg 2",
+              !fail);
+    }
+
+    static const uint8_t G128[16] = {AES128_CMAC_NORM_GF8_FP_GOLDEN_BYTES};
+    static const uint8_t G256[16] = {AES256_CMAC_NORM_GF8_FP_GOLDEN_BYTES};
+    check_norm_fp("AES-128-CMAC norm circuit fingerprint", K128, 16, 16, G128);
+    check_norm_fp("AES-256-CMAC norm circuit fingerprint", K256, 32, 40, G256);
+}
+
 int
 main(void)
 {
@@ -512,6 +717,9 @@ main(void)
 
     printf("\n[AES-256-CMAC GF8 NIST CAVP vectors]\n");
     test_cmac_cavp_aes256();
+
+    printf("\n[AES-CMAC GF8 norm S-box twin]\n");
+    test_cmac_norm();
 
     printf("\n  %d / %d passed\n", pass_count, test_count);
     return (pass_count == test_count) ? 0 : 1;

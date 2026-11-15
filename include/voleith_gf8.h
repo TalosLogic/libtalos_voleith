@@ -169,9 +169,9 @@
 /* Library version */
 #ifndef VOLEITH_VERSION_MAJOR
 #define VOLEITH_VERSION_MAJOR 1
-#define VOLEITH_VERSION_MINOR 11
+#define VOLEITH_VERSION_MINOR 12
 #define VOLEITH_VERSION_PATCH 0
-#define VOLEITH_VERSION_STRING "1.11.0"
+#define VOLEITH_VERSION_STRING "1.12.0"
 #endif
 
 /* GF(2⁸) proof system: circuit builder and prove/verify API */
@@ -202,5 +202,22 @@
 #include "rs_membership_gf8_circuit.h"
 #include "rs_gf8.h"
 #include "ring_sig_v1_gf8.h"
+
+/*
+ * Reed-Solomon erasure-coding data availability: the RS code, dataset /
+ * metadata layer, chunk membership tree (node hash selectable per the
+ * node_vt convention in rs_membership.h), the chunk-membership certificate
+ * circuit + proof, the wire format, and the retriever.  These were an
+ * internal surface through 1.11.x; promoted to the public API in 1.12.0.
+ */
+#include "erasure.h"
+#include "rs.h"
+#include "rs_dataset.h"
+#include "rs_membership.h"
+#include "rs_wire.h"
+#include "rs_consistency.h"
+#include "rs_retriever.h"
+#include "rs_chunk_cert_circuit.h"
+#include "rs_chunk_cert_proof.h"
 
 #endif /* VOLEITH_GF8_H */

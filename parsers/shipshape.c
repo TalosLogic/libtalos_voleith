@@ -139,7 +139,7 @@ typedef struct {
     const char *buf;     /* input buffer, for body re-lexing */
     size_t buf_len;
     const voleith_shipshape_limits_t *eff;
-    int stdlib_version; /* 1 = crypto-v1; 2 = crypto-v2 */
+    int stdlib_version; /* 1 = crypto-v1; 2 = crypto-v2; 3 = crypto-v3 */
     int format_minor;   /* declared `.shipshape` minor (major is fixed at 1) */
 } ss_parse_ctx_t;
 
@@ -704,8 +704,8 @@ match_header_line(ss_lexer_t *lx, const char *const *expect)
 
 /*
  * Parse the three mandatory header lines in order (FORMAT 3.1).  Accepts
- * both `stdlib crypto-v1` and `stdlib crypto-v2` on the third line and
- * reports which was found via *version (set to 1 or 2).  Returns 0 on
+ * `stdlib crypto-v1`, `crypto-v2`, or `crypto-v3` on the third line and
+ * reports which was found via *version (set to 1, 2, or 3).  Returns 0 on
  * success or a negative voleith_shipshape_error_t.
  */
 static int
@@ -716,6 +716,7 @@ parse_header(ss_lexer_t *lx, int *version, int *format_minor)
     static const char kw_stdlib[] = "stdlib";
     static const char kw_v1[] = "crypto-v1";
     static const char kw_v2[] = "crypto-v2";
+    static const char kw_v3[] = "crypto-v3";
     const char *w;
     size_t wl;
     int r;
@@ -727,7 +728,7 @@ parse_header(ss_lexer_t *lx, int *version, int *format_minor)
 
     /*
      * Third line: skip blank/comment lines, then match "stdlib" followed by
-     * either "crypto-v1" or "crypto-v2" (FORMAT 3.1).
+     * "crypto-v1", "crypto-v2", or "crypto-v3" (FORMAT 3.1).
      */
     for (;;) {
         r = voleith_shipshape_lex_read_line(lx);
@@ -743,7 +744,10 @@ parse_header(ss_lexer_t *lx, int *version, int *format_minor)
         voleith_const_memcmp(w, kw_stdlib, wl) != 0)
         return VOLEITH_SHIPSHAPE_ERR_HEADER;
     lex_next_word(lx, &w, &wl);
-    if (wl == sizeof(kw_v2) - 1 && voleith_const_memcmp(w, kw_v2, wl) == 0) {
+    if (wl == sizeof(kw_v3) - 1 && voleith_const_memcmp(w, kw_v3, wl) == 0) {
+        *version = 3;
+    } else if (wl == sizeof(kw_v2) - 1 &&
+               voleith_const_memcmp(w, kw_v2, wl) == 0) {
         *version = 2;
     } else if (wl == sizeof(kw_v1) - 1 &&
                voleith_const_memcmp(w, kw_v1, wl) == 0) {
@@ -2813,7 +2817,18 @@ parse_call(ss_parse_ctx_t *ctx, ss_lexer_t *lx, const ss_token_t *head)
      * v2 hit + no bracket:  the bracket is mandatory; reject.
      */
     if (reg_idx >= 0 && gp.cur.kind == SS_TOK_LBRACKET) {
-        /* v1 entry, no bracket allowed. */
+        /* v1/v3 standalone entry, no bracket allowed. */
+        r = VOLEITH_SHIPSHAPE_ERR_REGISTRY;
+        goto done;
+    }
+    /*
+     * Stdlib-version gate (the Shipshape spec 1.4): a standalone entry is
+     * callable only under its introduced_version or later.  A norm entry
+     * (introduced_version 3) in a crypto-v1/v2 file is rejected here.
+     */
+    if (reg_idx >= 0 &&
+        ctx->stdlib_version <
+            voleith_shipshape_registry[reg_idx].introduced_version) {
         r = VOLEITH_SHIPSHAPE_ERR_REGISTRY;
         goto done;
     }
@@ -2821,8 +2836,10 @@ parse_call(ss_parse_ctx_t *ctx, ss_lexer_t *lx, const ss_token_t *head)
         ss_token_t typetok;
         const voleith_shipshape_node_hash_type_t *nht;
 
-        /* crypto-v2 entries require stdlib crypto-v2. */
-        if (ctx->stdlib_version != 2) {
+        /* Hash-parametric entries require at least their introduced_version
+         * (crypto-v2 for the base entries). */
+        if (ctx->stdlib_version <
+            voleith_shipshape_reg_hash[hash_idx].introduced_version) {
             r = VOLEITH_SHIPSHAPE_ERR_REGISTRY;
             goto done;
         }
@@ -2839,6 +2856,11 @@ parse_call(ss_parse_ctx_t *ctx, ss_lexer_t *lx, const ss_token_t *head)
         nht =
             voleith_shipshape_node_hash_type_by_name(typetok.lex, typetok.len);
         if (nht == NULL) {
+            r = VOLEITH_SHIPSHAPE_ERR_REGISTRY;
+            goto done;
+        }
+        /* A norm node-hash type (introduced_version 3) requires crypto-v3. */
+        if (ctx->stdlib_version < nht->introduced_version) {
             r = VOLEITH_SHIPSHAPE_ERR_REGISTRY;
             goto done;
         }

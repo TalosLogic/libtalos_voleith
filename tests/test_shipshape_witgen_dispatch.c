@@ -323,17 +323,18 @@ test_table_full(void)
     voleith_shipshape_witgen_reset();
     memset(hash, 0, sizeof(hash));
 
-    /* Fill the table (capacity 32). */
-    for (i = 0; i < 32; i++) {
+    /* Fill the table to capacity. */
+    for (i = 0; i < VOLEITH_SHIPSHAPE_WITGEN_DISPATCH_CAPACITY; i++) {
         r = voleith_shipshape_witgen_register(dummy, hash, test_sbox_backend);
         if (r != 0)
             break;
     }
-    check("table full: 32 registrations succeed", i == 32);
+    check("table full: capacity registrations succeed",
+          i == VOLEITH_SHIPSHAPE_WITGEN_DISPATCH_CAPACITY);
 
-    /* The 33rd must fail. */
+    /* One past capacity must fail. */
     r = voleith_shipshape_witgen_register(dummy, hash, test_sbox_backend);
-    check("table full: 33rd registration returns nonzero", r != 0);
+    check("table full: registration past capacity returns nonzero", r != 0);
 
     voleith_shipshape_witgen_reset();
 }

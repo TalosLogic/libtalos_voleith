@@ -102,6 +102,14 @@ Merkle hashing.**  The bit-level variant is appropriate when the
 computation is inherently bitwise and does not compose with the
 byte-oriented building blocks.
 
+For S-box-heavy GF(2⁸) circuits, an optional FAEST *norm* form of each building
+block (the `_norm` builders and node-hash vts) commits up to ~25% fewer VOLE
+slots at byte-identical output, and correspondingly smaller proofs; the actual
+reduction depends on how S-box-dominated the circuit is.  It is additive beside
+the frozen circuits (same fingerprints and KATs), so adopting it is a drop-in
+choice.  See the building-blocks table below and
+[`docs/DESIGN.md`](docs/DESIGN.md#faest-norm-s-box-arithmetization).
+
 A minimal GF(2⁸) usage sketch:
 
 ```c
@@ -158,6 +166,7 @@ for further composition.
 | AES-128 / AES-256 encryption | `aes128_circuit` / `aes256_circuit` (bit-level), `aes128_gf8_circuit` / `aes256_gf8_circuit` (GF(2⁸)) | Canright (2005) tower-field S-box. |
 | AES-CMAC (RFC 4493) | `aes_cmac_circuit` / `aes_cmac_gf8_circuit` | 128- or 256-bit key. |
 | KDF-CTR (NIST SP 800-108r1 §4.1) | `kdf_ctr_cmac_circuit` / `kdf_ctr_cmac_gf8_circuit` | AES-CMAC as PRF; 32-bit BE counter wired as circuit constants. |
+| Norm S-box variants (optional, GF(2⁸)) | `aes{128,256}_norm_gf8_circuit`, `grostl{256,512}_norm_gf8_circuit`, `aes_cmac_norm_gf8_circuit`, `kdf_ctr_cmac_norm_gf8_circuit`, and the `*_norm` node-hash vts | FAEST paired-round arithmetization: byte-identical output, ~25% fewer VOLE slots (clean 0.75 for Grøstl, ~0.8 for keyed primitives) and lower verify-side constraint count. Additive beside the frozen circuits; same fingerprints/KATs unchanged. |
 | Merkle path (Davies-Meyer / CMAC nodes, 16-byte, 2⁶⁴ CR) | `merkle_circuit` / `merkle_gf8_circuit` | Public-dir and secret-dir variants. |
 | Merkle path (Grøstl wide nodes) | `merkle_grostl_gf8_circuit` | Four node variants (`GROSTL_{256, 256_T27, 512, 512_T59}`) covering 2¹⁰⁸ to 2²⁵⁶ CR.  Public-dir and secret-dir. |
 | Merkle path (any hash, hash-agnostic) | `merkle_vt_gf8_path_circuit` (+ `_secret_dir`) | Generic body parameterised by `voleith_node_hash_vt`; ships with vts for AES-DM, AES-128-CMAC, the four Grøstl variants, the two fixed-input Grøstl variants (`grostl256_fixed` / `grostl512_fixed`: full 2¹²⁸ / 2²⁵⁶ CR at single-compression cost), and Hirose-AES-256. |
@@ -172,7 +181,8 @@ for further composition.
 For each building block, see [`docs/CIRCUIT_DESIGN.md`](docs/CIRCUIT_DESIGN.md):
 concrete AND-gate / mul-slot cost formulas, the public-dir-vs-secret-dir
 choice, the Grøstl `_T27` / `_T59` truncation rationale, the Hirose-AES-256
-construction, the `voleith_node_hash_vt` interface, the indexed-Merkle
+construction, the FAEST norm S-box family (the `_norm` circuits and vts),
+the `voleith_node_hash_vt` interface, the indexed-Merkle
 non-membership trust assumption (and the record-array validator that
 catches the common operational foot-guns), and worked gate-count examples.
 The ring-signature protocols (RSv1, the composable V2/V3/V4 superset, the
@@ -251,6 +261,11 @@ non-membership, and ring-signature membership), each selectable by node-hash
 type via a bracket selector (`path_secret[H]`, `nonmember_secret[H]`,
 `ring_sig/v1[H]`).  See [`docs/specs/SHIPSHAPE_SPEC.md` §7.7](docs/specs/SHIPSHAPE_SPEC.md)
 for the format and [`docs/DESIGN.md`](docs/DESIGN.md) for the rationale.
+
+The further-additive `stdlib crypto-v3` registry adds the FAEST norm S-box
+circuits: ten standalone norm kernels (the `_norm` twins of the AES / CMAC /
+Grøstl entries) and six norm node-hash types usable in the same bracket selector.
+See [`docs/specs/SHIPSHAPE_SPEC.md` §7.8](docs/specs/SHIPSHAPE_SPEC.md).
 
 Three runnable `.ship` examples exercise these constructions over the 128-bit
 `hirose_fixed_32` node hash: `example_shipshape_anon_membership` (anonymous
@@ -336,11 +351,59 @@ example proves *standard* AES-128, the FAEST-128f statement): see
 
 ---
 
+## Multi-threading
+
+Both proving and verifying can run across multiple cores.  The prover threads
+its VOLE commit and its QuickSilver phase; the verifier threads the matching
+VOLE reconstruct and QuickSilver-verify phase.  Threading is opt-in through the
+`_ex` entry points (`voleith_gf8_prove_v2_ex`, `voleith_gf8_verify_v2_ex`, and
+the commit / reconstruct / respond variants beside them), which take a
+`voleith_threading_opts_t` selecting the worker count; the plain entry points
+stay single-threaded, so existing callers are unaffected.
+
+Work is partitioned on public structure only (the tau repetitions, circuit DAG
+levels, column blocks), so a threaded proof or verify is **bit-identical** to
+the serial one at any worker count and the constant-time posture is unchanged.
+Speedup is largest on heavy circuits such as wide Merkle / Grøstl membership
+trees; the grinding loop and the Fiat-Shamir tail stay serial.
+
+See [`docs/DESIGN.md` → "Prover and Verifier Parallelism"](docs/DESIGN.md#prover-and-verifier-parallelism-threading)
+for the design, the determinism argument, and the per-worker scratch model.
+
+---
+
+## Performance at a glance
+
+Measured on an Intel Core i9-13950HX (8 performance + 16 efficiency cores),
+Turbo off, worker sweep capped at 16 (`em_128f`; AES-256 at `em_256f`). "Speedup"
+is the best threaded run over the single-threaded run of the same build;
+"norm saving" is the proof-size reduction from the FAEST norm S-box at
+byte-identical output. Single-threaded performance is essentially unchanged from
+1.11.0. Full method, absolute timings, and the v1.11.0 baseline are in
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+
+| circuit | prove speedup | verify speedup | norm proof saving |
+| --- | --- | --- | --- |
+| AES-128 | 2.4x | 2.3x | 9.6% |
+| AES-256 | 2.8x | 3.3x | 7.9% |
+| Merkle membership, depth 10, Hirose | 2.1x | 2.3x | 20.7% |
+| Merkle membership, depth 10, Grøstl-256 | 2.0x | 2.4x | 24.0% |
+
+The threading speedup is largest where there are more VOLE repetitions to spread
+(AES-256 verify, 3.3x) and plateaus around 2x on the memory-bandwidth-bound
+membership trees; the norm proof saving grows with how S-box-dominated the
+circuit is, approaching the 25% ceiling on the all-Grøstl tree. The prove
+plateau at 8 workers is this laptop's 8 performance cores, not a threading
+ceiling: verify already keeps gaining through 16 here, and on homogeneous
+many-core hardware prove scales further.
+
+---
+
 ## Design and architecture
 
 See [`docs/DESIGN.md`](docs/DESIGN.md) for the full technical design,
 including protocol layering, two-variant rationale, soundness-critical paths,
-parameter-set sizing trade-offs, the FAEST norm-trick analysis, the indexed
+parameter-set sizing trade-offs, the indexed
 Merkle trust model, and the future-work roadmap.
 
 ## Security practices
@@ -570,6 +633,10 @@ block in both proof-system variants, plus the Bristol Fashion parser:
 | `example_rs_chunk_membership.c`                   | RS storage use case end-to-end: FWK-blinded chunk membership certificate, retriever verify/dedup/decode, and the capability-3 consistency check |
 | `example_rs_heal.c`                               | Healer repair flow: decode a dataset once from k survivors, then re-encode several lost chunks bit-identically (digests unchanged) |
 | `example_rs_wire.c`                               | The RS dataset on the wire: serialize the descriptor and per-chunk packet, then parse them back, recompute R, and verify the certificate from the bytes |
+| `example_aes_norm_gf8.c`                          | AES-128 / AES-256 key knowledge with the frozen S-box and the FAEST norm S-box side by side: identical ciphertext, ~25% fewer data-path witness bytes, and a lower verify-side constraint count |
+| `example_membership_vt_norm_gf8.c`               | Depth-10 Merkle ring-membership (hidden leaf) comparing frozen vs `_norm` node-hash vts across the leaf / node hash choices a deployment would pick |
+| `example_threading_aes_gf8.c` / `example_threading_membership_vt_gf8.c` / `example_threading_rlnc_gf16.c` | Prover speedup from the tau-rep thread pool at varying worker counts (AES, depth-10 Merkle membership, and the GF(2¹⁶) RLNC counterpart); the emitted proof is bit-identical at every count |
+| `example_threading_verify_aes_gf8.c` / `example_threading_verify_membership_vt_gf8.c` | Verifier-side speedup from the thread pool (the verify twins of the prover threading examples); accept / reject is bit-identical at every worker count |
 
 Each example builds the circuit, generates a valid witness, produces a proof,
 verifies it, and prints circuit statistics (AND-gate count, ell, proof size)

@@ -102,6 +102,17 @@ int voleith_gf8_prove(voleith_proof_t *proof, const voleith_params_t *params,
                       const uint8_t *fs_seed, size_t fs_seed_len);
 
 /*
+ * As voleith_gf8_prove, with threading options.  opts == NULL defaults to
+ * the physical-core count; see voleith_threading_opts_t.  voleith_gf8_prove
+ * is the special case opts = { .nthreads = 1 } (single-threaded).
+ */
+int voleith_gf8_prove_ex(voleith_proof_t *proof, const voleith_params_t *params,
+                         const voleith_gf8_circuit_t *circuit,
+                         const uint8_t *witness, const uint8_t *instance,
+                         const uint8_t *fs_seed, size_t fs_seed_len,
+                         const voleith_threading_opts_t *opts);
+
+/*
  * Expected byte length of the witness / instance buffer for the
  * GF(2⁸) prove/verify API.  GF(2⁸) circuits use one byte per
  * witness/instance wire, so the buffer size is the wire count
@@ -147,6 +158,19 @@ int voleith_gf8_prove_v2(voleith_proof_t *proof, const voleith_params_t *params,
                          const uint8_t *fs_seed, size_t fs_seed_len);
 
 /*
+ * As voleith_gf8_prove_v2, with threading options.  See
+ * voleith_threading_opts_t.  voleith_gf8_prove_v2 is the special case
+ * opts = { .nthreads = 1 }.
+ */
+int voleith_gf8_prove_v2_ex(voleith_proof_t *proof,
+                            const voleith_params_t *params,
+                            const voleith_gf8_circuit_t *circuit,
+                            const uint8_t *witness, size_t witness_len,
+                            const uint8_t *instance, size_t instance_len,
+                            const uint8_t *fs_seed, size_t fs_seed_len,
+                            const voleith_threading_opts_t *opts);
+
+/*
  * Verify a non-interactive proof for a GF(2⁸) element-level circuit.
  *
  * See voleith_gf8_prove() above for the M-N2 caller-binding
@@ -173,6 +197,20 @@ int voleith_gf8_verify_v2(const voleith_proof_t *proof,
                           const voleith_gf8_circuit_t *circuit,
                           const uint8_t *instance, size_t instance_len,
                           const uint8_t *fs_seed, size_t fs_seed_len);
+
+/*
+ * Threaded verify (T3.4b).  With opts carrying a worker pool, VOLE reconstruct
+ * (T3.4a) and the QS-verify Q transpose + Step-2 accumulate run across the
+ * pool; the result is bit-identical to the serial verify.  opts == NULL (or a
+ * NULL/size<=1 pool) is exactly voleith_gf8_verify_v2.  (No _ex twin of the
+ * deprecated voleith_gf8_verify: the threaded path is length-validated only.)
+ */
+int voleith_gf8_verify_v2_ex(const voleith_proof_t *proof,
+                             const voleith_params_t *params,
+                             const voleith_gf8_circuit_t *circuit,
+                             const uint8_t *instance, size_t instance_len,
+                             const uint8_t *fs_seed, size_t fs_seed_len,
+                             const voleith_threading_opts_t *opts);
 
 /* ================================================================
  * Two-phase prove/verify API (for hybrid proof systems)
@@ -208,6 +246,19 @@ int voleith_gf8_prove_commit(voleith_gf8_prover_commit_t **ctx_out,
                              uint8_t *commitment_out);
 
 /*
+ * As voleith_gf8_prove_commit, with threading options for the commit
+ * context's worker pool.  See voleith_threading_opts_t.
+ * voleith_gf8_prove_commit is the special case opts = { .nthreads = 1 }.
+ */
+int voleith_gf8_prove_commit_ex(voleith_gf8_prover_commit_t **ctx_out,
+                                const voleith_params_t *params,
+                                const voleith_gf8_circuit_t *circuit,
+                                const uint8_t *witness, const uint8_t *instance,
+                                const uint8_t *fs_seed, size_t fs_seed_len,
+                                uint8_t *commitment_out,
+                                const voleith_threading_opts_t *opts);
+
+/*
  * Phase 2 (Prove): Complete the proof given the external Fiat-Shamir challenge.
  *
  * chall_1 must be voleith_chall1_bytes(params->lambda) bytes; this function
@@ -240,6 +291,19 @@ int voleith_gf8_verify_reconstruct(voleith_gf8_verifier_reconstruct_t **ctx_out,
                                    uint8_t *commitment_out);
 
 /*
+ * As voleith_gf8_verify_reconstruct, with threading options for the tau-rep
+ * reconstruct loop (T3.4a: BAVC leaf commitment + ConvertToVOLE).  opts carries
+ * the worker-thread count / a borrowed pool, same convention as
+ * voleith_gf8_prove_commit_ex; see voleith_threading_opts_t.
+ * voleith_gf8_verify_reconstruct is the special case opts = { .nthreads = 1 }.
+ * The reconstructed commitment blob is bit-identical regardless of thread count.
+ */
+int voleith_gf8_verify_reconstruct_ex(
+    voleith_gf8_verifier_reconstruct_t **ctx_out, const voleith_proof_t *proof,
+    const voleith_params_t *params, const voleith_gf8_circuit_t *circuit,
+    uint8_t *commitment_out, const voleith_threading_opts_t *opts);
+
+/*
  * Phase 2 (Verify): Complete verification given the external Fiat-Shamir challenge.
  *
  * chall_1 must be voleith_chall1_bytes(params->lambda) bytes; this function
@@ -250,6 +314,17 @@ int voleith_gf8_verify_reconstruct(voleith_gf8_verifier_reconstruct_t **ctx_out,
 int voleith_gf8_verify_respond(voleith_gf8_verifier_reconstruct_t *ctx,
                                const voleith_gf8_circuit_t *circuit,
                                const uint8_t *instance, const uint8_t *chall_1);
+
+/*
+ * Threaded twin (T3.4b): the Phase-2 QS-verify (Q transpose + Step-2 zk_hash
+ * accumulate) runs across opts/pool.  Bit-identical to voleith_gf8_verify_respond,
+ * which is this with pool == NULL.
+ */
+int voleith_gf8_verify_respond_ex(voleith_gf8_verifier_reconstruct_t *ctx,
+                                  const voleith_gf8_circuit_t *circuit,
+                                  const uint8_t *instance,
+                                  const uint8_t *chall_1,
+                                  struct ichor_pool *pool);
 
 /* Free context from voleith_gf8_verify_reconstruct().  Safe to call with NULL. */
 void

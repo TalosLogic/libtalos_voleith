@@ -175,6 +175,76 @@ test_mul_circuit_roundtrip(const voleith_params_t *params, const char *label)
 }
 
 /* ================================================================
+ * Test: threaded proof equals single-threaded proof (byte-identical)
+ * ================================================================ */
+
+/*
+ * The public voleith_gf8_prove (non-_ex default) runs a 1-worker pool;
+ * voleith_gf8_prove_ex with nthreads >= 2 runs a multi-worker pool.  Threading
+ * only parallelizes the tau-rep VOLE commitment by public index, so the emitted
+ * proof must be byte-identical regardless of worker count.  Assert that at the
+ * public boundary (default wrapper vs explicit _ex), and that the threaded
+ * proof still verifies.
+ */
+static void
+test_prove_thread_invariance(void)
+{
+    printf("\n[GF8 prove thread invariance: em_128f]\n");
+
+    const voleith_params_t *params = &voleith_params_em_128f;
+    voleith_gf8_circuit_t *c = build_mul_circuit();
+    if (!c) {
+        printf("  SKIP: circuit alloc failed\n");
+        return;
+    }
+
+    uint8_t witness[2] = {0x03, 0x05};
+    uint8_t instance[1] = {0x0F};
+    uint8_t fs_seed[16];
+    memset(fs_seed, 0xCD, sizeof(fs_seed));
+
+    voleith_proof_t base;
+    memset(&base, 0, sizeof(base));
+    int bret = voleith_gf8_prove(&base, params, c, witness, instance, fs_seed,
+                                 sizeof(fs_seed));
+    CHECK(bret == 0, "baseline (default 1-worker) prove succeeds");
+
+    if (bret == 0) {
+        unsigned nthreads_cases[] = {2, 4, 0}; /* 0 = physical cores */
+        for (size_t t = 0; t < sizeof(nthreads_cases) / sizeof(*nthreads_cases);
+             t++) {
+            voleith_threading_opts_t opts = {.nthreads = nthreads_cases[t],
+                                             .pool = NULL};
+            voleith_proof_t mt;
+            memset(&mt, 0, sizeof(mt));
+            int mret = voleith_gf8_prove_ex(&mt, params, c, witness, instance,
+                                            fs_seed, sizeof(fs_seed), &opts);
+            char msg[96];
+            snprintf(msg, sizeof(msg), "threaded(n=%u) prove succeeds",
+                     nthreads_cases[t]);
+            CHECK(mret == 0, msg);
+            if (mret == 0) {
+                snprintf(msg, sizeof(msg),
+                         "threaded(n=%u) proof byte-identical to baseline",
+                         nthreads_cases[t]);
+                CHECK(mt.len == base.len &&
+                          memcmp(mt.data, base.data, base.len) == 0,
+                      msg);
+                snprintf(msg, sizeof(msg), "threaded(n=%u) proof verifies",
+                         nthreads_cases[t]);
+                CHECK(voleith_gf8_verify(&mt, params, c, instance, fs_seed,
+                                         sizeof(fs_seed)) == 0,
+                      msg);
+                voleith_proof_free(&mt);
+            }
+        }
+        voleith_proof_free(&base);
+    }
+
+    voleith_gf8_circuit_free(c);
+}
+
+/* ================================================================
  * Test: Wrong witness is rejected at prove time
  *
  * The GF(2^8) prover calls voleith_gf8_qs_compute_d() which evaluates
@@ -1305,6 +1375,7 @@ main(void)
     test_proof_size();
     test_mul_circuit_roundtrip(&voleith_params_em_128f, "em_128f");
     test_mul_circuit_roundtrip(&voleith_params_em_128s, "em_128s");
+    test_prove_thread_invariance();
     test_wrong_witness_rejected();
     test_tamper_detection();
     test_different_seeds();

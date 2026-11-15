@@ -103,28 +103,43 @@ typedef struct {
 /*
  * Constraint types - assertions that the verifier checks.
  *
- * ZERO:    wire a must equal 0x00.
- * EQUAL:   wire a must equal wire b.
- * PRODUCT: wire a · wire b must equal wire c  (QuickSilver assert_product).
- *          PRODUCT costs zero VOLE slots - it checks existing committed values.
+ * ZERO:     wire a must equal 0x00.
+ * EQUAL:    wire a must equal wire b.
+ * PRODUCT:  wire a · wire b must equal wire c  (QuickSilver assert_product).
+ *           PRODUCT costs zero VOLE slots - it checks existing committed values.
+ * PRODUCT3: wire a · wire b · wire c must equal wire d  (three-way product).
+ *           This is the FAEST norm S-box relation c · a² · a¹⁶ = a (spec Fig
+ *           6.19): a relation of degree R = 3 whose target d is parked at the
+ *           top (∆³) coefficient so that coefficient vanishes for an honest
+ *           prover.  Only the three lower coefficients are opened, so PRODUCT3
+ *           rides the same opening count d = 2 as PRODUCT (zero VOLE slots,
+ *           unchanged a_tilde width).  The fourth operand uses field `d`.
  */
 typedef enum {
-    GF8_CONSTRAINT_ZERO,    /* assert wire a == 0x00 */
-    GF8_CONSTRAINT_EQUAL,   /* assert wire a == wire b */
-    GF8_CONSTRAINT_PRODUCT, /* assert wire a · wire b == wire c */
+    GF8_CONSTRAINT_ZERO,     /* assert wire a == 0x00 */
+    GF8_CONSTRAINT_EQUAL,    /* assert wire a == wire b */
+    GF8_CONSTRAINT_PRODUCT,  /* assert wire a · wire b == wire c */
+    GF8_CONSTRAINT_PRODUCT3, /* assert wire a · wire b · wire c == wire d */
 } gf8_constraint_kind_t;
 
 /*
  * A single constraint entry.
- * For ZERO:    a is the checked wire; b and c are GF8_WIRE_ID_INVALID.
- * For EQUAL:   a and b are the checked wires; c is GF8_WIRE_ID_INVALID.
- * For PRODUCT: a, b, c are all used (a · b == c).
+ * For ZERO:     a is the checked wire; b, c, d are GF8_WIRE_ID_INVALID.
+ * For EQUAL:    a and b are the checked wires; c, d are GF8_WIRE_ID_INVALID.
+ * For PRODUCT:  a, b, c are used (a · b == c); d is GF8_WIRE_ID_INVALID.
+ * For PRODUCT3: a, b, c, d are all used (a · b · c == d).
+ *
+ * The fourth operand `d` is meaningful only for PRODUCT3.  It is serialized
+ * into the circuit fingerprint only for PRODUCT3 (gf8_circuit_fingerprint.c),
+ * so ZERO/EQUAL/PRODUCT fingerprints remain byte-identical to pre-PRODUCT3
+ * circuits.
  */
 typedef struct {
     gf8_constraint_kind_t kind;
     gf8_wire_id a;
     gf8_wire_id b;
     gf8_wire_id c;
+    gf8_wire_id d;
 } gf8_constraint_entry_t;
 
 /*
@@ -185,6 +200,79 @@ typedef struct {
     const uint8_t *M;  /* owned copy: (n0-1) * block_bytes                 */
     size_t m_bytes;    /* length of the M copy                            */
 } gf8_syndrome_entry_t;
+
+/*
+ * AES norm S-box round-pair constraint (FAEST paired-round norm, opening count
+ * d = 2, zero VOLE slots).
+ *
+ * This is the paired-round re-expression of two AES rounds (spec Section 6.2,
+ * faest-ref aes_SSS_enc_constraints): the even round commits a 4-bit subfield
+ * norm per S-box instead of the 8-bit inverse, and the odd round commits a full
+ * intermediate state (`s_tilde`) so the linear layers can be run backward to
+ * reset the degree chain.  Together this averages 6 bits per S-box (down from
+ * 8) with no change to the opening count: the two folded per-byte constraints
+ * (s_sq * st_0 - s and s * st_1 - st_0) are degree R = 3 parked to d = 2, pushed
+ * through the same zk_hash_3 accumulator as PRODUCT / PRODUCT3, so a circuit
+ * with norm round-pairs keeps qs_degree = 2.
+ *
+ * Kept in a table separate from gf8_constraint_entry_t (like the LT and
+ * syndrome tables) so the fixed-degree ZERO/EQUAL/PRODUCT/PRODUCT3 path stays
+ * byte-identical.  The per-byte isolated norm relation c * a^2 * a^16 = a is NOT
+ * stored here: it is emitted through the ordinary PRODUCT3 builder.  This entry
+ * carries only the paired-round reset relation that PRODUCT3 cannot express
+ * (its degree-2 operand is a linear image of a product of committed wires).
+ *
+ * Wire layout in the shared norm bit pool for this entry (4 * nst ids):
+ *   pool[wires_off + 0*nst + i]   state_in[i]: even-round input state byte wire
+ *   pool[wires_off + 1*nst + i]   norm[i]:     embedded subfield norm c = a^-17
+ *                                              (voleith_gf8_add_norm_embed out)
+ *   pool[wires_off + 2*nst + i]   s_tilde[i]:  committed odd-round reset state
+ *   pool[wires_off + 3*nst + i]   k0[i]:       round key added in the odd round
+ *
+ * The norm[i] wire carries the full GF(2^8) norm byte c (not the raw nibble):
+ * the accumulate derives the four inverse-norm conjugates y[k] = c^(2^k) by
+ * Frobenius squaring (the beta tables are Frobenius-generated).  The conjugates
+ * of state_in and the conjugate-domain affine constants are likewise computed
+ * inside the prover/verifier accumulate from these wires and fixed field
+ * constants; they are not stored per entry.
+ */
+typedef struct {
+    size_t wires_off; /* pool offset of the 4*nst wire ids for this pair */
+    unsigned int nst; /* state bytes (16 for AES) */
+    int last_pair;    /* 1 if the pair's second round is the final round
+                           (no MixColumns), else 0 */
+} gf8_norm_entry_t;
+
+/*
+ * Grostl norm S-box round-pair constraint (FAEST paired-round norm; sibling of
+ * gf8_norm_entry_t for Grostl's linear layer).  Grostl's S-box IS the AES
+ * S-box, so the inversion/affine math and the two folded degree-R=3/d=2
+ * relations are identical; what differs is the linear layer (ShiftBytes +
+ * MixBytes instead of ShiftRows + MixColumns) and the round add (a public
+ * AddRoundConstant before SubBytes, so there is no secret round-key wire
+ * group).  Kept in its own table so the AES norm path stays byte-identical.
+ *
+ * Wire layout in the Grostl norm bit pool for this entry (3 * nst ids):
+ *   pool[wires_off + 0*nst + i]   state_in[i]: even-round S-box input byte wire
+ *                                              (= state XOR the public even
+ *                                              AddRoundConstant, applied free by
+ *                                              the caller)
+ *   pool[wires_off + 1*nst + i]   norm[i]:     embedded subfield norm c = a^-17
+ *   pool[wires_off + 2*nst + i]   s_tilde[i]:  committed odd-round reset state
+ *                                              (after odd SubBytes + ShiftBytes)
+ *
+ * The odd-round public AddRoundConstant is reconstructed from (is_q, odd_round,
+ * cols) via grostl_norm_round_const; the ShiftBytes flat permutation and its
+ * inverse (for the s recovery) from (shift, cols) via grostl_norm_build_shift.
+ */
+typedef struct {
+    size_t wires_off;  /* pool offset of the 3*nst wire ids */
+    unsigned int nst;  /* state bytes: 64 (Grostl-256) or 128 (-512) */
+    unsigned int cols; /* state columns: 8 (Grostl-256) or 16 (-512) */
+    uint8_t shift[8];  /* ShiftBytes row shifts for this permutation */
+    uint8_t odd_round; /* round number of the pair's odd (second) round */
+    uint8_t is_q;      /* 1 = Q permutation ARC, 0 = P */
+} gf8_grostl_norm_entry_t;
 
 /*
  * The GF(2⁸) circuit - opaque type, constructed via the builder API below.
@@ -275,6 +363,32 @@ gf8_wire_id voleith_gf8_add_linear_map(voleith_gf8_circuit_t *c, gf8_wire_id a,
 gf8_wire_id voleith_gf8_add_square(voleith_gf8_circuit_t *c, gf8_wire_id a);
 
 /*
+ * Add a nibble-select gate: output is the low (which == 0) or high
+ * (which == 1) 4-bit nibble of `packed`, as a GF(2⁸) byte whose top 4 bits
+ * are zero.  Free GF(2)-linear mask/shift map (no VOLE slot).
+ *
+ * Used by the norm S-box builders, which pack two adjacent even-round 4-bit
+ * subfield norms into one witness byte (FAEST's `(i % 2) * 4` layout).
+ */
+gf8_wire_id voleith_gf8_add_nibble(voleith_gf8_circuit_t *c, gf8_wire_id packed,
+                                   unsigned int which);
+
+/*
+ * Add a norm-embed gate: map a 4-bit GF(2⁴) subfield norm (the low nibble of
+ * `nib`) to its GF(2⁸) byte c in the AES field, via the fixed GF(2⁴) ⊂ GF(2⁸)
+ * basis.  Free GF(2)-linear map (no VOLE slot).
+ *
+ * The four basis bytes match FAEST's norm-nibble basis (derived from faest-ref
+ * bfSSS_beta_squares / bfSSS_beta_cubes; see
+ * tools/faest-ref-diagnostics/diag_norm_basis.c), so the committed nibble bits
+ * are the same GF(2⁴) coordinates FAEST uses.  The embedded byte feeds the
+ * degree-3 norm relation c · a² · a¹⁶ = a (voleith_gf8_assert_product3), with
+ * a² and a¹⁶ as free Frobenius images of the S-box input.
+ */
+gf8_wire_id voleith_gf8_add_norm_embed(voleith_gf8_circuit_t *c,
+                                       gf8_wire_id nib);
+
+/*
  * Add a multiplication gate: output = a · b in GF(2⁸).
  * Costs one VOLE slot - the QuickSilver prover commits to the output.
  * VOLE slot index = n_witness + (mul gate count before this call).
@@ -356,6 +470,27 @@ void voleith_gf8_assert_equal(voleith_gf8_circuit_t *c, gf8_wire_id a,
  */
 void voleith_gf8_assert_product(voleith_gf8_circuit_t *c, gf8_wire_id a,
                                 gf8_wire_id b, gf8_wire_id c_expected);
+
+/*
+ * Assert that a · b · c == d_expected in GF(2⁸): a three-way (degree R = 3)
+ * product constraint, costing zero VOLE slots.
+ *
+ * This is the FAEST v2 norm S-box relation (spec Section 6.2, Fig 6.19).  For
+ * an S-box input a with committed inverse norm y = N_{F2⁸/F2⁴}(a⁻¹) = a⁻¹⁷, the
+ * check y · a² · a¹⁶ == a certifies y is the inverse norm:
+ *   assert_product3(y, a², a¹⁶, a)
+ * where a² and a¹⁶ are free Frobenius (squaring) wires of a.
+ *
+ * The relation has degree 3, but the target d is parked at the top (∆³)
+ * coefficient, which is then structurally zero for an honest prover.  Only the
+ * three lower coefficients are opened, so the opening count stays d = 2 (same
+ * a_tilde width as assert_product) and no VOLEITH_QS_D_MAX change is needed.
+ * The primitive is layout-agnostic in a, b, c, d; it imposes no Frobenius
+ * relationship among them (that is the caller's circuit's concern).
+ */
+void voleith_gf8_assert_product3(voleith_gf8_circuit_t *circuit, gf8_wire_id a,
+                                 gf8_wire_id b, gf8_wire_id c,
+                                 gf8_wire_id d_expected);
 
 /* ================================================================
  * Introspection
@@ -454,6 +589,75 @@ size_t voleith_gf8_circuit_lt_count(const voleith_gf8_circuit_t *c);
 const gf8_lt_entry_t *
 voleith_gf8_circuit_lt_constraints(const voleith_gf8_circuit_t *c);
 const gf8_wire_id *voleith_gf8_circuit_lt_bits(const voleith_gf8_circuit_t *c);
+
+/*
+ * Assert one AES norm S-box round-pair (FAEST paired-round norm; see
+ * gf8_norm_entry_t).  Emits the paired-round reset relation for `nst` state
+ * bytes as a zero-slot, d = 2 constraint family (qs_degree unchanged).  The
+ * isolated per-byte norm relation c * a^2 * a^16 = a is emitted separately by
+ * the caller through voleith_gf8_assert_product3.
+ *
+ *   state_in  nst even-round input state byte wires.
+ *   norm      nst embedded subfield-norm wires c = a^-17, one per S-box
+ *             (voleith_gf8_add_norm_embed output; the full GF(2^8) norm byte,
+ *             not the raw nibble).
+ *   s_tilde   nst committed odd-round reset-state wires.
+ *   k0        nst round-key wires added in the odd round.
+ *   nst       state size in bytes (16 for AES).
+ *   last_pair 1 if this pair's second round is the final round (no MixColumns).
+ */
+void voleith_gf8_assert_aes_norm_roundpair(voleith_gf8_circuit_t *c,
+                                           const gf8_wire_id *state_in,
+                                           const gf8_wire_id *norm,
+                                           const gf8_wire_id *s_tilde,
+                                           const gf8_wire_id *k0,
+                                           unsigned int nst, int last_pair);
+
+/*
+ * Read-only access to the norm round-pair constraint table and its shared wire
+ * pool (for QuickSilver prove/verify and evaluation).
+ */
+size_t voleith_gf8_circuit_norm_count(const voleith_gf8_circuit_t *c);
+const gf8_norm_entry_t *
+voleith_gf8_circuit_norm_constraints(const voleith_gf8_circuit_t *c);
+const gf8_wire_id *
+voleith_gf8_circuit_norm_wires(const voleith_gf8_circuit_t *c);
+
+/*
+ * Assert one Grostl norm S-box round-pair (FAEST paired-round norm; sibling of
+ * voleith_gf8_assert_aes_norm_roundpair for Grostl's linear layer).  Emits the
+ * paired-round reset relation for `nst` state bytes as a zero-slot, d = 2
+ * constraint family (qs_degree unchanged).  The isolated per-byte norm relation
+ * c * a^2 * a^16 = a is emitted separately by the caller via
+ * voleith_gf8_assert_product3.
+ *
+ *   state_in  nst even-round S-box input byte wires (the committed state with
+ *             the public even-round AddRoundConstant already XORed in, free).
+ *   norm      nst embedded subfield-norm wires c = a^-17, one per S-box.
+ *   s_tilde   nst committed odd-round reset-state wires (after odd SubBytes and
+ *             ShiftBytes; the caller applies the odd-round MixBytes afterward).
+ *   nst       state size in bytes (64 Grostl-256, 128 Grostl-512).
+ *   cols      state columns (8 Grostl-256, 16 Grostl-512).
+ *   shift     the permutation's ShiftBytes row shifts (8 entries).
+ *   is_q      1 for the Q permutation's AddRoundConstant, 0 for P.
+ *   odd_round the round number of the pair's odd (second) round, selecting the
+ *             public AddRoundConstant added before the odd SubBytes.
+ */
+void voleith_gf8_assert_grostl_norm_roundpair(
+    voleith_gf8_circuit_t *c, const gf8_wire_id *state_in,
+    const gf8_wire_id *norm, const gf8_wire_id *s_tilde, unsigned int nst,
+    unsigned int cols, const uint8_t shift[8], int is_q,
+    unsigned int odd_round);
+
+/*
+ * Read-only access to the Grostl norm round-pair constraint table and its
+ * shared wire pool (for QuickSilver prove/verify and evaluation).
+ */
+size_t voleith_gf8_circuit_grostl_norm_count(const voleith_gf8_circuit_t *c);
+const gf8_grostl_norm_entry_t *
+voleith_gf8_circuit_grostl_norm_constraints(const voleith_gf8_circuit_t *c);
+const gf8_wire_id *
+voleith_gf8_circuit_grostl_norm_wires(const voleith_gf8_circuit_t *c);
 
 /*
  * Assert the QC-MDPC syndrome relation s = M * e^T (global-bit

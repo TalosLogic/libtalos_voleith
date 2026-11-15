@@ -191,6 +191,73 @@ test_roundtrip(void)
 }
 
 /* =====================================================================
+ * Test 3b: threaded proof equals single-threaded proof (byte-identical)
+ *
+ * The public voleith_gf16_prove (non-_ex default) runs a 1-worker pool;
+ * voleith_gf16_prove_ex with nthreads >= 2 runs a multi-worker pool.  Threading
+ * only parallelizes the tau-rep VOLE commitment by public index, so the emitted
+ * proof must be byte-identical regardless of worker count.  Assert that at the
+ * public boundary (default wrapper vs explicit _ex), and that the threaded
+ * proof still verifies.
+ * ===================================================================== */
+static void
+test_prove_thread_invariance(void)
+{
+    uint8_t sources[K * SYMBOL_BYTES];
+    voleith_gf16_t coeffs[K], y[ELEMS];
+    gf16_wire_id src_wires[K * ELEMS], y_wires[ELEMS];
+
+    make_generation(sources, coeffs, y);
+    voleith_gf16_circuit_t *c = build_circuit(coeffs, src_wires, y_wires);
+
+    voleith_gf16_t witness[K * ELEMS];
+    voleith_rlnc_gf16_build_witness(sources, K, SYMBOL_BYTES, witness);
+
+    uint8_t fs_seed[16];
+    memset(fs_seed, 0xcd, sizeof(fs_seed));
+
+    voleith_proof_t base;
+    int bret = voleith_gf16_prove(&base, &voleith_params_em_128f, c, witness, y,
+                                  fs_seed, sizeof(fs_seed));
+    check("thread_invariance: baseline (1-worker) prove succeeds", bret == 0);
+
+    if (bret == 0) {
+        unsigned nthreads_cases[] = {2, 4, 0}; /* 0 = physical cores */
+        for (size_t t = 0; t < sizeof(nthreads_cases) / sizeof(*nthreads_cases);
+             t++) {
+            voleith_threading_opts_t opts = {.nthreads = nthreads_cases[t],
+                                             .pool = NULL};
+            voleith_proof_t mt;
+            int mret =
+                voleith_gf16_prove_ex(&mt, &voleith_params_em_128f, c, witness,
+                                      y, fs_seed, sizeof(fs_seed), &opts);
+            char msg[96];
+            snprintf(msg, sizeof(msg),
+                     "thread_invariance: threaded(n=%u) prove",
+                     nthreads_cases[t]);
+            check(msg, mret == 0);
+            if (mret == 0) {
+                snprintf(msg, sizeof(msg),
+                         "thread_invariance: threaded(n=%u) byte-identical",
+                         nthreads_cases[t]);
+                check(msg, mt.len == base.len &&
+                               memcmp(mt.data, base.data, base.len) == 0);
+                snprintf(msg, sizeof(msg),
+                         "thread_invariance: threaded(n=%u) verifies",
+                         nthreads_cases[t]);
+                check(msg,
+                      voleith_gf16_verify(&mt, &voleith_params_em_128f, c, y,
+                                          fs_seed, sizeof(fs_seed)) == 0);
+                voleith_proof_free(&mt);
+            }
+        }
+        voleith_proof_free(&base);
+    }
+
+    voleith_gf16_circuit_free(c);
+}
+
+/* =====================================================================
  * Test 4: wrong generation (tampered source) rejected at prove time
  * ===================================================================== */
 static void
@@ -442,6 +509,7 @@ main(void)
     test_shape();
     test_matches_plaintext();
     test_roundtrip();
+    test_prove_thread_invariance();
     test_wrong_generation();
     test_wrong_symbol();
     test_sufficiency();

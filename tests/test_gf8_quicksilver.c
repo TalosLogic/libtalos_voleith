@@ -26,6 +26,8 @@
 #include "gf8_circuit.h"
 #include "qs_degree.h" /* VOLEITH_QS_COEFFS_MAX */
 #include "aes_gf8_circuit.h"
+#include "aes_norm_gf8_circuit.h"
+#include "gf8_grostl_norm_const.h"
 #include "field.h"
 
 #include <stdio.h>
@@ -987,6 +989,608 @@ test_lt_wide(void)
 }
 
 /* =====================================================================
+ * Three-way product (PRODUCT3) degree-3 constraint tests
+ *
+ * PRODUCT3 asserts a·b·c == d (FAEST norm S-box, spec Fig 6.19).  The
+ * relation has degree 3 but parks the target at the top (∆³) coefficient,
+ * which vanishes for an honest prover, so it opens at d = 2 like PRODUCT.
+ * The forgery cases drive the UNCHECKED prover past the eval gate to prove
+ * the verifier binds the parked degree-3 relation (a cheat's ∆³ term is
+ * caught); the d = 2 PRODUCT suite cannot exercise this.
+ * ===================================================================== */
+
+/* a·b·c == d.  Witness layout: [a b c d]. */
+static voleith_gf8_circuit_t *
+build_product3_circuit(void)
+{
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    if (c == NULL)
+        return NULL;
+    gf8_wire_id wa = voleith_gf8_add_witness(c);
+    gf8_wire_id wb = voleith_gf8_add_witness(c);
+    gf8_wire_id wc = voleith_gf8_add_witness(c);
+    gf8_wire_id wd = voleith_gf8_add_witness(c);
+    voleith_gf8_assert_product3(c, wa, wb, wc, wd);
+    return c;
+}
+
+static void
+test_product3_basic(void)
+{
+    uint8_t a = 0x53, b = 0xca, cc = 0x1f;
+    uint8_t prod = voleith_gf8_mul(voleith_gf8_mul(a, b), cc);
+
+    /* Opening count stays d = 2 (parked top): no VOLEITH_QS_D_MAX need. */
+    voleith_gf8_circuit_t *cq = build_product3_circuit();
+    check("product3: qs_degree == 2 (rides d=2 opening)",
+          voleith_gf8_circuit_qs_degree(cq) == 2);
+    voleith_gf8_circuit_free(cq);
+
+    /* Honest a·b·c == d accepts at all three levels. */
+    uint8_t w_ok[4] = {a, b, cc, prod};
+    voleith_gf8_circuit_t *c = build_product3_circuit();
+    check("product3: honest accept (128)",
+          prove_verify(c, w_ok, 4, NULL, 0, 128, 0xd3000001u) == 1);
+    check("product3: honest accept (192)",
+          prove_verify(c, w_ok, 4, NULL, 0, 192, 0xd3000002u) == 1);
+    check("product3: honest accept (256)",
+          prove_verify(c, w_ok, 4, NULL, 0, 256, 0xd3000003u) == 1);
+    voleith_gf8_circuit_free(c);
+
+    /* Wrong d: the checked prover refuses at its eval gate (!= accept). */
+    uint8_t w_bad[4] = {a, b, cc, (uint8_t)(prod ^ 0x01)};
+    c = build_product3_circuit();
+    check("product3: wrong d rejected by checked prover (128)",
+          prove_verify(c, w_bad, 4, NULL, 0, 128, 0xd3000004u) != 1);
+    voleith_gf8_circuit_free(c);
+}
+
+static void
+test_product3_forgery(void)
+{
+    uint8_t a = 0x53, b = 0xca, cc = 0x1f;
+    uint8_t prod = voleith_gf8_mul(voleith_gf8_mul(a, b), cc);
+
+    /* Control: unchecked seam still accepts an honest witness. */
+    uint8_t w_ok[4] = {a, b, cc, prod};
+    voleith_gf8_circuit_t *c = build_product3_circuit();
+    check("product3 forgery seam: honest still verifies (128)",
+          run_proof(c, w_ok, 128, 1) == 1);
+    voleith_gf8_circuit_free(c);
+
+    /*
+     * Forgery: a·b·c != d pushed past the eval gate must be REJECTED by the
+     * verifier at all three levels.  This is the parked-degree-3 bind: the
+     * cheat leaves a nonzero ∆³ term the d = 2 opening cannot match, so the
+     * reconstructed a0 diverges.  Validates the target-parking / a_3-vanishes
+     * soundness that the d = 2 PRODUCT path cannot reach.
+     */
+    uint8_t w_bad[4] = {a, b, cc, (uint8_t)(prod ^ 0x01)};
+    c = build_product3_circuit();
+    check("product3 forgery: a·b·c != d rejected by verifier (128)",
+          run_proof(c, w_bad, 128, 1) == 0);
+    voleith_gf8_circuit_free(c);
+    c = build_product3_circuit();
+    check("product3 forgery: a·b·c != d rejected by verifier (192)",
+          run_proof(c, w_bad, 192, 1) == 0);
+    voleith_gf8_circuit_free(c);
+    c = build_product3_circuit();
+    check("product3 forgery: a·b·c != d rejected by verifier (256)",
+          run_proof(c, w_bad, 256, 1) == 0);
+    voleith_gf8_circuit_free(c);
+}
+
+static void
+test_product3_norm(void)
+{
+    /*
+     * The real FAEST norm relation y·a²·a¹⁶ == a (spec Fig 6.19), wired with
+     * free Frobenius (square) gates as Phase 1 will build it.  y is the
+     * inverse F2⁴-norm a⁻¹⁷.  Validates honest accept and wrong-y reject on
+     * the exact operand pattern the AES norm circuit will emit.
+     */
+    uint8_t a = 0x53;
+    uint8_t a2 = voleith_gf8_mul(a, a);
+    uint8_t a16 = a;
+    for (int i = 0; i < 4; i++)
+        a16 = voleith_gf8_mul(a16, a16);     /* a^16 */
+    uint8_t base = voleith_gf8_mul(a2, a16); /* a^18 */
+    uint8_t y = 0;
+    for (uint16_t x = 1; x < 256; x++)
+        if (voleith_gf8_mul((uint8_t)x, base) == a) { /* y·a^18 == a */
+            y = (uint8_t)x;
+            break;
+        }
+
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    gf8_wire_id wa = voleith_gf8_add_witness(c);       /* a */
+    gf8_wire_id wy = voleith_gf8_add_witness(c);       /* y = a⁻¹⁷ */
+    gf8_wire_id wa2 = voleith_gf8_add_square(c, wa);   /* a² (free) */
+    gf8_wire_id wa4 = voleith_gf8_add_square(c, wa2);  /* a⁴ */
+    gf8_wire_id wa8 = voleith_gf8_add_square(c, wa4);  /* a⁸ */
+    gf8_wire_id wa16 = voleith_gf8_add_square(c, wa8); /* a¹⁶ (free) */
+    voleith_gf8_assert_product3(c, wy, wa2, wa16, wa);
+
+    /* ell = 2 (just a and y); the conjugates are free squaring gates. */
+    check("product3 norm: ell == 2 (zero slots for the check)",
+          voleith_gf8_qs_ell(c) == 2);
+
+    uint8_t w_ok[2] = {a, y};
+    check("product3 norm: honest y accepts (128)",
+          prove_verify(c, w_ok, 2, NULL, 0, 128, 0x6e000001u) == 1);
+    check("product3 norm: honest y accepts (256)",
+          prove_verify(c, w_ok, 2, NULL, 0, 256, 0x6e000002u) == 1);
+
+    uint8_t w_bad[2] = {a, (uint8_t)(y ^ 0x01)};
+    check("product3 norm: wrong y rejected (128)",
+          prove_verify(c, w_bad, 2, NULL, 0, 128, 0x6e000003u) != 1);
+
+    voleith_gf8_circuit_free(c);
+}
+
+/* =====================================================================
+ * Test: sub-byte norm packing helpers (add_nibble + add_norm_embed)
+ *
+ * Phase 0 child 2.  Exercises the free packing path the norm S-box builders
+ * use: two 4-bit subfield norms packed into one witness byte (FAEST's
+ * (i % 2) * 4 layout), extracted with add_nibble, embedded to their GF(2^8)
+ * bytes with add_norm_embed, then checked against the S-box inputs via the
+ * degree-3 norm relation c * a^2 * a^16 = a (assert_product3).  Confirms the
+ * pack/extract/embed maps are free (no VOLE slots, qs_degree stays 2), that
+ * eval reproduces the norm bytes, and that an honest packed witness verifies
+ * while a corrupted nibble is rejected, at lambda = 128/192/256.
+ * ===================================================================== */
+
+/* 4-bit code of a norm byte in the GF(2^4) basis {0x01,0x50,0xb0,0x0c}
+ * (mirrors proof/gf8_circuit.c::gf8_norm_nibble_basis), or 0xff if the byte
+ * is not in the subfield. */
+static uint8_t
+norm_nibble_of(uint8_t cbyte)
+{
+    static const uint8_t B[4] = {0x01, 0x50, 0xb0, 0x0c};
+    for (unsigned int n = 0; n < 16; n++) {
+        uint8_t v = 0;
+        for (int k = 0; k < 4; k++)
+            if (n & (1u << k))
+                v ^= B[k];
+        if (v == cbyte)
+            return (uint8_t)n;
+    }
+    return 0xff;
+}
+
+/* Subfield norm c = a^-17, the y with y * a^18 == a. */
+static uint8_t
+norm_of(uint8_t a)
+{
+    uint8_t a2 = voleith_gf8_mul(a, a);
+    uint8_t a16 = a;
+    for (int i = 0; i < 4; i++)
+        a16 = voleith_gf8_mul(a16, a16);
+    uint8_t base = voleith_gf8_mul(a2, a16); /* a^18 */
+    for (uint16_t x = 1; x < 256; x++)
+        if (voleith_gf8_mul((uint8_t)x, base) == a)
+            return (uint8_t)x;
+    return 0;
+}
+
+static void
+test_norm_packing(void)
+{
+    uint8_t a_lo = 0x53, a_hi = 0xca;
+    uint8_t c_lo = norm_of(a_lo), c_hi = norm_of(a_hi);
+    uint8_t n_lo = norm_nibble_of(c_lo), n_hi = norm_nibble_of(c_hi);
+
+    check("norm packing: norms lie in GF(2^4) subfield",
+          n_lo != 0xff && n_hi != 0xff);
+
+    uint8_t packed = (uint8_t)(n_lo | (n_hi << 4));
+
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    gf8_wire_id wa_lo = voleith_gf8_add_witness(c);
+    gf8_wire_id wa_hi = voleith_gf8_add_witness(c);
+    gf8_wire_id wpack = voleith_gf8_add_witness(c);
+
+    /* Extract + embed: all free. */
+    gf8_wire_id nlo = voleith_gf8_add_nibble(c, wpack, 0);
+    gf8_wire_id nhi = voleith_gf8_add_nibble(c, wpack, 1);
+    gf8_wire_id clo = voleith_gf8_add_norm_embed(c, nlo);
+    gf8_wire_id chi = voleith_gf8_add_norm_embed(c, nhi);
+
+    /* Conjugates a^2, a^16: free Frobenius squares. */
+    gf8_wire_id a2_lo = voleith_gf8_add_square(c, wa_lo);
+    gf8_wire_id a4_lo = voleith_gf8_add_square(c, a2_lo);
+    gf8_wire_id a8_lo = voleith_gf8_add_square(c, a4_lo);
+    gf8_wire_id a16_lo = voleith_gf8_add_square(c, a8_lo);
+    gf8_wire_id a2_hi = voleith_gf8_add_square(c, wa_hi);
+    gf8_wire_id a4_hi = voleith_gf8_add_square(c, a2_hi);
+    gf8_wire_id a8_hi = voleith_gf8_add_square(c, a4_hi);
+    gf8_wire_id a16_hi = voleith_gf8_add_square(c, a8_hi);
+
+    voleith_gf8_assert_product3(c, clo, a2_lo, a16_lo, wa_lo);
+    voleith_gf8_assert_product3(c, chi, a2_hi, a16_hi, wa_hi);
+
+    /* Pack/extract/embed add no VOLE slots: ell = 3 witness, 0 mul. */
+    check("norm packing: ell == 3 (zero slots for pack/extract/embed)",
+          voleith_gf8_qs_ell(c) == 3);
+    check("norm packing: zero mul gates",
+          voleith_gf8_circuit_mul_count(c) == 0);
+    check("norm packing: qs_degree == 2",
+          voleith_gf8_circuit_qs_degree(c) == 2);
+
+    /* Direct eval: extracted + embedded wires reproduce the norm bytes. */
+    size_t nwires = voleith_gf8_circuit_wire_count(c);
+    uint8_t *wv = calloc(nwires, 1);
+    uint8_t wit[3] = {a_lo, a_hi, packed};
+    check("norm packing: eval ok",
+          wv != NULL && voleith_gf8_circuit_eval(c, wit, NULL, wv) == 1);
+    if (wv) {
+        check("norm packing: low nibble embeds to c_lo", wv[clo] == c_lo);
+        check("norm packing: high nibble embeds to c_hi", wv[chi] == c_hi);
+    }
+    free(wv);
+
+    uint8_t w_ok[3] = {a_lo, a_hi, packed};
+    check("norm packing: honest accepts (128)",
+          prove_verify(c, w_ok, 3, NULL, 0, 128, 0x7a000001u) == 1);
+    check("norm packing: honest accepts (192)",
+          prove_verify(c, w_ok, 3, NULL, 0, 192, 0x7a000002u) == 1);
+    check("norm packing: honest accepts (256)",
+          prove_verify(c, w_ok, 3, NULL, 0, 256, 0x7a000003u) == 1);
+
+    /* Corrupt the packed low nibble: the norm relation for a_lo breaks. */
+    uint8_t w_bad[3] = {a_lo, a_hi, (uint8_t)(packed ^ 0x01)};
+    check("norm packing: corrupted nibble rejected (128)",
+          prove_verify(c, w_bad, 3, NULL, 0, 128, 0x7a000004u) != 1);
+
+    voleith_gf8_circuit_free(c);
+}
+
+/* =====================================================================
+ * Norm round-pair gadget: one paired-round circuit, honest round-trip +
+ * tamper rejection.  Exercises voleith_gf8_assert_aes_norm_roundpair end to
+ * end (prover + verifier accumulate) without the full AES.
+ * ===================================================================== */
+
+/* a^-1 = a^254 in GF(2^8) (0 maps to 0). */
+static uint8_t
+rp_inv(uint8_t a)
+{
+    uint8_t r = 1;
+    if (a == 0)
+        return 0;
+    for (int i = 0; i < 254; i++)
+        r = voleith_gf8_mul(r, a);
+    return r;
+}
+
+/* AES affine linear part M*z (no 0x63). */
+static uint8_t
+rp_aff_lin(uint8_t z)
+{
+    static const uint8_t M[8] = {0xF1, 0xE3, 0xC7, 0x8F,
+                                 0x1F, 0x3E, 0x7C, 0xF8};
+    uint8_t o = 0;
+    for (int i = 0; i < 8; i++) {
+        uint8_t m = (uint8_t)(M[i] & z);
+        int p = 0;
+        for (int j = 0; j < 8; j++)
+            p ^= (m >> j) & 1;
+        o |= (uint8_t)((p & 1) << i);
+    }
+    return o;
+}
+
+static uint8_t
+rp_sbox(uint8_t a)
+{
+    return (uint8_t)(rp_aff_lin(rp_inv(a)) ^ 0x63);
+}
+
+static const unsigned int RP_SR[16] = {0, 5,  10, 15, 4,  9, 14, 3,
+                                       8, 13, 2,  7,  12, 1, 6,  11};
+
+static void
+rp_shiftrows(uint8_t out[16], const uint8_t in[16])
+{
+    for (int k = 0; k < 16; k++)
+        out[k] = in[RP_SR[k]];
+}
+
+static void
+rp_mixcolumns(uint8_t s[16])
+{
+    for (int c = 0; c < 4; c++) {
+        uint8_t a0 = s[4 * c], a1 = s[4 * c + 1], a2 = s[4 * c + 2],
+                a3 = s[4 * c + 3];
+        s[4 * c] = (uint8_t)(voleith_gf8_mul(2, a0) ^ voleith_gf8_mul(3, a1) ^
+                             a2 ^ a3);
+        s[4 * c + 1] = (uint8_t)(a0 ^ voleith_gf8_mul(2, a1) ^
+                                 voleith_gf8_mul(3, a2) ^ a3);
+        s[4 * c + 2] = (uint8_t)(a0 ^ a1 ^ voleith_gf8_mul(2, a2) ^
+                                 voleith_gf8_mul(3, a3));
+        s[4 * c + 3] = (uint8_t)(voleith_gf8_mul(3, a0) ^ a1 ^ a2 ^
+                                 voleith_gf8_mul(2, a3));
+    }
+}
+
+static void
+test_norm_roundpair(void)
+{
+    /* Fixed nonzero state and round key. */
+    uint8_t a[16], k0[16];
+    for (int i = 0; i < 16; i++) {
+        a[i] = (uint8_t)(0x31 + 7 * i);
+        k0[i] = (uint8_t)(0xa5 ^ (3 * i));
+    }
+
+    /* Reference trace: norms, even-round output st0, recovered s, s_tilde. */
+    uint8_t packed[8], st0[16], sbox_out[16], sr[16], s[16], t[16], s_tilde[16];
+    uint8_t nib[16];
+    int norms_ok = 1;
+    for (int i = 0; i < 16; i++) {
+        uint8_t cb = norm_of(a[i]);
+        nib[i] = norm_nibble_of(cb);
+        if (nib[i] == 0xff)
+            norms_ok = 0;
+    }
+    check("norm roundpair: all norms in GF(2^4) subfield", norms_ok);
+    for (int j = 0; j < 8; j++)
+        packed[j] = (uint8_t)(nib[2 * j] | (nib[2 * j + 1] << 4));
+
+    for (int i = 0; i < 16; i++)
+        sbox_out[i] = rp_sbox(a[i]);
+    rp_shiftrows(sr, sbox_out);
+    rp_mixcolumns(sr);
+    for (int i = 0; i < 16; i++)
+        st0[i] = (uint8_t)(sr[i] ^ k0[i]); /* even-round output */
+    for (int i = 0; i < 16; i++)
+        s[i] = rp_inv(st0[i]); /* odd-round S-box input inverse */
+    for (int i = 0; i < 16; i++)
+        t[i] = (uint8_t)(rp_aff_lin(s[i]) ^ 0x63); /* odd S-box output */
+    rp_shiftrows(s_tilde, t);                      /* committed reset state */
+
+    /* Build the circuit: witness order a[16], packed[8], s_tilde[16], k0[16]. */
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    gf8_wire_id a_w[16], pk_w[8], st_w[16], k_w[16], c_w[16];
+    for (int i = 0; i < 16; i++)
+        a_w[i] = voleith_gf8_add_witness(c);
+    for (int j = 0; j < 8; j++)
+        pk_w[j] = voleith_gf8_add_witness(c);
+    for (int i = 0; i < 16; i++)
+        st_w[i] = voleith_gf8_add_witness(c);
+    for (int i = 0; i < 16; i++)
+        k_w[i] = voleith_gf8_add_witness(c);
+
+    for (int i = 0; i < 16; i++) {
+        gf8_wire_id nw =
+            voleith_gf8_add_nibble(c, pk_w[i / 2], (unsigned)i % 2);
+        c_w[i] = voleith_gf8_add_norm_embed(c, nw);
+        gf8_wire_id a2 = voleith_gf8_add_square(c, a_w[i]);
+        gf8_wire_id a4 = voleith_gf8_add_square(c, a2);
+        gf8_wire_id a8 = voleith_gf8_add_square(c, a4);
+        gf8_wire_id a16 = voleith_gf8_add_square(c, a8);
+        voleith_gf8_assert_product3(c, c_w[i], a2, a16, a_w[i]);
+    }
+    voleith_gf8_assert_aes_norm_roundpair(c, a_w, c_w, st_w, k_w, 16, 0);
+
+    check("norm roundpair: builder ok", voleith_gf8_circuit_ok(c));
+    check("norm roundpair: qs_degree == 2",
+          voleith_gf8_circuit_qs_degree(c) == 2);
+    check("norm roundpair: zero mul gates (all free)",
+          voleith_gf8_circuit_mul_count(c) == 0);
+
+    /* Assemble the witness. */
+    uint8_t wit[56];
+    memcpy(wit + 0, a, 16);
+    memcpy(wit + 16, packed, 8);
+    memcpy(wit + 24, s_tilde, 16);
+    memcpy(wit + 40, k0, 16);
+
+    size_t nwires = voleith_gf8_circuit_wire_count(c);
+    uint8_t *wv = calloc(nwires, 1);
+    check("norm roundpair: eval satisfied",
+          wv != NULL && voleith_gf8_circuit_eval(c, wit, NULL, wv) == 1);
+    free(wv);
+
+    check("norm roundpair: honest accepts (128)",
+          prove_verify(c, wit, 56, NULL, 0, 128, 0x9b000001u) == 1);
+    check("norm roundpair: honest accepts (192)",
+          prove_verify(c, wit, 56, NULL, 0, 192, 0x9b000002u) == 1);
+    check("norm roundpair: honest accepts (256)",
+          prove_verify(c, wit, 56, NULL, 0, 256, 0x9b000003u) == 1);
+
+    /* Tamper the committed reset state: the paired relation breaks. */
+    uint8_t bad_st[56];
+    memcpy(bad_st, wit, 56);
+    bad_st[24] ^= 0x01;
+    check("norm roundpair: tampered s_tilde rejected",
+          prove_verify(c, bad_st, 56, NULL, 0, 128, 0x9b000004u) != 1);
+
+    /* Tamper a norm nibble: breaks PRODUCT3 and the paired relation. */
+    uint8_t bad_n[56];
+    memcpy(bad_n, wit, 56);
+    bad_n[16] ^= 0x01;
+    check("norm roundpair: tampered norm rejected",
+          prove_verify(c, bad_n, 56, NULL, 0, 128, 0x9b000005u) != 1);
+
+    voleith_gf8_circuit_free(c);
+}
+
+/* =====================================================================
+ * Grostl norm round-pair gadget: one paired-round circuit (Grostl-256 P
+ * geometry, nst=64, cols=8), honest round-trip + tamper rejection.  Exercises
+ * voleith_gf8_assert_grostl_norm_roundpair end to end (prover + verifier
+ * accumulate) without the full Grostl permutation.
+ * ===================================================================== */
+static void
+test_grostl_norm_roundpair(void)
+{
+    enum { NST = 64, COLS = 8 };
+    static const uint8_t shift[8] = {0, 1, 2, 3, 4, 5, 6, 7}; /* Grostl-256 P */
+    const unsigned int odd_round = 1;
+
+    uint8_t fwd[NST], inv[NST], rc[NST];
+    grostl_norm_build_shift(COLS, shift, fwd, inv);
+    grostl_norm_round_const(0, COLS, odd_round, rc);
+
+    /* Even-round S-box input (= state with the public even AddRoundConstant
+     * already folded in; arbitrary nonzero here). */
+    uint8_t a[NST];
+    for (int i = 0; i < NST; i++)
+        a[i] = (uint8_t)(0x31 + 7 * i);
+
+    /* Reference trace. */
+    uint8_t nib[NST], packed[NST / 2];
+    int norms_ok = 1;
+    for (int i = 0; i < NST; i++) {
+        nib[i] = norm_nibble_of(norm_of(a[i]));
+        if (nib[i] == 0xff)
+            norms_ok = 0;
+    }
+    check("grostl norm roundpair: all norms in GF(2^4)", norms_ok);
+    for (int j = 0; j < NST / 2; j++)
+        packed[j] = (uint8_t)(nib[2 * j] | (nib[2 * j + 1] << 4));
+
+    uint8_t so[NST], sh[NST], u[NST], st0[NST], t[NST], s_tilde[NST];
+    for (int i = 0; i < NST; i++)
+        so[i] = rp_sbox(a[i]); /* even SubBytes */
+    for (int i = 0; i < NST; i++)
+        sh[i] = so[fwd[i]]; /* ShiftBytes */
+    for (int col = 0; col < COLS; col++)
+        for (int r = 0; r < 8; r++) {
+            uint8_t acc = 0;
+            for (int j = 0; j < 8; j++)
+                acc ^= voleith_gf8_mul(GROSTL_NORM_MIX[r][j], sh[j + 8 * col]);
+            u[r + 8 * col] = acc; /* MixBytes */
+        }
+    for (int i = 0; i < NST; i++)
+        st0[i] =
+            (uint8_t)(u[i] ^ rc[i]); /* odd AddRoundConstant => odd input */
+    for (int i = 0; i < NST; i++)
+        t[i] = rp_sbox(st0[i]); /* odd SubBytes output */
+    for (int i = 0; i < NST; i++)
+        s_tilde[i] = t[fwd[i]]; /* ShiftBytes => committed reset state */
+
+    /* Build the circuit: witness order a[64], packed[32], s_tilde[64]. */
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    gf8_wire_id a_w[NST], pk_w[NST / 2], st_w[NST], c_w[NST];
+    for (int i = 0; i < NST; i++)
+        a_w[i] = voleith_gf8_add_witness(c);
+    for (int j = 0; j < NST / 2; j++)
+        pk_w[j] = voleith_gf8_add_witness(c);
+    for (int i = 0; i < NST; i++)
+        st_w[i] = voleith_gf8_add_witness(c);
+
+    for (int i = 0; i < NST; i++) {
+        gf8_wire_id nw =
+            voleith_gf8_add_nibble(c, pk_w[i / 2], (unsigned)i % 2);
+        c_w[i] = voleith_gf8_add_norm_embed(c, nw);
+        gf8_wire_id a2 = voleith_gf8_add_square(c, a_w[i]);
+        gf8_wire_id a4 = voleith_gf8_add_square(c, a2);
+        gf8_wire_id a8 = voleith_gf8_add_square(c, a4);
+        gf8_wire_id a16 = voleith_gf8_add_square(c, a8);
+        voleith_gf8_assert_product3(c, c_w[i], a2, a16, a_w[i]);
+    }
+    voleith_gf8_assert_grostl_norm_roundpair(c, a_w, c_w, st_w, NST, COLS,
+                                             shift, 0, odd_round);
+
+    check("grostl norm roundpair: builder ok", voleith_gf8_circuit_ok(c));
+    check("grostl norm roundpair: qs_degree == 2",
+          voleith_gf8_circuit_qs_degree(c) == 2);
+    check("grostl norm roundpair: zero mul gates (all free)",
+          voleith_gf8_circuit_mul_count(c) == 0);
+
+    uint8_t wit[NST + NST / 2 + NST]; /* 160 */
+    memcpy(wit + 0, a, NST);
+    memcpy(wit + NST, packed, NST / 2);
+    memcpy(wit + NST + NST / 2, s_tilde, NST);
+    const size_t wlen = sizeof(wit);
+
+    size_t nwires = voleith_gf8_circuit_wire_count(c);
+    uint8_t *wv = calloc(nwires, 1);
+    check("grostl norm roundpair: eval satisfied",
+          wv != NULL && voleith_gf8_circuit_eval(c, wit, NULL, wv) == 1);
+    free(wv);
+
+    check("grostl norm roundpair: honest accepts (128)",
+          prove_verify(c, wit, wlen, NULL, 0, 128, 0x6c000001u) == 1);
+    check("grostl norm roundpair: honest accepts (192)",
+          prove_verify(c, wit, wlen, NULL, 0, 192, 0x6c000002u) == 1);
+    check("grostl norm roundpair: honest accepts (256)",
+          prove_verify(c, wit, wlen, NULL, 0, 256, 0x6c000003u) == 1);
+
+    uint8_t bad_st[NST + NST / 2 + NST];
+    memcpy(bad_st, wit, wlen);
+    bad_st[NST + NST / 2] ^= 0x01; /* first s_tilde byte */
+    check("grostl norm roundpair: tampered s_tilde rejected",
+          prove_verify(c, bad_st, wlen, NULL, 0, 128, 0x6c000004u) != 1);
+
+    uint8_t bad_n[NST + NST / 2 + NST];
+    memcpy(bad_n, wit, wlen);
+    bad_n[NST] ^= 0x01; /* first packed norm nibble */
+    check("grostl norm roundpair: tampered norm rejected",
+          prove_verify(c, bad_n, wlen, NULL, 0, 128, 0x6c000005u) != 1);
+
+    voleith_gf8_circuit_free(c);
+}
+
+/* =====================================================================
+ * Full AES-128 norm circuit: honest round-trip + tamper rejection.
+ * ===================================================================== */
+
+static void
+test_norm_aes128_roundtrip(void)
+{
+    static const uint8_t KEY[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+                                    0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+                                    0x0c, 0x0d, 0x0e, 0x0f};
+    static const uint8_t PT[16] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+                                   0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb,
+                                   0xcc, 0xdd, 0xee, 0xff};
+
+    uint8_t witness[AES128_NORM_GF8_WITNESS_BYTES];
+    aes128_norm_gf8_build_witness(KEY, PT, witness, NULL);
+
+    voleith_gf8_circuit_t *c = voleith_gf8_circuit_new();
+    gf8_wire_id key[16], pt[16], out[16];
+    for (int i = 0; i < 16; i++)
+        key[i] = voleith_gf8_add_witness(c);
+    for (int i = 0; i < 16; i++)
+        pt[i] = voleith_gf8_add_instance(c);
+    aes128_norm_gf8_circuit(c, key, pt, out);
+
+    check("norm aes128: honest accepts (128)",
+          prove_verify(c, witness, AES128_NORM_GF8_WITNESS_BYTES, PT, 16, 128,
+                       0xae000001u) == 1);
+    check("norm aes128: honest accepts (192)",
+          prove_verify(c, witness, AES128_NORM_GF8_WITNESS_BYTES, PT, 16, 192,
+                       0xae000002u) == 1);
+    check("norm aes128: honest accepts (256)",
+          prove_verify(c, witness, AES128_NORM_GF8_WITNESS_BYTES, PT, 16, 256,
+                       0xae000003u) == 1);
+
+    /* Tamper a committed s_tilde byte in the first pair (witness offset 16+40+8
+     * = first pair's s_tilde[0]). */
+    uint8_t bad[AES128_NORM_GF8_WITNESS_BYTES];
+    memcpy(bad, witness, sizeof(bad));
+    bad[16 + 40 + 8] ^= 0x01;
+    check("norm aes128: tampered state rejected",
+          prove_verify(c, bad, AES128_NORM_GF8_WITNESS_BYTES, PT, 16, 128,
+                       0xae000004u) != 1);
+
+    /* Wrong instance (flip a plaintext byte the prover did not commit to). */
+    uint8_t bad_pt[16];
+    memcpy(bad_pt, PT, 16);
+    bad_pt[0] ^= 0x01;
+    check("norm aes128: wrong instance rejected",
+          prove_verify(c, witness, AES128_NORM_GF8_WITNESS_BYTES, bad_pt, 16,
+                       128, 0xae000005u) != 1);
+
+    voleith_gf8_circuit_free(c);
+}
+
+/* =====================================================================
  * main
  * ===================================================================== */
 
@@ -1011,6 +1615,13 @@ main(void)
     test_lt_mixed_degree();
     test_lt_degree_accessor();
     test_lt_wide();
+    test_product3_basic();
+    test_product3_forgery();
+    test_product3_norm();
+    test_norm_packing();
+    test_norm_roundpair();
+    test_grostl_norm_roundpair();
+    test_norm_aes128_roundtrip();
 
     printf("%d/%d tests passed\n", pass_count, test_count);
     return (pass_count == test_count) ? 0 : 1;

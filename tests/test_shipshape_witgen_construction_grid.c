@@ -58,11 +58,16 @@ check(const char *name, int cond)
     }
 }
 
-/* crypto-v2 header. */
+/* crypto-v2 / crypto-v3 headers.  The norm node-hash types require v3. */
 #define HDR_V2                                                                 \
     ".shipshape 1\n"                                                           \
     "field GF(2^8) irreducible 0x11B\n"                                        \
     "stdlib crypto-v2\n"
+
+#define HDR_V3                                                                 \
+    ".shipshape 1\n"                                                           \
+    "field GF(2^8) irreducible 0x11B\n"                                        \
+    "stdlib crypto-v3\n"
 
 /* Upper bound on a generated .ship source.  The longest body has seven WITNESS
  * lines plus an INSTANCE line plus a bracketed call; each line is short. */
@@ -108,16 +113,17 @@ fill_dirs(uint8_t *buf, size_t depth)
  * Returns bytes written, or -1 on overflow.
  */
 static int
-build_merkle_src(char *buf, size_t cap, const char *type_name, size_t leaf,
-                 size_t W, size_t D)
+build_merkle_src(char *buf, size_t cap, const char *hdr, const char *type_name,
+                 size_t leaf, size_t W, size_t D)
 {
     int n = snprintf(buf, cap,
-                     HDR_V2 "WITNESS  -> %%leaf : byte[%zu]\n"
-                            "WITNESS  -> %%sib  : byte[%zu]\n"
-                            "WITNESS  -> %%dirs : byte[%zu]\n"
-                            "stdlib/crypto/merkle/path_secret[%s]"
-                            "(%%leaf, %%sib, %%dirs) -> %%root\n",
-                     leaf, D * W, D, type_name);
+                     "%s"
+                     "WITNESS  -> %%leaf : byte[%zu]\n"
+                     "WITNESS  -> %%sib  : byte[%zu]\n"
+                     "WITNESS  -> %%dirs : byte[%zu]\n"
+                     "stdlib/crypto/merkle/path_secret[%s]"
+                     "(%%leaf, %%sib, %%dirs) -> %%root\n",
+                     hdr, leaf, D * W, D, type_name);
 
     if (n < 0 || (size_t)n >= cap)
         return -1;
@@ -132,17 +138,18 @@ build_merkle_src(char *buf, size_t cap, const char *type_name, size_t leaf,
  *   ext = sk(L) | dirs(D) | sib(D*W), len = L + D + D*W
  */
 static int
-build_ring_src(char *buf, size_t cap, const char *type_name, size_t sk,
-               size_t W, size_t D)
+build_ring_src(char *buf, size_t cap, const char *hdr, const char *type_name,
+               size_t sk, size_t W, size_t D)
 {
     int n = snprintf(buf, cap,
-                     HDR_V2 "WITNESS  -> %%sk   : byte[%zu]\n"
-                            "WITNESS  -> %%dirs : byte[%zu]\n"
-                            "WITNESS  -> %%sib  : byte[%zu]\n"
-                            "INSTANCE -> %%root : byte[%zu]\n"
-                            "stdlib/crypto/ring_sig/v1[%s]"
-                            "(%%sk, %%dirs, %%sib, %%root)\n",
-                     sk, D, D * W, W, type_name);
+                     "%s"
+                     "WITNESS  -> %%sk   : byte[%zu]\n"
+                     "WITNESS  -> %%dirs : byte[%zu]\n"
+                     "WITNESS  -> %%sib  : byte[%zu]\n"
+                     "INSTANCE -> %%root : byte[%zu]\n"
+                     "stdlib/crypto/ring_sig/v1[%s]"
+                     "(%%sk, %%dirs, %%sib, %%root)\n",
+                     hdr, sk, D, D * W, W, type_name);
 
     if (n < 0 || (size_t)n >= cap)
         return -1;
@@ -159,21 +166,22 @@ build_ring_src(char *buf, size_t cap, const char *type_name, size_t sk,
  *   len = 3*tb + ib + D*W + D
  */
 static int
-build_indexed_src(char *buf, size_t cap, const char *type_name, size_t tb,
-                  size_t ib, size_t W, size_t D)
+build_indexed_src(char *buf, size_t cap, const char *hdr, const char *type_name,
+                  size_t tb, size_t ib, size_t W, size_t D)
 {
     int n = snprintf(buf, cap,
-                     HDR_V2 "WITNESS  -> %%tgt  : byte[%zu]\n"
-                            "WITNESS  -> %%low  : byte[%zu]\n"
-                            "WITNESS  -> %%hi   : byte[%zu]\n"
-                            "WITNESS  -> %%nidx : byte[%zu]\n"
-                            "WITNESS  -> %%sib  : byte[%zu]\n"
-                            "WITNESS  -> %%dirs : byte[%zu]\n"
-                            "INSTANCE -> %%root : byte[%zu]\n"
-                            "stdlib/crypto/indexed_merkle/nonmember_secret[%s]"
-                            "(%%tgt, %%low, %%hi, %%nidx, %%sib, %%dirs, "
-                            "%%root)\n",
-                     tb, tb, tb, ib, D * W, D, W, type_name);
+                     "%s"
+                     "WITNESS  -> %%tgt  : byte[%zu]\n"
+                     "WITNESS  -> %%low  : byte[%zu]\n"
+                     "WITNESS  -> %%hi   : byte[%zu]\n"
+                     "WITNESS  -> %%nidx : byte[%zu]\n"
+                     "WITNESS  -> %%sib  : byte[%zu]\n"
+                     "WITNESS  -> %%dirs : byte[%zu]\n"
+                     "INSTANCE -> %%root : byte[%zu]\n"
+                     "stdlib/crypto/indexed_merkle/nonmember_secret[%s]"
+                     "(%%tgt, %%low, %%hi, %%nidx, %%sib, %%dirs, "
+                     "%%root)\n",
+                     hdr, tb, tb, tb, ib, D * W, D, W, type_name);
 
     if (n < 0 || (size_t)n >= cap)
         return -1;
@@ -266,8 +274,8 @@ enum { KIND_MERKLE = 0, KIND_RING = 1, KIND_INDEXED = 2, N_KINDS = 3 };
  * Returns 1 if the case fully passed, 0 otherwise.
  */
 static int
-run_grid_point(int kind, const char *type_name, size_t W, size_t D,
-               size_t fixed_leaf)
+run_grid_point(int kind, const char *hdr, const char *type_name, size_t W,
+               size_t D, size_t fixed_leaf)
 {
     char src[SRC_CAP];
     char label[160];
@@ -284,7 +292,7 @@ run_grid_point(int kind, const char *type_name, size_t W, size_t D,
 
         /* ext = leaf(leaf) | sib(D*W) | dirs(D). */
         ext_len = leaf + D * W + D;
-        n = build_merkle_src(src, sizeof(src), type_name, leaf, W, D);
+        n = build_merkle_src(src, sizeof(src), hdr, type_name, leaf, W, D);
         snprintf(label, sizeof(label),
                  "merkle/path_secret[%s] D=%zu W=%zu leaf=%zu", type_name, D, W,
                  leaf);
@@ -301,7 +309,7 @@ run_grid_point(int kind, const char *type_name, size_t W, size_t D,
 
         /* ext = sk(sk) | dirs(D) | sib(D*W). */
         ext_len = sk + D + D * W;
-        n = build_ring_src(src, sizeof(src), type_name, sk, W, D);
+        n = build_ring_src(src, sizeof(src), hdr, type_name, sk, W, D);
         snprintf(label, sizeof(label), "ring_sig/v1[%s] D=%zu W=%zu sk=%zu",
                  type_name, D, W, sk);
         if (n < 0) {
@@ -321,7 +329,7 @@ run_grid_point(int kind, const char *type_name, size_t W, size_t D,
 
         /* ext = tgt(tb) | low(tb) | hi(tb) | nidx(ib) | sib(D*W) | dirs(D). */
         ext_len = 3 * tb + ib + D * W + D;
-        n = build_indexed_src(src, sizeof(src), type_name, tb, ib, W, D);
+        n = build_indexed_src(src, sizeof(src), hdr, type_name, tb, ib, W, D);
         snprintf(label, sizeof(label),
                  "indexed_merkle/nonmember_secret[%s] D=%zu W=%zu rec=%zu",
                  type_name, D, W, 2 * tb + ib);
@@ -338,10 +346,11 @@ run_grid_point(int kind, const char *type_name, size_t W, size_t D,
 }
 
 /*
- * The full grid: 3 constructions x 10 node-hash types x 3 depths = 90 cases.
- * Plus one extra merkle leaf-width point per variable-leaf type to exercise the
- * leaf-width axis explicitly (leaf = 32 at depth 2): + 7 cases (the 3 fixed-leaf
- * types are skipped, their leaf width being pinned).
+ * The full grid: 3 constructions x 16 node-hash types x 3 depths = 144 cases
+ * (the 6 crypto-v3 norm types use a crypto-v3 header, the 10 crypto-v2 types a
+ * crypto-v2 header).  Plus one extra merkle leaf-width point per variable-leaf
+ * type to exercise the leaf-width axis explicitly (leaf = 32 at depth 2): + 10
+ * cases (the 6 fixed-leaf types are skipped, their leaf width being pinned).
  */
 static void
 test_grid(void)
@@ -358,9 +367,13 @@ test_grid(void)
             const char *type_name = voleith_shipshape_node_hash_types[ti].name;
             size_t W = vt->node_bytes;
             size_t fixed_leaf = vt->fixed_leaf_bytes;
+            const char *hdr =
+                voleith_shipshape_node_hash_types[ti].introduced_version >= 3
+                    ? HDR_V3
+                    : HDR_V2;
 
             for (di = 0; di < sizeof(depths) / sizeof(depths[0]); di++)
-                (void)run_grid_point(kind, type_name, W, depths[di],
+                (void)run_grid_point(kind, hdr, type_name, W, depths[di],
                                      fixed_leaf);
         }
     }
@@ -375,6 +388,10 @@ test_grid(void)
         const voleith_node_hash_vt *vt =
             voleith_shipshape_node_hash_types[ti].vt;
         const char *type_name = voleith_shipshape_node_hash_types[ti].name;
+        const char *hdr =
+            voleith_shipshape_node_hash_types[ti].introduced_version >= 3
+                ? HDR_V3
+                : HDR_V2;
         size_t W = vt->node_bytes;
         char src[SRC_CAP];
         char label[160];
@@ -386,7 +403,7 @@ test_grid(void)
         if (vt->fixed_leaf_bytes != 0)
             continue;
 
-        n = build_merkle_src(src, sizeof(src), type_name, leaf, W, D);
+        n = build_merkle_src(src, sizeof(src), hdr, type_name, leaf, W, D);
         snprintf(label, sizeof(label),
                  "merkle/path_secret[%s] D=2 W=%zu leaf=32", type_name, W);
         if (n < 0) {

@@ -28,22 +28,112 @@ The Boyar-Peralta (2012) computer-searched S-box reduces AND gate count to 32 pe
 
 3. **Drop-in replacement available if needed.** If proof size in the bit-level variant becomes a concern, replacing `gf8_inv` in `circuits/aes_circuit.c` with the Boyar-Peralta circuit (32 AND gates) is a contained, protocol-neutral change with no API impact.
 
-## FAEST "norm trick": applicable, deferred (not inapplicable)
+## FAEST norm S-box: the `_norm` circuit family
 
-Vocabulary, used to avoid overloading the word "degree":
+Every S-box-bearing GF(2⁸) circuit ships a second, optional "norm" form beside
+the frozen one, using the FAEST v2.0 (spec Section 6) subfield-norm
+arithmetization of the AES S-box. The norm circuits produce byte-identical
+output to their frozen twins but commit roughly 25% fewer VOLE slots, and their
+degree-3 packing also lowers the verify-side constraint count. They are strictly
+additive: the frozen builders, their fingerprints, and every existing KAT are
+unchanged. The `_norm` builders are `circuits/*_norm_gf8_circuit.c` and the
+`*_norm` node-hash vts.
 
-- **R = relation degree**: the algebraic degree of the constraint equation.
-- **d = opening count**: the number of coefficients `a₁..a_d` the proof transmits (`a₀` is recomputed by the verifier). This is what sets `ellhat`, the QuickSilver mask region, and the `a_tilde` serialization.
+The arithmetization itself (the subfield-norm construction `c = a⁻¹⁷`, the
+soundness relation `c·a²·a¹⁶ = a`, the R = 3 relation degree folded to opening
+count d = 2 by target parking, and the `GF8_CONSTRAINT_PRODUCT3` QuickSilver
+constraint kind) is a proof-layer concern and lives in
+[`docs/DESIGN.md`](DESIGN.md) ("FAEST norm S-box arithmetization"). This section
+covers how the Layer 5 circuits wire it: the per-circuit witness layouts, the
+reset gadget, the free packing gates, the per-family cost, and what ships.
 
-FAEST v2.0 (spec Section 6) uses an "InvNorm" optimisation for the AES S-box, and uses it on the live prove path (verified in `third_party/faest-ref/faest_aes.c.in`: a 4-bit norm nibble is committed per S-box, `... & 0xf`). Instead of the full 8-bit inverse `x⁻¹`, the prover commits the 4-bit subfield norm `c = N_{F2⁸/F2⁴}(x⁻¹) = x⁻¹⁷ ∈ GF(2⁴)`, reconstructs `x⁻¹ = x¹⁶·c` with a free Frobenius, and checks the relation `c·a²·a¹⁶ = a`.
+### Per-circuit witness layout and the frozen key schedule
 
-This is a **GF(2⁸) construction, not a bit-level one**: FAEST carries each byte in GF(2^λ) via `byte_combine` and its 8 Galois conjugates, and the norm is a GF(2⁸)→GF(2⁴) subfield norm of a byte. It **reduces** witness size: FAEST commits the 4-bit norm on even rounds and the full state on odd rounds (the degree reset), averaging about 6 committed bits per S-box versus 8, roughly a 25% saving.
+The norm form is not a per-call S-box swap: FAEST processes rounds in pairs, the
+even round committing the 16 packed 4-bit norms (8 witness bytes, two norms per
+byte) and the odd round a full intermediate state `s_tilde` that lets the linear
+layer be run backward to reset the degree chain (the degree algebra is in
+DESIGN). That is `16·4 + 16·8 = 192` bits per round-pair = 6 bits per S-box
+versus the frozen 8, the ~25% reduction. So each `_norm` builder re-expresses the
+round function in pairs; it is not `*_gf8_circuit` with a different S-box helper.
+Concretely the AES-128 witness is 176 bytes (16 key + 40 frozen key-schedule inv
++ 5·(8 packed + 16 `s_tilde`)) and AES-256 is 252 bytes (32 + 52 + 7·24). These
+are validated against the NIST AES output vectors, not against FAEST's witness
+length, which deliberately differs: voleith commits **every** pair's `s_tilde`,
+including the last, so the norm AES output stays degree-1 for composition into
+CMAC / KDF / Merkle, whereas FAEST drops the final `s_tilde` because its OWF
+output is a public statement (the divergence is explained in DESIGN).
 
-Its **relation degree is R = 3**, but its **opening count stays d = 2**. FAEST parks the target so the top (Δ³) coefficient becomes the equality residual `c·a²·a¹⁶ − a`, which is zero for an honest prover and is still caught for a cheating one by the Δ-evaluation, so the whole proof still opens only `a₀/a₁/a₂` (verified: faest-ref uses the 3-coefficient `zk_hash_*_3`). So the norm does not raise the opening count and does not add a mask block.
+**The key schedule stays frozen** (the 8-bit inverse S-boxes). It is expanded
+word-wise (four S-boxes per round, with no full-state pair to reset against), so
+the paired-round norm does not apply to it; norming it would be ~10 bytes of
+non-FAEST degree work and is not done. This is the final layout, not a deferral:
+there is no later key-schedule-norm phase and no future golden repin.
 
-It is **not implemented here because it is not a drop-in**, not because it does not apply. voleith's current gf8 S-box commits the full inverse, which makes the affine a free bit-linear map and produces a normal committed output byte usable by arbitrary downstream gates. The norm form holds `x⁻¹` only as a field element in the conjugate domain, so the affine becomes a conjugate-domain F₂-linear map over the Galois conjugates, and the surrounding AES rounds must stay in that domain (FAEST-EM even/odd SubBytes structure). Adopting it is therefore an AES/Grøstl gadget rewrite into the conjugate domain, the same work the FAEST-EM byte-exact compat mode needs, and is deferred to that milestone.
+### The paired-round reset gadget
 
-Correction (2026-07-27): an earlier version of this section claimed the norm applies only to a bit-level variant, has "no meaning" in the GF(2⁸) model, and would increase witness size by 50%. That was wrong on all three points: the norm is a GF(2⁸) subfield construction that FAEST adopts specifically to shrink witness, and it keeps `d = 2`. The only real cost is the conjugate-domain gadget rewrite.
+The per-byte isolated relation `c·a²·a¹⁶ = a` is emitted through `PRODUCT3`
+(see DESIGN); the paired-round reset is the one piece `PRODUCT3` cannot express,
+so it has its own gadget. `voleith_gf8_assert_aes_norm_roundpair` (with a Grøstl
+sibling) is a dedicated prover/verifier accumulate kept in its own constraint
+table (like the LT and syndrome tables) so the fixed-degree path stays
+byte-identical. It reads the degree-1 committed state and `s_tilde` wires,
+applies the AES (or Grøstl) linear layer per Δ-coefficient, and emits the two
+folded R=3/d=2 reset constraints per byte (`s_sq·st₀ − s` and `s·st₁ − st₀`);
+its degree-2 operand is a linear image of a product of committed wires, which is
+why it does not fit the PRODUCT3 shape.
+
+### Sub-byte norm packing (free gates)
+
+Sub-byte norm packing uses only free gates, no new VOLE primitive:
+`voleith_gf8_add_nibble` selects the low/high nibble of a packed witness byte,
+and `voleith_gf8_add_norm_embed` maps a 4-bit nibble to its GF(2⁸) byte through
+the norm basis `{0x01, 0x50, 0xb0, 0x0c}` (the fixed field of Frobenius⁴, in
+which `a⁻¹⁷` always lies; this voleith embedding equals FAEST's `byte_combine` of
+the basis). The conjugates `y[k] = c^(2^k)` and the conjugate-domain affine
+constants are Frobenius squarings computed inside the accumulate from these wires
+and fixed field constants, not stored per entry. All these constants are
+independently derived (a math/constant choice, not a code port).
+
+### Per-family cost
+
+The reduction is a clean **0.75 for Grøstl** (no key schedule): a Grøstl-256
+compression commits 960 norm bytes versus 1280 frozen, and its output transform
+480 versus 640. For the **keyed primitives it is ~0.8**, because the key schedule
+stays frozen: an AES-128 call commits 160 inv bytes versus 200 (the 120-vs-160
+saving is only on the data-path S-boxes); a Hirose iteration commits 388 versus
+500 (52 frozen key-schedule bytes plus two 168-vs-224 encryptions). Measured
+verify-side, the norm constraint count is substantially **lower**, not flat (for
+example an AES-DM Merkle inode drops from 800 to 320 constraints at depth 1, 3600
+to 1440 at depth 8), while the mul-gate count is identical: the degree-3 packing
+cuts verifier constraints as well as prover slots.
+
+### What ships, and how it is consumed
+
+The family is `aes_norm_gf8` (128 and 256; there is no 192, matching the frozen
+family), `grostl_norm_gf8` (256/512, plus the `_node`/`_node2`/`_nodeN`
+fixed-input node forms), `aes_cmac_norm_gf8`, `kdf_ctr_cmac_norm_gf8`, and the
+node-hash vts `aes_dm_norm`, `aes_cmac128_norm`, `hirose{,_fixed32,_fixed96}_norm`,
+and `grostl{256,512}_fixed{,128,256}_norm`. Because the generic vt-driven Merkle,
+indexed-non-member, and ring circuits (see "Generic vt-driven..." below) take any
+`voleith_node_hash_vt`, passing a `_norm` vt makes those constructions norm with
+no new circuit code; `ring_sig_v1`, the composable ring stack, and the erasure
+chunk certificate are parameterized on the vt for the same reason.
+
+### Validation and the FAEST-compat surface
+
+Output parity is checked against the NIST AES (FIPS-197 C.1/C.3), RFC 4493 CMAC,
+NIST KDF, and Grøstl software/NIST vectors; each `_norm` circuit also round-trips
+(honest accept, tamper and wrong-instance reject) and the fixed circuits pin new
+fingerprint goldens (node-hash vts follow the existing vt convention of pinning
+root parity against the frozen twin rather than a fingerprint). Separately, the
+PRODUCT3 coefficient algebra is cross-checked value-exact against faest-ref's
+`aes_SSS_inv_norm_constraints_{prover,verifier}` as a one-shot offline
+bring-up gate (faest-ref is an oracle, never linked or copied). `PRODUCT3` is the
+one norm surface that is transcript- and fingerprint-frozen in a form a future
+FAEST-EM byte-exact compatibility mode must reuse unchanged; the general `_norm`
+circuits' witness byte orders and conjugate maps are per-circuit and not
+compat-frozen.
 
 ## AES-CMAC for KDF, not raw AES-CTR or Keccak
 

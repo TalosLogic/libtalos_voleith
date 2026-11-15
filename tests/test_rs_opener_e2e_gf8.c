@@ -43,9 +43,8 @@ check(const char *name, int cond)
 
 /* tamper: 0 honest, 1 flip an s bit, 2 flip tag_ct, 3 malformed support. */
 static int
-run_eval(int tamper)
+run_eval(const voleith_node_hash_vt *vt, int tamper)
 {
-    const voleith_node_hash_vt *vt = &voleith_node_hash_aes_dm;
     const voleith_rs_opener_argus_set_t set = VOLEITH_RS_OPENER_ARGUS_SET_128_5;
     const voleith_rs_opener_argus_params_t *op =
         voleith_rs_opener_argus_params(set);
@@ -167,10 +166,24 @@ int
 main(void)
 {
     printf("test_rs_opener_e2e_gf8 (OP.CIRC.4 full tuple, set 128_5)\n");
-    check("honest (id, support, s, tag_ct) accepts", run_eval(0) == 1);
-    check("wrong s bit rejects", run_eval(1) == 0);
-    check("wrong tag_ct rejects", run_eval(2) == 0);
-    check("malformed support (duplicate) rejects", run_eval(3) == 0);
+
+    printf("-- frozen node hash (aes-dm) --\n");
+    check("honest (id, support, s, tag_ct) accepts",
+          run_eval(&voleith_node_hash_aes_dm, 0) == 1);
+    check("wrong s bit rejects", run_eval(&voleith_node_hash_aes_dm, 1) == 0);
+    check("wrong tag_ct rejects", run_eval(&voleith_node_hash_aes_dm, 2) == 0);
+    check("malformed support (duplicate) rejects",
+          run_eval(&voleith_node_hash_aes_dm, 3) == 0);
+
+    printf("-- norm node hash (aes-dm-norm) --\n");
+    check("norm: honest (id, support, s, tag_ct) accepts",
+          run_eval(&voleith_node_hash_aes_dm_norm, 0) == 1);
+    check("norm: wrong s bit rejects",
+          run_eval(&voleith_node_hash_aes_dm_norm, 1) == 0);
+    check("norm: wrong tag_ct rejects",
+          run_eval(&voleith_node_hash_aes_dm_norm, 2) == 0);
+    check("norm: malformed support (duplicate) rejects",
+          run_eval(&voleith_node_hash_aes_dm_norm, 3) == 0);
     printf("\n%d/%d passed\n", pass_count, test_count);
     return (pass_count == test_count) ? 0 : 1;
 }

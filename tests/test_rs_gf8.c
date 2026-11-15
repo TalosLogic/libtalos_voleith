@@ -1119,9 +1119,15 @@ rs_leaf_incircuit(const voleith_node_hash_vt *vt, const uint8_t *sk,
 
     inv = rs_leaf_gf8_invin_bytes(vt, sk_bytes, attr_bytes);
     witness = calloc(total + inv, 1);
-    memcpy(pre, sk, sk_bytes);
-    memcpy(pre + sk_bytes, attrs, attr_bytes);
-    memcpy(witness, pre, total);
+    /* Guard by length: sk / attrs may be NULL when the corresponding count is
+     * 0 (e.g. the V1 leaf has no attributes), and memcpy(dst, NULL, 0) is UB
+     * (arg 2 is declared nonnull). */
+    if (sk_bytes)
+        memcpy(pre, sk, sk_bytes);
+    if (attr_bytes)
+        memcpy(pre + sk_bytes, attrs, attr_bytes);
+    if (total)
+        memcpy(witness, pre, total);
     MUST_OK_FP(rs_leaf_gf8_build_witness(vt, sk, sk_bytes, attrs, attr_bytes,
                                          witness + total));
 

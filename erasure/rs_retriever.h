@@ -41,8 +41,9 @@
 #include <stdint.h>
 
 #include "erasure.h"
-#include "matrix.h" /* voleith_ec_matrix_kind_t */
-#include "proof.h"  /* voleith_params_t, voleith_proof_t */
+#include "matrix.h"       /* voleith_ec_matrix_kind_t */
+#include "node_hash_vt.h" /* voleith_node_hash_vt */
+#include "proof.h"        /* voleith_params_t, voleith_proof_t */
 #include "rs_dataset.h"
 
 /* Disposition of a chunk offered to the retriever. */
@@ -59,6 +60,7 @@ typedef enum {
  */
 typedef struct {
     voleith_rs_cr_profile_t cr;
+    const voleith_node_hash_vt *node_vt; /* resolved chunk node hash. */
     const voleith_params_t *params;
     voleith_ec_matrix_kind_t kind;
     int secret_index;
@@ -88,9 +90,10 @@ typedef struct {
  * Returns 0 on success, -1 on a NULL / out-of-range argument or if no
  * candidate reaches merkle_root (not a member with this path).
  */
-int voleith_rs_recover_index(voleith_rs_cr_profile_t cr, const uint8_t *fwk,
-                             const uint8_t *merkle_root, size_t n_chunks,
-                             const uint8_t *chunk_digest,
+int voleith_rs_recover_index(voleith_rs_cr_profile_t cr,
+                             const voleith_node_hash_vt *node_vt,
+                             const uint8_t *fwk, const uint8_t *merkle_root,
+                             size_t n_chunks, const uint8_t *chunk_digest,
                              const uint8_t *siblings, size_t *index_out);
 
 /*
@@ -107,9 +110,10 @@ int voleith_rs_recover_index(voleith_rs_cr_profile_t cr, const uint8_t *fwk,
  */
 int voleith_rs_retriever_init(
     voleith_rs_retriever_t *r, voleith_rs_cr_profile_t cr,
-    const voleith_params_t *params, voleith_ec_matrix_kind_t kind,
-    int secret_index, const uint8_t *merkle_root, const uint8_t *R,
-    size_t R_len, const voleith_rs_metadata_t *metadata, const uint8_t *fwk);
+    const voleith_node_hash_vt *node_vt, const voleith_params_t *params,
+    voleith_ec_matrix_kind_t kind, int secret_index, const uint8_t *merkle_root,
+    const uint8_t *R, size_t R_len, const voleith_rs_metadata_t *metadata,
+    const uint8_t *fwk);
 
 /* Releases the retriever's owned storage (zeroing the held chunk bytes).
  * Safe on a zeroed descriptor. */

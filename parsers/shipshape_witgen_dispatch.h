@@ -60,6 +60,14 @@
 #include "shipshape_registry.h"
 
 /*
+ * Maximum number of simultaneously registered witness-generation backends.
+ * Must cover the construction backends (3 constructions * node-hash types)
+ * plus the standalone AES/CMAC/Grostl backends, with headroom for the
+ * append-only registry growth.
+ */
+#define VOLEITH_SHIPSHAPE_WITGEN_DISPATCH_CAPACITY 128
+
+/*
  * Backend function type.  Fill the internal witness bytes for one Tier 2a
  * region.
  *

@@ -10,6 +10,7 @@ cmake_minimum_required(VERSION 3.16)
 set(EXAMPLE_NAMES
     example_aes
     example_aes_gf8
+    example_aes_norm_gf8
     example_aes_cmac
     example_aes_cmac_gf8
     example_kdf
@@ -18,6 +19,7 @@ set(EXAMPLE_NAMES
     example_merkle_gf8
     example_merkle_grostl_gf8
     example_merkle_hirose_gf8
+    example_membership_vt_norm_gf8
     example_grostl_fixed_merkle
     example_hirose_gf8
     example_hirose_leaf_gf8
@@ -45,6 +47,12 @@ set(EXAMPLE_NAMES
     example_rlnc_gf16_private_vector
     example_rlnc_confidential
     example_bristol_aes128
+    example_threading_aes_gf8
+    example_threading_membership_vt_gf8
+    example_threading_verify_aes_gf8
+    example_threading_verify_membership_vt_gf8
+    example_threading_rlnc_gf16
+    example_bench_release
     example_shipshape_parse_prove
     example_shipshape_anon_membership
     example_shipshape_kvac
